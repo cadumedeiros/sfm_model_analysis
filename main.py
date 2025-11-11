@@ -1,16 +1,30 @@
 # main.py
 
 import visualize
+import pyvista as pv
 
-from analysis import compute_global_metrics, compute_directional_percolation, plot_cluster_histogram
+from analysis import (compute_global_metrics, 
+                      compute_directional_percolation, 
+                      plot_cluster_histogram, 
+                      print_facies_metrics, 
+                      export_facies_metrics_to_excel, 
+                      add_local_thickness_of_facies, 
+                      make_thickness_2d_from_grid,
+                      add_local_thickness_of_facies_all_clusters
+)
 from derived_fields import ensure_reservoir
 from local_windows import compute_local_ntg
+from visualize import show_thickness_2d
 
 def main():
     
-    RESERVOIR_FACIES = {13}
+    RESERVOIR_FACIES = {23}
     
-    MODE = "reservoir"  # "facies", "reservoir", "clusters", "largest", "ntg_local"
+    MODE = "thickness_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
+
+    # Se MODE = "thickness_local"
+    THICKNESS_MODE = "largest"  # "all_clusters" ou "largest"
+
     Z_EXAG = 15.0
     SHOW_SCALAR_BAR = True
     
@@ -39,8 +53,21 @@ def main():
 
     metrics = compute_global_metrics(RESERVOIR_FACIES)
 
+    # print_facies_metrics()
+    # export_facies_metrics_to_excel()
+
+    if MODE == "thickness_local":
+        if THICKNESS_MODE == "all_clusters":
+            add_local_thickness_of_facies_all_clusters(RESERVOIR_FACIES)
+        else:
+            add_local_thickness_of_facies(RESERVOIR_FACIES)
+    
+        surf = make_thickness_2d_from_grid("thickness_local", "thickness_2d")
+        show_thickness_2d(surf, "thickness_2d")
+
     visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)
     # plot_cluster_histogram(RESERVOIR_FACIES, bins=30)
+    
 
 if __name__ == "__main__":
     main()

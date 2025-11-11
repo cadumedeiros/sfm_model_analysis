@@ -154,6 +154,35 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             plotter.remove_scalar_bar()
             
+        elif mode == "thickness_local":
+            bg = mesh.threshold(0.5, invert=True, scalars="thickness_local")
+            main = mesh.threshold(0.5, scalars="thickness_local")
+
+            # fundo cinza transparente
+            if bg.n_cells > 0:
+                bg_actor = plotter.add_mesh(
+                    bg,
+                    color=(0.8, 0.8, 0.8),
+                    opacity=0.01,
+                    show_edges=False,
+                    name="bg",
+                    reset_camera=False,
+                )
+            else:
+                bg_actor = None
+
+            # reservatório sólido
+            main_actor = plotter.add_mesh(
+                main,
+                cmap="plasma",
+                show_edges=True,
+                name="main",
+                reset_camera=False,
+                scalar_bar_args={"title": "Thickness local"},
+            )
+
+            state["bg_actor"] = bg_actor
+            state["main_actor"] = main_actor
 
 
         elif mode == "reservoir":
@@ -165,7 +194,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 bg_actor = plotter.add_mesh(
                     bg,
                     color=(0.8, 0.8, 0.8),
-                    opacity=0.05,
+                    opacity=0.02,
                     show_edges=False,
                     name="bg",
                     reset_camera=False,
@@ -195,7 +224,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 bg_actor = plotter.add_mesh(
                     bg,
                     color=(0.8, 0.8, 0.8),
-                    opacity=0.05,
+                    opacity=0.02,
                     show_edges=False,
                     name="bg",
                     reset_camera=False,
@@ -205,7 +234,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             main_actor = plotter.add_mesh(
                 main,
-                color=(1.0, 0.0, 0.0),
+                color="orange",
                 opacity=1.0,
                 show_edges=True,
                 name="main",
@@ -300,6 +329,30 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             clipped = attach_cell_data_from_original(clipped, grid_base)
             state["main_actor"].mapper.SetInputData(clipped)
             state["main_actor"].mapper.Update()
+            return
+        
+        if mode == "thickness_local":
+            # 1) pega só o reservatório do modelo inteiro
+            res_only = grid_base.threshold(0.5, scalars="thickness_local")
+
+            # 2) corta só o reservatório
+            res_clipped = res_only.clip_box(box, invert=False, crinkle=True)
+
+            # 3) fundo = modelo inteiro cortado (pra ver a caixa atravessando)
+            bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
+            bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
+
+            # 4) atualiza actors existentes
+            if state["bg_actor"] is not None:
+                # precisa tirar o reservatório do fundo
+                bg_no_res = bg_clipped.threshold(0.5, invert=True, scalars="thickness_local")
+                state["bg_actor"].mapper.SetInputData(bg_no_res)
+                state["bg_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(res_clipped)
+                state["main_actor"].mapper.Update()
+
             return
 
         if mode == "reservoir":
@@ -417,3 +470,36 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
     plotter.add_axes()
     plotter.show()
+
+
+def show_thickness_2d(surf, scalar_name="thickness_2d"):
+    # troca valores negativos por NaN pra ficarem brancos
+    arr = surf.cell_data[scalar_name]
+    arr = np.where(arr < 0, np.nan, arr)
+    surf.cell_data[scalar_name] = arr
+
+    p = pv.Plotter()
+
+    p.add_mesh(
+        surf,
+        scalars=scalar_name,
+        cmap="plasma",
+        show_edges=True,
+        edge_color="black",
+        line_width=0.5,
+        lighting=False,
+        nan_color="white",
+        interpolate_before_map=False,  # não suaviza
+        preference="cell",             # <<< usa cell_data na sua versão
+    )
+
+    p.remove_scalar_bar()
+
+    p.set_background("white")
+    p.remove_bounds_axes()
+    p.view_xy()
+    p.enable_parallel_projection()
+    p.enable_terrain_style()
+    p.add_scalar_bar(title="Thickness")
+
+    p.show()
