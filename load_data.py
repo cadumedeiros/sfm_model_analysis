@@ -3,7 +3,7 @@ import pyvista as pv
 import numpy as np
 import config as cfg
 
-grdecl_path = "morrochaves_grid.grdecl"
+grdecl_path = "assets/grid_mchaves.grdecl"
 
 grid = pv.read_grdecl(grdecl_path)
 
@@ -52,6 +52,10 @@ nx, ny, nz = read_specgrid(grdecl_path)
 
 n_cells = grid.n_cells
 assert len(facies) == grid.n_cells
+
+facies_3d = facies.reshape((nx, ny, nz), order="F")   # (x, y, z) no empacotamento Eclipse
+facies_3d = facies_3d[:, :, ::-1]                     # inverte só o eixo z
+facies = facies_3d.reshape(-1, order="F")             # volta pra 1D
 
 grid.cell_data["Facies"] = facies
 

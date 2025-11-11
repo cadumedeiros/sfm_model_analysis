@@ -1,11 +1,62 @@
 # visualize_all.py
 import numpy as np
 import pyvista as pv
+import os
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 from load_data import grid, facies, nx, ny, nz
 from config import load_facies_colors
 
 FACIES_COLORS = load_facies_colors()
+
+def add_facies_legend(plotter, position=(0.87, 0.30)):
+    # carrega do seu config
+    raw_colors = load_facies_colors()
+
+    # normaliza só se precisar
+    facies_colors = {}
+    for fac, (r, g, b, a) in raw_colors.items():
+        if r > 1 or g > 1 or b > 1:  # veio 0–255
+            facies_colors[fac] = (r/255, g/255, b/255)
+        else:  # já veio 0–1
+            facies_colors[fac] = (r, g, b)
+
+    # monta figura da legenda
+    n = len(facies_colors)
+    fig_height = max(2, n * 0.28)
+    fig, ax = plt.subplots(figsize=(2.4, fig_height))
+    ax.axis("off")
+    ax.set_facecolor((1, 1, 1, 0.0))
+
+    ax.text(0.0, n * 0.32, "FÁCIES", fontsize=10, fontweight="bold", color="black")
+
+    for i, (fac, color) in enumerate(sorted(facies_colors.items())):
+        y = i * 0.3
+        ax.add_patch(
+            Rectangle((0, y), 0.35, 0.25, facecolor=color, edgecolor="black")
+        )
+        ax.text(
+            0.42, y,
+            str(fac),
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+            color="black"
+        )
+
+    ax.set_xlim(0, 1.5)
+    ax.set_ylim(0, n * 0.32)
+    fig.tight_layout(pad=0.2)
+
+    tmpfile = "assets/_facies_legend.png"
+    fig.savefig(tmpfile, dpi=200, transparent=True)
+    plt.close(fig)
+
+    # põe no canto
+    legend = plotter.add_logo_widget(tmpfile, position=position, size=(0.25, 0.55),)
+    legend.SetProcessEvents(False)
+
 
 
 # ---------- 2. LUTs ----------
@@ -59,6 +110,10 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
     # ---------- 3. Grid base exagerado ----------
     grid_base = grid.copy()
+
+    x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
+
+    grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
     grid_base.points[:, 2] *= Z_EXAG
 
     plotter = pv.Plotter()
@@ -85,7 +140,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             actor = plotter.add_mesh(
                 mesh,
                 scalars="Facies",
-                show_edges=True,
+                show_edges=False,
                 name="main",
                 reset_camera=False,
             )
@@ -94,6 +149,10 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             state["bg_actor"] = None
             state["main_actor"] = actor
+
+            add_facies_legend(plotter)
+
+            plotter.remove_scalar_bar()
             
 
 
@@ -117,7 +176,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             # reservatório sólido
             main_actor = plotter.add_mesh(
                 main,
-                color=(1.0, 0.0, 0.0),
+                color="orange",
                 opacity=1.0,
                 show_edges=True,
                 name="main",
@@ -191,6 +250,8 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             # guarda ambos no state
             state["bg_actor"] = bg_actor
             state["main_actor"] = main_actor
+
+            plotter.remove_scalar_bar()
         
         elif MODE == "ntg_local":
             bg = mesh.threshold(0.5, invert=True, scalars="NTG_local")
@@ -311,7 +372,6 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 mapper.lookup_table = lut
                 mapper.scalar_range = rng
 
-                # 👇 estas 3 linhas são o que estava faltando
                 mapper.SetScalarModeToUseCellFieldData()
                 mapper.SelectColorArray("Clusters")
                 mapper.SetScalarVisibility(True)
@@ -337,6 +397,23 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
         rotation_enabled=False,
         interaction_event="always",
     )
+
+    logo = plotter.add_logo_widget("assets/forward_PNG.png", position=(0.02, 0.85), size=(0.12, 0.12))
+    logo.SetProcessEvents(False)
+    plotter.set_background("white", top="lightblue")
+
+    plotter.enable_anti_aliasing('ssaa')
+
+    box_widget.SetHandleSize(0.01)
+
+    rep = box_widget.GetHandleProperty()
+    rep.SetOpacity(0.1)
+
+    shp = box_widget.GetSelectedHandleProperty()
+    shp.SetOpacity(0.0)
+
+    op = box_widget.GetOutlineProperty()
+    op.SetOpacity(0.05)
 
     plotter.add_axes()
     plotter.show()

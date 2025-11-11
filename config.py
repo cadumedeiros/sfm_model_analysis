@@ -10,7 +10,7 @@ def load_facies_colors(path=None):
     """
     if path is None:
         # tenta achar o arquivo na mesma pasta deste .py
-        path = os.path.join(os.path.dirname(__file__), "color_reference_facies.txt")
+        path = os.path.join(os.path.dirname(__file__), "assets/color_reference_facies.txt")
 
     colors = {}
     with open(path, "r") as f:
