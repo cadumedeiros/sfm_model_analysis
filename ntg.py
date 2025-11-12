@@ -39,7 +39,7 @@ largest_mask_xyz = largest_mask_3d.transpose(2, 1, 0)  # volta pra (x, y, z)
 largest_mask_1d = largest_mask_xyz.reshape(-1, order="F")
 grid.cell_data["LargestCluster"] = largest_mask_1d.astype(np.uint8)
 
-# 👉 salva TODOS os rótulos no grid
+# salva TODOS os rótulos no grid
 # volta pro formato (x, y, z) e depois 1D
 clusters_xyz = labeled.transpose(2, 1, 0)
 clusters_1d = clusters_xyz.reshape(-1, order="F")

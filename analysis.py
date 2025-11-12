@@ -104,7 +104,7 @@ def plot_cluster_histogram(reservoir_facies, bins=30):
     plt.show()
 
 
-# --- NOVO: análise fácie a fácie com volume ---
+# --- análise fácie a fácie com volume ---
 
 def _get_cell_centers_z():
     # pega centros das células (x, y, z)
@@ -274,7 +274,7 @@ def export_facies_metrics_to_excel(output_path=None):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         alt_path = output_path.replace(".xlsx", f"_{ts}.xlsx")
         df.to_excel(alt_path, index=False, sheet_name="Facies Metrics")
-        print(f"\n⚠️ O arquivo original estava bloqueado. Salvei como: {alt_path}")
+        print(f"\nO arquivo original estava bloqueado. Salvei como: {alt_path}")
 
 def print_facies_metrics():
     facies_data = compute_facies_metrics()
@@ -297,7 +297,7 @@ def print_facies_metrics():
 
 def add_local_thickness_of_facies(facie_id: int, array_name="thickness_local"):
     """
-    Calcula a espessura por coluna (x,y) do MAIOR CLUSTER da fácies indicada,
+    Calcula a espessura por coluna (x,y) do maior cluster da fácies indicada,
     considerando blocos verticais separados. Se o bloco tiver só 1 célula,
     usa uma espessura mínima aproximada (altura média da camada) pra não dar 0.
     """
@@ -388,10 +388,10 @@ def add_local_thickness_of_facies(facie_id: int, array_name="thickness_local"):
     grid.cell_data[array_name] = thickness_per_cell
     grid.active_scalars_name = array_name
 
-    print(f"✅ Espessura local (com blocos verticais) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
+    print(f"Espessura local (com blocos verticais) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
 
 
-    import numpy as np
+import numpy as np
 from load_data import grid, facies, nx, ny, nz
 
 def make_thickness_2d_from_grid(array_name_3d="thickness_local", array_name_2d="thickness_2d"):
@@ -428,14 +428,13 @@ from load_data import grid, facies, nx, ny, nz
 def add_local_thickness_of_facies_all_clusters(facie_id, array_name="thickness_local"):
     """
     Calcula a espessura local (por coluna, com blocos verticais) para
-    TODOS os clusters da fácies indicada e grava diretamente em
-    grid.cell_data["thickness_local"] (ou no nome que você passar).
-    Assim o visualize.py continua funcionando igual.
+    todos os clusters da fácies indicada e grava diretamente em
+    grid.cell_data["thickness_local"]
     """
     # aceita {23}, [23], (23,) ou 23
     if isinstance(facie_id, (set, list, tuple)):
         if len(facie_id) != 1:
-            raise ValueError("Passe apenas UMA fácies por vez.")
+            raise ValueError("Passe apenas uma fácies por vez.")
         facie_id = list(facie_id)[0]
     facie_id = int(facie_id)
 
@@ -518,4 +517,4 @@ def add_local_thickness_of_facies_all_clusters(facie_id, array_name="thickness_l
     # salva COM O MESMO NOME de antes
     grid.cell_data[array_name] = thickness_per_cell
     grid.active_scalars_name = array_name
-    print(f"✅ Espessura local (todos os clusters) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
+    print(f"Espessura local (todos os clusters) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
