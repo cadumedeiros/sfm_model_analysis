@@ -20,10 +20,9 @@ from visualize import show_thickness_2d, set_thickness_scalar
 
 def main():
     
-    RESERVOIR_FACIES = {0}
-    FACIES_ANALISE = 23
+    RESERVOIR_FACIES = {231}
     
-    MODE = "reservoir"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
+    MODE = "thickness_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
 
     if MODE == "thickness_local":
@@ -58,54 +57,41 @@ def main():
     metrics = compute_global_metrics(RESERVOIR_FACIES)
 
     # print_facies_metrics()
-    export_facies_metrics_to_excel()
+    # export_facies_metrics_to_excel()
 
-    # if MODE == "thickness_local":
-    #     if THICKNESS_MODE == "all_clusters":
-    #         add_local_thickness_of_facies_all_clusters(RESERVOIR_FACIES)
-    #     else:
-    #         add_local_thickness_of_facies(RESERVOIR_FACIES)
-    
-    #     surf = make_thickness_2d_from_grid("thickness_local", "thickness_2d")
-    #     show_thickness_2d(surf, "thickness_2d")
-    
 # --------------------------------------------------------------------------
-    add_vertical_facies_metrics(FACIES_ANALISE)
-
-    
-    
-    # show_thickness_2d(surf_Ttot, scalar_name=f"{scalar}_2d")
-# --------------------------------------------------------------------------
+    RESERVOIR_FACIES = RESERVOIR_FACIES.pop()
+    add_vertical_facies_metrics(RESERVOIR_FACIES)
     
     if MODE == "thickness_local":
     
         # 1) ESPESSURA TOTAL
         if visualizar == "Espessura":
-            scalar = f"vert_Ttot_f{FACIES_ANALISE}"
+            scalar = f"vert_Ttot_f{RESERVOIR_FACIES}"
             surf_Ttot = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_Ttot_f{FACIES_ANALISE}",
-            array_name_2d=f"vert_Ttot_f{FACIES_ANALISE}_2d",
+            array_name_3d=f"vert_Ttot_f{RESERVOIR_FACIES}",
+            array_name_2d=f"vert_Ttot_f{RESERVOIR_FACIES}_2d",
         )
             show_thickness_2d(surf_Ttot, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"Espessura total fácies {FACIES_ANALISE} (m)")
+            set_thickness_scalar(scalar, title=f"Espessura total fácies {RESERVOIR_FACIES} (m)")
 
         elif visualizar == "NTG coluna":
-            scalar = f"vert_NTG_col_f{FACIES_ANALISE}"
+            scalar = f"vert_NTG_col_f{RESERVOIR_FACIES}"
             surf_NTG_col = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_NTG_col_f{FACIES_ANALISE}",
-            array_name_2d=f"vert_NTG_col_f{FACIES_ANALISE}_2d",
+            array_name_3d=f"vert_NTG_col_f{RESERVOIR_FACIES}",
+            array_name_2d=f"vert_NTG_col_f{RESERVOIR_FACIES}_2d",
         )
             show_thickness_2d(surf_NTG_col, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"NTG coluna fácies {FACIES_ANALISE}")   
+            set_thickness_scalar(scalar, title=f"NTG coluna fácies {RESERVOIR_FACIES}")   
 
         elif visualizar == "NTG envelope":
-            scalar = f"vert_NTG_env_f{FACIES_ANALISE}"
+            scalar = f"vert_NTG_env_f{RESERVOIR_FACIES}"
             surf_NTG_env = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_NTG_env_f{FACIES_ANALISE}",
-            array_name_2d=f"vert_NTG_env_f{FACIES_ANALISE}_2d",
+            array_name_3d=f"vert_NTG_env_f{RESERVOIR_FACIES}",
+            array_name_2d=f"vert_NTG_env_f{RESERVOIR_FACIES}_2d",
         )
             show_thickness_2d(surf_NTG_env, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"NTG envelope fácies {FACIES_ANALISE}")
+            set_thickness_scalar(scalar, title=f"NTG envelope fácies {RESERVOIR_FACIES}")
 
 
     visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)

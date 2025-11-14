@@ -123,7 +123,7 @@ def make_clusters_lut(clusters_array):
     return lut, (0, n_clusters - 1)
 
 
-def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
+def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
     global MODE, Z_EXAG, SHOW_SCALAR_BAR
     MODE = mode
     Z_EXAG = z_exag
@@ -210,9 +210,6 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             
         elif mode == "thickness_local":
             scalar_name = THICKNESS_SCALAR_NAME
-
-            # como nossas métricas são >0 só na fácies,
-            # basta threshold em > 0 para ver só reservatório
             thr = 1e-6
 
             mesh = apply_k_filter(mesh)
@@ -241,6 +238,12 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 reset_camera=False,
                 scalar_bar_args={"title": THICKNESS_SCALAR_TITLE},
             )
+
+            # garante que está usando dados de CÉLULA desse campo
+            mapper = main_actor.mapper
+            mapper.SetScalarModeToUseCellFieldData()
+            mapper.SelectColorArray(scalar_name)
+            mapper.SetScalarVisibility(True)
 
             state["bg_actor"] = bg_actor
             state["main_actor"] = main_actor
@@ -341,8 +344,12 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             )
 
             lut, rng = make_clusters_lut(main.cell_data["Clusters"])
-            main_actor.mapper.lookup_table = lut
-            main_actor.mapper.scalar_range = rng
+            mapper = main_actor.mapper
+            mapper.lookup_table = lut
+            mapper.scalar_range = rng
+            mapper.SetScalarModeToUseCellFieldData()
+            mapper.SelectColorArray("Clusters")
+            mapper.SetScalarVisibility(True)
             main_actor.prop.opacity = 1.0
 
 
@@ -356,8 +363,6 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             
             mesh = apply_k_filter(mesh)
 
-            bg = mesh.threshold(0.5, invert=True, scalars="NTG_local")
-            main = mesh.threshold(0.5, scalars="NTG_local")
 
             main_actor = plotter.add_mesh(
                 mesh,
@@ -384,7 +389,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 plotter.remove_scalar_bar()
 
 
-        # ---------- 5b. controle de camada: subir/descer k_min ----------
+    # ---------- 5b. controle de camada: subir/descer k_min ----------
     def change_k(delta):
         kmin = state.get("k_min", 0)
         new = int(np.clip(kmin + delta, 0, N_LAYERS - 1))
@@ -394,28 +399,101 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
         state["k_min"] = new
         print(f"[visualize] k_min = {new} (0 = topo)")
 
-        # --- REGERA o mesh baseado no grid_base ---
-        # (SEM CLEAR do plot, apenas atualiza os atores)
-
-        # 1. Pega o dataset ORIGINAL (grid_base)
+        # 1. Começa sempre do grid_base
         base = grid_base
 
-        # 2. Se houver caixa ativa, aplicamos o corte novamente
+        # 2. Se tiver caixa ativa, aplica o clip primeiro
         if state.get("box_widget"):
             box = state["box_widget"].GetBounds()
             base = grid_base.clip_box(box, invert=False, crinkle=True)
             base = attach_cell_data_from_original(base, grid_base)
 
-        # 3. Agora aplicar o filtro k_min
-        filtered = apply_k_filter(base)
+        # 3. Aplica o filtro de camada
+        mesh = apply_k_filter(base)
+        mode = state["mode"]
 
-        # 4. Atualizar apenas o main_actor (o fundo é opcional)
-        actor = state.get("main_actor")
-        if actor is not None:
-            actor.mapper.SetInputData(filtered)
-            actor.mapper.Update()
+        # 4. Atualiza conforme o modo --------------------------
+
+        if mode == "facies":
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(mesh)
+                state["main_actor"].mapper.Update()
+
+        elif mode == "thickness_local":
+            scalar_name = THICKNESS_SCALAR_NAME
+            thr = 1e-6
+
+            bg = mesh.threshold(thr, invert=True, scalars=scalar_name)
+            main = mesh.threshold(thr, scalars=scalar_name)
+
+            if state["bg_actor"] is not None:
+                state["bg_actor"].mapper.SetInputData(bg)
+                state["bg_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                actor = state["main_actor"]
+                mapper = actor.mapper
+                mapper.SetInputData(main)
+                mapper.SetScalarModeToUseCellFieldData()
+                mapper.SelectColorArray(scalar_name)
+                mapper.SetScalarVisibility(True)
+                mapper.Update()
+
+        elif mode == "reservoir":
+            bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
+            main = mesh.threshold(0.5, scalars="Reservoir")
+
+            if state["bg_actor"] is not None:
+                state["bg_actor"].mapper.SetInputData(bg)
+                state["bg_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(main)
+                state["main_actor"].mapper.Update()
+
+        elif mode == "largest":
+            bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")
+            main = mesh.threshold(0.5, scalars="LargestCluster")
+
+            if state["bg_actor"] is not None:
+                state["bg_actor"].mapper.SetInputData(bg)
+                state["bg_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(main)
+                state["main_actor"].mapper.Update()
+
+        elif mode == "clusters":
+            bg = mesh.threshold(0.5, invert=True, scalars="Clusters")
+            main = mesh.threshold(0.5, scalars="Clusters")
+
+            if state["bg_actor"] is not None:
+                state["bg_actor"].mapper.SetInputData(bg)
+                state["bg_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                actor = state["main_actor"]
+                mapper = actor.mapper
+                mapper.SetInputData(main)
+
+                # reconstroi LUT com os clusters presentes
+                lut, rng = make_clusters_lut(main.cell_data["Clusters"])
+                mapper.lookup_table = lut
+                mapper.scalar_range = rng
+
+                mapper.SetScalarModeToUseCellFieldData()
+                mapper.SelectColorArray("Clusters")
+                mapper.SetScalarVisibility(True)
+                mapper.Update()
+
+        elif mode == "ntg_local":
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(mesh)
+                state["main_actor"].mapper.Update()
 
         plotter.render()
+
+
 
 
 
@@ -445,47 +523,51 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             return
         
         if mode == "thickness_local":
-            # 1) pega só o reservatório do modelo inteiro
-            res_only = grid_base.threshold(0.5, scalars="thickness_local")
+            scalar_name = THICKNESS_SCALAR_NAME
+            thr = 1e-6
+
+            # 1) pega só o reservatório (células com espessura > 0)
+            res_only = grid_base.threshold(thr, scalars=scalar_name)
 
             # 2) corta só o reservatório
             res_clipped = res_only.clip_box(box, invert=False, crinkle=True)
-            res_clipped = apply_k_filter(clipped)
+            res_clipped = attach_cell_data_from_original(res_clipped, grid_base)
+            res_clipped = apply_k_filter(res_clipped)
 
-            # 3) fundo = modelo inteiro cortado (pra ver a caixa atravessando)
+            # 3) fundo = modelo inteiro cortado
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
-            bg_clipped = apply_k_filter(clipped)
+            bg_clipped = apply_k_filter(bg_clipped)
 
-            # 4) atualiza actors existentes
+            # 4) atualiza actors
             if state["bg_actor"] is not None:
-                # precisa tirar o reservatório do fundo
-                bg_no_res = bg_clipped.threshold(0.5, invert=True, scalars="thickness_local")
+                bg_no_res = bg_clipped.threshold(thr, invert=True, scalars=scalar_name)
                 state["bg_actor"].mapper.SetInputData(bg_no_res)
                 state["bg_actor"].mapper.Update()
 
             if state["main_actor"] is not None:
-                state["main_actor"].mapper.SetInputData(res_clipped)
-                state["main_actor"].mapper.Update()
+                actor = state["main_actor"]
+                mapper = actor.mapper
+                mapper.SetInputData(res_clipped)
+                mapper.SetScalarModeToUseCellFieldData()
+                mapper.SelectColorArray(scalar_name)
+                mapper.SetScalarVisibility(True)
+                mapper.Update()
 
             return
 
         if mode == "reservoir":
-            # 1) pega só o reservatório do modelo inteiro
             res_only = grid_base.threshold(0.5, scalars="Reservoir")
 
-            # 2) corta só o reservatório
             res_clipped = res_only.clip_box(box, invert=False, crinkle=True)
-            res_clipped = apply_k_filter(clipped)
+            res_clipped = attach_cell_data_from_original(res_clipped, grid_base)
+            res_clipped = apply_k_filter(res_clipped)
 
-            # 3) fundo = modelo inteiro cortado (pra ver a caixa atravessando)
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
-            bg_clipped = apply_k_filter(clipped)
+            bg_clipped = apply_k_filter(bg_clipped)
 
-            # 4) atualiza actors existentes
             if state["bg_actor"] is not None:
-                # precisa tirar o reservatório do fundo
                 bg_no_res = bg_clipped.threshold(0.5, invert=True, scalars="Reservoir")
                 state["bg_actor"].mapper.SetInputData(bg_no_res)
                 state["bg_actor"].mapper.Update()
@@ -496,15 +578,15 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             return
 
-
         elif mode == "largest":
             largest_only = grid_base.threshold(0.5, scalars="LargestCluster")
             largest_clipped = largest_only.clip_box(box, invert=False, crinkle=True)
-            largest_clipped = apply_k_filter(clipped)
+            largest_clipped = attach_cell_data_from_original(largest_clipped, grid_base)
+            largest_clipped = apply_k_filter(largest_clipped)
 
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
-            bg_clipped = apply_k_filter(clipped)
+            bg_clipped = apply_k_filter(bg_clipped)
 
             if state["bg_actor"] is not None:
                 bg_no_largest = bg_clipped.threshold(0.5, invert=True, scalars="LargestCluster")
@@ -517,31 +599,26 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             return
 
-
         elif mode == "clusters":
             clusters_only = grid_base.threshold(0.5, scalars="Clusters")
             clusters_clipped = clusters_only.clip_box(box, invert=False, crinkle=True)
-            clusters_clipped = apply_k_filter(clipped)
+            clusters_clipped = attach_cell_data_from_original(clusters_clipped, grid_base)
+            clusters_clipped = apply_k_filter(clusters_clipped)
 
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
-            bg_clipped = apply_k_filter(clipped)
+            bg_clipped = apply_k_filter(bg_clipped)
 
-            # atualiza fundo
             if state["bg_actor"] is not None:
                 bg_no_clusters = bg_clipped.threshold(0.5, invert=True, scalars="Clusters")
                 state["bg_actor"].mapper.SetInputData(bg_no_clusters)
                 state["bg_actor"].mapper.Update()
 
-            # atualiza o main
             if state["main_actor"] is not None:
                 actor = state["main_actor"]
                 mapper = actor.mapper
-
                 mapper.SetInputData(clusters_clipped)
-                mapper.Update()
 
-                # aplica LUT de novo
                 lut, rng = make_clusters_lut(clusters_clipped.cell_data["Clusters"])
                 mapper.lookup_table = lut
                 mapper.scalar_range = rng
@@ -549,11 +626,12 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 mapper.SetScalarModeToUseCellFieldData()
                 mapper.SelectColorArray("Clusters")
                 mapper.SetScalarVisibility(True)
+                mapper.Update()
 
                 actor.prop.opacity = 1.0
-            
+
             return
-        
+
         elif mode == "ntg_local":
             clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             if clipped.n_cells == 0:
@@ -561,9 +639,13 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             clipped = attach_cell_data_from_original(clipped, grid_base)
             clipped = apply_k_filter(clipped)
-            state["main_actor"].mapper.SetInputData(clipped)
-            state["main_actor"].mapper.Update()
+
+            if state["main_actor"] is not None:
+                state["main_actor"].mapper.SetInputData(clipped)
+                state["main_actor"].mapper.Update()
+
             return
+
 
 
     box_widget = plotter.add_box_widget(
