@@ -10,20 +10,28 @@ from analysis import (compute_global_metrics,
                       export_facies_metrics_to_excel, 
                       add_local_thickness_of_facies, 
                       make_thickness_2d_from_grid,
-                      add_local_thickness_of_facies_all_clusters
+                      add_local_thickness_of_facies_all_clusters,
+                      add_vertical_thickness_basic,
+                      add_vertical_facies_metrics,
 )
 from derived_fields import ensure_reservoir
 from local_windows import compute_local_ntg
-from visualize import show_thickness_2d
+from visualize import show_thickness_2d, set_thickness_scalar
 
 def main():
     
     RESERVOIR_FACIES = {23}
+    FACIES_ANALISE = 23
     
     MODE = "thickness_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
-    # Se MODE = "thickness_local"
-    THICKNESS_MODE = "largest"  # "all_clusters" ou "largest"
+
+    if MODE == "thickness_local":
+        visualizar = "NTG envelope" # "Espessura", "NTG coluna", "NTG envelope"
+
+     # escolhe o scalar a usar no mode="thickness_local"
+    scalar_3d = f"vert_NTG_col_f{FACIES_ANALISE}"        # ou "vert_Ttot_f..." ou "vert_NTG_env_f..."
+    title = f"NTG col fácies {FACIES_ANALISE}"
 
     Z_EXAG = 15.0
     SHOW_SCALAR_BAR = True
@@ -49,21 +57,60 @@ def main():
     print("==============================")
 
     res_mask = ensure_reservoir(RESERVOIR_FACIES)
-    compute_local_ntg(res_mask, window=(3, 3, 3)) # (5, 5, 3)
+    compute_local_ntg(res_mask, window=(1, 1, 5)) # (5, 5, 3)
 
     metrics = compute_global_metrics(RESERVOIR_FACIES)
 
     # print_facies_metrics()
     # export_facies_metrics_to_excel()
 
-    if MODE == "thickness_local":
-        if THICKNESS_MODE == "all_clusters":
-            add_local_thickness_of_facies_all_clusters(RESERVOIR_FACIES)
-        else:
-            add_local_thickness_of_facies(RESERVOIR_FACIES)
+    # if MODE == "thickness_local":
+    #     if THICKNESS_MODE == "all_clusters":
+    #         add_local_thickness_of_facies_all_clusters(RESERVOIR_FACIES)
+    #     else:
+    #         add_local_thickness_of_facies(RESERVOIR_FACIES)
     
-        surf = make_thickness_2d_from_grid("thickness_local", "thickness_2d")
-        show_thickness_2d(surf, "thickness_2d")
+    #     surf = make_thickness_2d_from_grid("thickness_local", "thickness_2d")
+    #     show_thickness_2d(surf, "thickness_2d")
+    
+# --------------------------------------------------------------------------
+    add_vertical_facies_metrics(FACIES_ANALISE)
+
+    
+    
+    # show_thickness_2d(surf_Ttot, scalar_name=f"{scalar}_2d")
+# --------------------------------------------------------------------------
+    
+    if MODE == "thickness_local":
+    
+        # 1) ESPESSURA TOTAL
+        if visualizar == "Espessura":
+            scalar = f"vert_Ttot_f{FACIES_ANALISE}"
+            surf_Ttot = make_thickness_2d_from_grid(
+            array_name_3d=f"vert_Ttot_f{FACIES_ANALISE}",
+            array_name_2d=f"vert_Ttot_f{FACIES_ANALISE}_2d",
+        )
+            show_thickness_2d(surf_Ttot, scalar_name=f"{scalar}_2d")
+            set_thickness_scalar(scalar, title=f"Espessura total fácies {FACIES_ANALISE} (m)")
+
+        elif visualizar == "NTG coluna":
+            scalar = f"vert_NTG_col_f{FACIES_ANALISE}"
+            surf_NTG_col = make_thickness_2d_from_grid(
+            array_name_3d=f"vert_NTG_col_f{FACIES_ANALISE}",
+            array_name_2d=f"vert_NTG_col_f{FACIES_ANALISE}_2d",
+        )
+            show_thickness_2d(surf_NTG_col, scalar_name=f"{scalar}_2d")
+            set_thickness_scalar(scalar, title=f"NTG coluna fácies {FACIES_ANALISE}")   
+
+        elif visualizar == "NTG envelope":
+            scalar = f"vert_NTG_env_f{FACIES_ANALISE}"
+            surf_NTG_env = make_thickness_2d_from_grid(
+            array_name_3d=f"vert_NTG_env_f{FACIES_ANALISE}",
+            array_name_2d=f"vert_NTG_env_f{FACIES_ANALISE}_2d",
+        )
+            show_thickness_2d(surf_NTG_env, scalar_name=f"{scalar}_2d")
+            set_thickness_scalar(scalar, title=f"NTG envelope fácies {FACIES_ANALISE}")
+
 
     visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)
     # plot_cluster_histogram(RESERVOIR_FACIES, bins=30)

@@ -10,6 +10,14 @@ from config import load_facies_colors
 
 FACIES_COLORS = load_facies_colors()
 
+THICKNESS_SCALAR_NAME = "thickness_local"  # padrão
+THICKNESS_SCALAR_TITLE = "Thickness local"
+
+def set_thickness_scalar(name, title=None):
+    global THICKNESS_SCALAR_NAME, THICKNESS_SCALAR_TITLE
+    THICKNESS_SCALAR_NAME = name
+    THICKNESS_SCALAR_TITLE = title or name
+
 def add_facies_legend(plotter, position=(0.87, 0.30)):
     # carrega do seu config
     raw_colors = load_facies_colors()
@@ -155,10 +163,15 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             plotter.remove_scalar_bar()
             
         elif mode == "thickness_local":
-            bg = mesh.threshold(0.5, invert=True, scalars="thickness_local")
-            main = mesh.threshold(0.5, scalars="thickness_local")
+            scalar_name = THICKNESS_SCALAR_NAME
 
-            # fundo cinza transparente
+            # como nossas métricas são >0 só na fácies,
+            # basta threshold em > 0 para ver só reservatório
+            thr = 1e-6
+
+            bg = mesh.threshold(thr, invert=True, scalars=scalar_name)
+            main = mesh.threshold(thr, scalars=scalar_name)
+
             if bg.n_cells > 0:
                 bg_actor = plotter.add_mesh(
                     bg,
@@ -171,14 +184,14 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             else:
                 bg_actor = None
 
-            # reservatório sólido
             main_actor = plotter.add_mesh(
                 main,
+                scalars=scalar_name,
                 cmap="plasma",
                 show_edges=True,
                 name="main",
                 reset_camera=False,
-                scalar_bar_args={"title": "Thickness local"},
+                scalar_bar_args={"title": THICKNESS_SCALAR_TITLE},
             )
 
             state["bg_actor"] = bg_actor

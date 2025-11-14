@@ -518,3 +518,179 @@ def add_local_thickness_of_facies_all_clusters(facie_id, array_name="thickness_l
     grid.cell_data[array_name] = thickness_per_cell
     grid.active_scalars_name = array_name
     print(f"Espessura local (todos os clusters) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
+
+
+def add_vertical_thickness_basic(facie_id, prefix="vert_"):
+    """
+    Para UMA fácies, calcula por coluna (x,y):
+
+      - T_f_tot(x,y): espessura total da fácies na coluna
+      - NTG_f(x,y)  : T_f_tot / T_col (NTG vertical da fácies)
+
+    e grava dois arrays 3D em grid.cell_data:
+
+      prefix + f"Ttot_f{facie_id}"
+      prefix + f"NTG_f{facie_id}"
+
+    Cada coluna (x,y) recebe o mesmo valor em todas as células em z.
+    """
+    import numpy as np
+    from load_data import grid, facies, nx, ny, nz  # usa o que você já tem
+
+    # aceita {21}, [21], (21,) ou 21
+    if isinstance(facie_id, (set, list, tuple)):
+        if len(facie_id) != 1:
+            raise ValueError("Passe apenas UMA fácies por vez.")
+        facie_id = list(facie_id)[0]
+    facie_id = int(facie_id)
+
+    # facies em 3D
+    facies_xyz = facies.reshape((nx, ny, nz), order="F")
+
+    # z dos centros em 3D
+    z_centers = grid.cell_centers().points[:, 2]
+    z_xyz = z_centers.reshape((nx, ny, nz), order="F")
+
+    # espessura mínima aproximada de uma camada (mesmo esquema das outras funções)
+    dz_default = (grid.bounds[5] - grid.bounds[4]) / nz
+
+    # arrays 3D de saída (mesmo valor repetido em z para cada coluna)
+    Ttot_3d = np.zeros((nx, ny, nz), dtype=float)
+    NTG_3d  = np.zeros((nx, ny, nz), dtype=float)
+
+    for ix in range(nx):
+        for iy in range(ny):
+            z_col = z_xyz[ix, iy, :]
+            # espessura total da coluna (topo-base)
+            if z_col.size == 0:
+                continue
+            T_col = float(z_col.max() - z_col.min())
+            if T_col <= 0:
+                continue
+
+            # células dessa fácies na coluna
+            fac_mask_col = (facies_xyz[ix, iy, :] == facie_id)
+            if not fac_mask_col.any():
+                # não tem essa fácies na coluna → NTG = 0, Ttot = 0 (já está)
+                continue
+
+            z_idx = np.where(fac_mask_col)[0]  # índices em z onde tem a fácies
+
+            # separa em blocos contíguos em z (igual você já faz)
+            blocks = []
+            current = [z_idx[0]]
+            for prev, cur in zip(z_idx, z_idx[1:]):
+                if cur == prev + 1:
+                    current.append(cur)
+                else:
+                    blocks.append(current)
+                    current = [cur]
+            blocks.append(current)
+
+            # soma espessura de todos os blocos
+            T_tot = 0.0
+            for block in blocks:
+                block_z = z_col[block]
+                if block_z.size == 1:
+                    dz = dz_default
+                else:
+                    dz = float(block_z.max() - block_z.min())
+                T_tot += dz
+
+            # NTG vertical da fácies nessa coluna
+            ntg_col = T_tot / T_col if T_col > 0 else 0.0
+
+            # grava o mesmo valor em todas as células da coluna (x,y,:)
+            Ttot_3d[ix, iy, :] = T_tot
+            NTG_3d[ix,  iy, :] = ntg_col
+
+    # achata em 1D e salva no grid
+    name_Ttot = prefix + f"Ttot_f{facie_id}"
+    name_NTG  = prefix + f"NTG_f{facie_id}"
+
+    grid.cell_data[name_Ttot] = Ttot_3d.reshape(-1, order="F")
+    grid.cell_data[name_NTG]  = NTG_3d.reshape(-1,  order="F")
+
+    grid.active_scalars_name = name_Ttot
+
+    print(f"Espessura total por coluna da fácies {facie_id} salva em grid.cell_data['{name_Ttot}']")
+    print(f"NTG vertical por coluna da fácies {facie_id} salvo em grid.cell_data['{name_NTG}']")
+
+
+import numpy as np
+from load_data import grid, facies, nx, ny, nz
+
+def add_vertical_facies_metrics(facie_id, prefix="vert_"):
+    """
+      - T_tot   = espessura total da fácies (m)
+      - T_env   = espessura do envelope da fácies (m)
+      - NTG_col = T_tot / T_col_total   (coluna inteira)
+      - NTG_env = T_tot / T_env         (só dentro do envelope)
+    """
+
+    if isinstance(facie_id, (set, list, tuple)):
+        facie_id = list(facie_id)[0]
+    facie_id = int(facie_id)
+
+    facies_xyz = facies.reshape((nx, ny, nz), order="F")
+
+    # geometria vertical média
+    z_min, z_max = grid.bounds[4], grid.bounds[5]
+    dz_mean = (z_max - z_min) / nz
+    T_col_total = (z_max - z_min)
+
+    # arrays 3D de saída (tudo começa em zero)
+    Ttot_3d   = np.zeros((nx, ny, nz), dtype=float)
+    Tenv_3d   = np.zeros((nx, ny, nz), dtype=float)
+    NTGcol_3d = np.zeros((nx, ny, nz), dtype=float)
+    NTGenv_3d = np.zeros((nx, ny, nz), dtype=float)
+
+    for ix in range(nx):
+        for iy in range(ny):
+            col = facies_xyz[ix, iy, :]
+            mask = (col == facie_id)
+            if not mask.any():
+                continue
+
+            z_idx = np.where(mask)[0]
+            n_tot = z_idx.size
+            n_env = int(z_idx[-1] - z_idx[0] + 1)
+
+            # em número de células
+            Ttot_cells = n_tot
+            Tenv_cells = n_env
+
+            # converte pra metros
+            T_tot = Ttot_cells * dz_mean
+            T_env = Tenv_cells * dz_mean
+
+            NTG_col = T_tot / T_col_total if T_col_total > 0 else 0.0
+            NTG_env = T_tot / T_env if T_env > 0 else 0.0
+
+            # garante intervalo [0,1]
+            NTG_col = max(0.0, min(1.0, NTG_col))
+            NTG_env = max(0.0, min(1.0, NTG_env))
+
+            # grava o MESMO valor em TODAS as células da fácies nessa coluna,
+            # e 0 nas demais (já estão 0)
+            Ttot_3d[ix, iy, mask]   = T_tot
+            Tenv_3d[ix, iy, mask]   = T_env
+            NTGcol_3d[ix, iy, mask] = NTG_col
+            NTGenv_3d[ix, iy, mask] = NTG_env
+
+    name_Ttot   = prefix + f"Ttot_f{facie_id}"
+    name_Tenv   = prefix + f"Tenv_f{facie_id}"
+    name_NTGcol = prefix + f"NTG_col_f{facie_id}"
+    name_NTGenv = prefix + f"NTG_env_f{facie_id}"
+
+    grid.cell_data[name_Ttot]   = Ttot_3d.reshape(-1, order="F")
+    grid.cell_data[name_Tenv]   = Tenv_3d.reshape(-1, order="F")
+    grid.cell_data[name_NTGcol] = NTGcol_3d.reshape(-1, order="F")
+    grid.cell_data[name_NTGenv] = NTGenv_3d.reshape(-1, order="F")
+
+    print("Métricas verticais calculadas para fácies", facie_id)
+    print("  →", name_Ttot)
+    print("  →", name_Tenv)
+    print("  →", name_NTGcol)
+    print("  →", name_NTGenv)
+
