@@ -10,6 +10,19 @@ from config import load_facies_colors
 
 FACIES_COLORS = load_facies_colors()
 
+# ---------------------------------------------------------
+# Índice de camada (k) por célula, contado do topo à base
+# ---------------------------------------------------------
+
+k3d = np.zeros((nx, ny, nz), dtype=int)
+for k in range(nz):
+    # 0 = topo, nz-1 = base
+    k3d[:, :, k] = nz - 1 - k   # <<< NOVO
+
+k_index_flat = k3d.reshape(-1, order="F")
+grid.cell_data["k_index"] = k_index_flat
+N_LAYERS = nz
+
 THICKNESS_SCALAR_NAME = "thickness_local"  # padrão
 THICKNESS_SCALAR_TITLE = "Thickness local"
 
@@ -126,7 +139,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
     plotter = pv.Plotter()
 
-    state = {"bg_actor": None, "main_actor": None, "mode": MODE}
+    state = {"bg_actor": None, "main_actor": None, "mode": MODE, "k_min": 0,}
 
 
     # ---------- 4. cola arrays no recorte ----------
@@ -137,11 +150,44 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
         for name, arr in original.cell_data.items():
             clipped.cell_data[name] = arr[orig_ids]
         return clipped
+    
+    
+    # ---------- 4b. filtro por camada k_min ----------
+    def apply_k_filter(mesh):
+        """
+        Mantém apenas células com k_index >= state['k_min'].
+        Funciona tanto no grid original quanto em recortes (clip/threshold),
+        usando vtkOriginalCellIds quando disponível.
+        """
+        kmin = state.get("k_min", 0)
+        if kmin <= 0:
+            return mesh  # nada a filtrar
+
+        # tenta pegar k_index diretamente
+        if "k_index" in mesh.cell_data:
+            k_arr = mesh.cell_data["k_index"]
+        elif "vtkOriginalCellIds" in mesh.cell_data and "k_index" in grid_base.cell_data:
+            orig_ids = mesh.cell_data["vtkOriginalCellIds"]
+            k_arr = grid_base.cell_data["k_index"][orig_ids]
+        else:
+            # não sabe como mapear -> não filtra
+            return mesh
+
+        idx = np.where(k_arr >= kmin)[0]
+        if idx.size == 0:
+            # devolve um mesh vazio compatível
+            return mesh.extract_cells([])
+
+        return mesh.extract_cells(idx)
+
 
 
     # ---------- 5. desenha ----------
     def show_mesh(mesh):
         mode = state["mode"]
+        
+        # aplica o filtro por camada antes de qualquer outra coisa
+        mesh = apply_k_filter(mesh)
 
         if mode == "facies":
             lut, rng = make_facies_lut()
@@ -168,6 +214,8 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             # como nossas métricas são >0 só na fácies,
             # basta threshold em > 0 para ver só reservatório
             thr = 1e-6
+
+            mesh = apply_k_filter(mesh)
 
             bg = mesh.threshold(thr, invert=True, scalars=scalar_name)
             main = mesh.threshold(thr, scalars=scalar_name)
@@ -199,6 +247,9 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
 
         elif mode == "reservoir":
+
+            mesh = apply_k_filter(mesh)
+
             bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
             main = mesh.threshold(0.5, scalars="Reservoir")
 
@@ -229,6 +280,9 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             state["main_actor"] = main_actor
 
         elif mode == "largest":
+
+            mesh = apply_k_filter(mesh)
+
             bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")
             main = mesh.threshold(0.5, scalars="LargestCluster")
 
@@ -258,6 +312,9 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             state["main_actor"] = main_actor
 
         elif mode == "clusters":
+
+            mesh = apply_k_filter(mesh)
+
             bg = mesh.threshold(0.5, invert=True, scalars="Clusters")
             main = mesh.threshold(0.5, scalars="Clusters")
 
@@ -296,6 +353,9 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
             plotter.remove_scalar_bar()
         
         elif MODE == "ntg_local":
+            
+            mesh = apply_k_filter(mesh)
+
             bg = mesh.threshold(0.5, invert=True, scalars="NTG_local")
             main = mesh.threshold(0.5, scalars="NTG_local")
 
@@ -324,9 +384,48 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 plotter.remove_scalar_bar()
 
 
+        # ---------- 5b. controle de camada: subir/descer k_min ----------
+    def change_k(delta):
+        kmin = state.get("k_min", 0)
+        new = int(np.clip(kmin + delta, 0, N_LAYERS - 1))
+        if new == kmin:
+            return
+
+        state["k_min"] = new
+        print(f"[visualize] k_min = {new} (0 = topo)")
+
+        # --- REGERA o mesh baseado no grid_base ---
+        # (SEM CLEAR do plot, apenas atualiza os atores)
+
+        # 1. Pega o dataset ORIGINAL (grid_base)
+        base = grid_base
+
+        # 2. Se houver caixa ativa, aplicamos o corte novamente
+        if state.get("box_widget"):
+            box = state["box_widget"].GetBounds()
+            base = grid_base.clip_box(box, invert=False, crinkle=True)
+            base = attach_cell_data_from_original(base, grid_base)
+
+        # 3. Agora aplicar o filtro k_min
+        filtered = apply_k_filter(base)
+
+        # 4. Atualizar apenas o main_actor (o fundo é opcional)
+        actor = state.get("main_actor")
+        if actor is not None:
+            actor.mapper.SetInputData(filtered)
+            actor.mapper.Update()
+
+        plotter.render()
+
+
+
 
     # primeiro draw
     show_mesh(grid_base)
+
+     # atalhos: seta para cima/baixo controlam o índice de camada
+    plotter.add_key_event("z",   lambda: change_k(-1))  # sobe (mostra mais topo)
+    plotter.add_key_event("x", lambda: change_k(+1))  # desce (mostra mais base)
 
 
     # ---------- 6. callback do corte (suave) ----------
@@ -340,6 +439,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 return
 
             clipped = attach_cell_data_from_original(clipped, grid_base)
+            clipped = apply_k_filter(clipped)
             state["main_actor"].mapper.SetInputData(clipped)
             state["main_actor"].mapper.Update()
             return
@@ -350,10 +450,12 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             # 2) corta só o reservatório
             res_clipped = res_only.clip_box(box, invert=False, crinkle=True)
+            res_clipped = apply_k_filter(clipped)
 
             # 3) fundo = modelo inteiro cortado (pra ver a caixa atravessando)
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
+            bg_clipped = apply_k_filter(clipped)
 
             # 4) atualiza actors existentes
             if state["bg_actor"] is not None:
@@ -374,10 +476,12 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
 
             # 2) corta só o reservatório
             res_clipped = res_only.clip_box(box, invert=False, crinkle=True)
+            res_clipped = apply_k_filter(clipped)
 
             # 3) fundo = modelo inteiro cortado (pra ver a caixa atravessando)
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
+            bg_clipped = apply_k_filter(clipped)
 
             # 4) atualiza actors existentes
             if state["bg_actor"] is not None:
@@ -396,9 +500,11 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
         elif mode == "largest":
             largest_only = grid_base.threshold(0.5, scalars="LargestCluster")
             largest_clipped = largest_only.clip_box(box, invert=False, crinkle=True)
+            largest_clipped = apply_k_filter(clipped)
 
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
+            bg_clipped = apply_k_filter(clipped)
 
             if state["bg_actor"] is not None:
                 bg_no_largest = bg_clipped.threshold(0.5, invert=True, scalars="LargestCluster")
@@ -415,9 +521,11 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
         elif mode == "clusters":
             clusters_only = grid_base.threshold(0.5, scalars="Clusters")
             clusters_clipped = clusters_only.clip_box(box, invert=False, crinkle=True)
+            clusters_clipped = apply_k_filter(clipped)
 
             bg_clipped = grid_base.clip_box(box, invert=False, crinkle=True)
             bg_clipped = attach_cell_data_from_original(bg_clipped, grid_base)
+            bg_clipped = apply_k_filter(clipped)
 
             # atualiza fundo
             if state["bg_actor"] is not None:
@@ -452,6 +560,7 @@ def run(mode="reservoir", z_exag=15.0, show_scalar_bar=False):
                 return
 
             clipped = attach_cell_data_from_original(clipped, grid_base)
+            clipped = apply_k_filter(clipped)
             state["main_actor"].mapper.SetInputData(clipped)
             state["main_actor"].mapper.Update()
             return

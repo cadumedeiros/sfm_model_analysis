@@ -3,7 +3,7 @@ import pyvista as pv
 import numpy as np
 import config as cfg
 
-grdecl_path = "assets/grid_mchaves.grdecl"
+grdecl_path = "assets/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
 
 grid = pv.read_grdecl(grdecl_path)
 
@@ -25,7 +25,9 @@ def read_keyword_array(path, keyword="Facies"):
                 else:
                     if line_strip:
                         vals.extend(line_strip.split())
-    return np.array(list(map(int, vals)))
+    
+    vals_int = [int(float(v)) for v in vals]
+    return np.array(vals_int, dtype=int)
 
 def read_specgrid(path):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -48,6 +50,7 @@ def read_specgrid(path):
     raise RuntimeError("SPECGRID não encontrado no GRDECL")
 
 facies = read_keyword_array(grdecl_path, "Facies")
+# facies = np.array([int(float(f)) for f in facies], dtype=int)
 nx, ny, nz = read_specgrid(grdecl_path)
 
 n_cells = grid.n_cells

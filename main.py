@@ -20,18 +20,14 @@ from visualize import show_thickness_2d, set_thickness_scalar
 
 def main():
     
-    RESERVOIR_FACIES = {23}
+    RESERVOIR_FACIES = {0}
     FACIES_ANALISE = 23
     
-    MODE = "thickness_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
+    MODE = "reservoir"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
 
     if MODE == "thickness_local":
         visualizar = "NTG envelope" # "Espessura", "NTG coluna", "NTG envelope"
-
-     # escolhe o scalar a usar no mode="thickness_local"
-    scalar_3d = f"vert_NTG_col_f{FACIES_ANALISE}"        # ou "vert_Ttot_f..." ou "vert_NTG_env_f..."
-    title = f"NTG col fácies {FACIES_ANALISE}"
 
     Z_EXAG = 15.0
     SHOW_SCALAR_BAR = True
@@ -62,7 +58,7 @@ def main():
     metrics = compute_global_metrics(RESERVOIR_FACIES)
 
     # print_facies_metrics()
-    # export_facies_metrics_to_excel()
+    export_facies_metrics_to_excel()
 
     # if MODE == "thickness_local":
     #     if THICKNESS_MODE == "all_clusters":
