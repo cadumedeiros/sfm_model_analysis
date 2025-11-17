@@ -22,7 +22,7 @@ def main():
     
     RESERVOIR_FACIES = {231}
     
-    MODE = "facies"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
+    MODE = "ntg_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
 
     if MODE == "thickness_local":

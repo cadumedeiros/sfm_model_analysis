@@ -31,6 +31,38 @@ def set_thickness_scalar(name, title=None):
     THICKNESS_SCALAR_NAME = name
     THICKNESS_SCALAR_TITLE = title or name
 
+def show_thickness_2d(surf, scalar_name="thickness_2d"):
+    # troca valores negativos por NaN pra ficarem brancos
+    arr = surf.cell_data[scalar_name]
+    arr = np.where(arr < 0, np.nan, arr)
+    surf.cell_data[scalar_name] = arr
+
+    p = pv.Plotter()
+
+    p.add_mesh(
+        surf,
+        scalars=scalar_name,
+        cmap="plasma",
+        show_edges=True,
+        edge_color="black",
+        line_width=0.5,
+        lighting=False,
+        nan_color="white",
+        interpolate_before_map=False,  # não suaviza
+        preference="cell",             # <<< usa cell_data na sua versão
+    )
+
+    p.remove_scalar_bar()
+
+    p.set_background("white")
+    p.remove_bounds_axes()
+    p.view_xy()
+    p.enable_parallel_projection()
+    p.enable_terrain_style()
+    p.add_scalar_bar(title="Thickness")
+
+    p.show()
+
 def add_facies_legend(plotter, position=(0.87, 0.30)):
     # carrega do seu config
     raw_colors = load_facies_colors()
@@ -144,6 +176,7 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
              "mode": MODE, 
              "k_min": 0,
              "box_bounds": grid_base.bounds,
+             "facies_legend_actor": None,
              }
 
     # Para o modo "clusters", pré-calcula a LUT
@@ -245,8 +278,6 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
         mapper.SetScalarVisibility(True)
         mapper.Update()
 
-
-
     # ---------- 5. desenha ----------
     def show_mesh(mesh):
         mode = state["mode"]
@@ -263,7 +294,7 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
             actor.mapper.scalar_range = rng
             state["bg_actor"] = None
             state["main_actor"] = actor
-            add_facies_legend(plotter)
+            state["facies_legend_actor"] = add_facies_legend(plotter)
             plotter.remove_scalar_bar()
             
         elif mode == "thickness_local":
@@ -355,7 +386,7 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
             state["main_actor"] = main_actor
             plotter.remove_scalar_bar()
         
-        elif MODE == "ntg_local":
+        elif mode == "ntg_local":
             main_actor = plotter.add_mesh(
                 mesh, scalars="NTG_local", cmap="plasma", clim=[0.0, 1.0],
                 show_edges=True, name="main", reset_camera=False,
@@ -379,7 +410,6 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
             return
 
         state["k_min"] = new
-        print(f"[visualize] k_min = {new} (0 = topo)")
 
         # 1. Começa sempre do grid_base
         base = grid_base
@@ -452,14 +482,14 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
         if mode == "facies":
             if state["main_actor"]: _update_facies_mapper(state["main_actor"], mesh)
         
-        if mode == "thickness_local":
+        elif mode == "thickness_local":
             thr = 1e-6
             bg = mesh.threshold(thr, invert=True, scalars=THICKNESS_SCALAR_NAME)
             main = mesh.threshold(thr, scalars=THICKNESS_SCALAR_NAME)
             if state["bg_actor"]: _update_simple_mapper(state["bg_actor"], bg)
             if state["main_actor"]: _update_thickness_mapper(state["main_actor"], main)
 
-        if mode == "reservoir":
+        elif mode == "reservoir":
             bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
             main = mesh.threshold(0.5, scalars="Reservoir")
             if state["bg_actor"]: _update_simple_mapper(state["bg_actor"], bg)
@@ -507,37 +537,7 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False):
 
     plotter.add_axes()
     change_k(0)
+
     plotter.show()
 
 
-def show_thickness_2d(surf, scalar_name="thickness_2d"):
-    # troca valores negativos por NaN pra ficarem brancos
-    arr = surf.cell_data[scalar_name]
-    arr = np.where(arr < 0, np.nan, arr)
-    surf.cell_data[scalar_name] = arr
-
-    p = pv.Plotter()
-
-    p.add_mesh(
-        surf,
-        scalars=scalar_name,
-        cmap="plasma",
-        show_edges=True,
-        edge_color="black",
-        line_width=0.5,
-        lighting=False,
-        nan_color="white",
-        interpolate_before_map=False,  # não suaviza
-        preference="cell",             # <<< usa cell_data na sua versão
-    )
-
-    p.remove_scalar_bar()
-
-    p.set_background("white")
-    p.remove_bounds_axes()
-    p.view_xy()
-    p.enable_parallel_projection()
-    p.enable_terrain_style()
-    p.add_scalar_bar(title="Thickness")
-
-    p.show()
