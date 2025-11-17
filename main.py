@@ -2,6 +2,7 @@
 
 import visualize
 import pyvista as pv
+import pandas as pd
 
 from analysis import (compute_global_metrics, 
                       compute_directional_percolation, 
@@ -18,15 +19,19 @@ from derived_fields import ensure_reservoir
 from local_windows import compute_local_ntg
 from visualize import show_thickness_2d, set_thickness_scalar
 
+from ui.window import MainWindow
+import sys
+from PyQt5 import QtWidgets
+
 def main():
     
-    RESERVOIR_FACIES = {231}
+    RESERVOIR_FACIES = {23}
     
-    MODE = "ntg_local"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
+    MODE = "facies"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
 
     if MODE == "thickness_local":
-        visualizar = "NTG envelope" # "Espessura", "NTG coluna", "NTG envelope"
+        visualizar = "Espessura" # "Espessura", "NTG coluna", "NTG envelope"
 
     Z_EXAG = 15.0
     SHOW_SCALAR_BAR = True
@@ -54,14 +59,16 @@ def main():
     res_mask = ensure_reservoir(RESERVOIR_FACIES)
     compute_local_ntg(res_mask, window=(1, 1, 5)) # (5, 5, 3)
 
-    metrics = compute_global_metrics(RESERVOIR_FACIES)
-
     # print_facies_metrics()
-    # export_facies_metrics_to_excel()
+    export_facies_metrics_to_excel()
+    facies_df = pd.read_excel("results/facies_metrics.xlsx")
 
 # --------------------------------------------------------------------------
     RESERVOIR_FACIES = RESERVOIR_FACIES.pop()
     add_vertical_facies_metrics(RESERVOIR_FACIES)
+
+    scalar = f"vert_Ttot_f{RESERVOIR_FACIES}"
+    set_thickness_scalar(scalar, title=f"Espessura total fácies {RESERVOIR_FACIES} (m)")
     
     if MODE == "thickness_local":
     
@@ -94,8 +101,27 @@ def main():
             set_thickness_scalar(scalar, title=f"NTG envelope fácies {RESERVOIR_FACIES}")
 
 
-    visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)
+    # visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)
     # plot_cluster_histogram(RESERVOIR_FACIES, bins=30)
+
+    # 1) Cria a aplicação Qt
+    app = QtWidgets.QApplication(sys.argv)
+
+    # 2) Cria a janela principal
+    win = MainWindow(
+        mode=MODE,
+        z_exag=Z_EXAG,
+        show_scalar_bar=SHOW_SCALAR_BAR,
+        reservoir_facies=RESERVOIR_FACIES,
+    )
+
+    win.set_metrics(metrics, perc)
+    win.set_facies_metrics(facies_df)
+
+    win.show()
+
+    # 3) Inicia o loop de eventos
+    sys.exit(app.exec_())
     
 
 if __name__ == "__main__":
