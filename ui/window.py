@@ -1,20 +1,32 @@
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtGui import QColor, QBrush
 from pyvistaqt import BackgroundPlotter
-import pyvista as pv
 from PyQt5.QtGui import QPixmap
 import numpy as np
           
 from visualize import run
 from load_data import facies
 from config import load_facies_colors
+from analysis import compute_global_metrics, compute_directional_percolation
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
         self.setWindowTitle("Suite de Análise e Visualização para Modelos SFM")
 
+        if isinstance(reservoir_facies, (int, np.integer)):
+            initial_reservoir = {int(reservoir_facies)}
+        else:
+            # já é iterável (lista, set, etc.)
+            initial_reservoir = {int(f) for f in reservoir_facies}
+
         self.resize(1100, 700)
+        self.setMinimumSize(800, 600)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
         # Layout base
         central = QtWidgets.QWidget()
@@ -25,9 +37,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel = QtWidgets.QWidget()
         panel_layout = QtWidgets.QVBoxLayout(self.panel)
 
+        self.panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Expanding
+        )
+
         logo_label = QtWidgets.QLabel()
         pix = QPixmap("assets/forward_PNG.png")   # caminho do seu logo
-        pix = pix.scaledToWidth(100, QtCore.Qt.SmoothTransformation)  # ajusta o tamanho
+        pix = pix.scaledToWidth(140, QtCore.Qt.SmoothTransformation)  # ajusta o tamanho
         logo_label.setPixmap(pix)
         logo_label.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -65,9 +82,37 @@ class MainWindow(QtWidgets.QMainWindow):
         sub_layout.addWidget(self.thick_combo)
         panel_layout.addWidget(sub_group)
 
-        legend_group = QtWidgets.QGroupBox("Legenda de Fácies")
-        legend_layout = QtWidgets.QVBoxLayout(legend_group)
+        # ---- Seleção de fácies reservatório ----
+        self.res_group = QtWidgets.QGroupBox("Fácies do Reservatório")
+        res_layout = QtWidgets.QVBoxLayout(self.res_group)
 
+        self.reservoir_list = QtWidgets.QListWidget()
+        self.reservoir_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+
+        self.reservoir_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        # preencher com fácies existentes no modelo
+        present = sorted(set(int(v) for v in np.unique(facies)))
+        for fac in present:
+            item = QtWidgets.QListWidgetItem(str(fac))
+            item.setCheckState(QtCore.Qt.Unchecked)
+            item.setData(QtCore.Qt.UserRole, fac)
+            self.reservoir_list.addItem(item)
+
+        self.reservoir_list.itemChanged.connect(self.change_reservoir_facies)
+
+        res_layout.addWidget(self.reservoir_list)
+        panel_layout.addWidget(self.res_group)
+
+        # --- grupo da legenda ---
+        self.legend_group = QtWidgets.QGroupBox("Legenda de Fácies")
+        self.legend_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Expanding
+        )
+        legend_layout = QtWidgets.QVBoxLayout(self.legend_group)
+
+        # tabela da legenda
         self.facies_legend_table = QtWidgets.QTableWidget()
         self.facies_legend_table.setColumnCount(2)
         self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "Fácies"])
@@ -76,33 +121,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.facies_legend_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.facies_legend_table.setShowGrid(False)
 
-        # deixa as colunas compactas
         header = self.facies_legend_table.horizontalHeader()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
 
-        self.facies_legend_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.facies_legend_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.facies_legend_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
-        legend_layout.addWidget(self.facies_legend_table)
+        # --- scroll só para a legenda ---
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
 
-        panel_layout.addWidget(legend_group)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
-        panel_layout.addStretch()
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
-        # # Plotter PyVista --------------------------------------------------
-        # self.plotter = BackgroundPlotter(show=False)
-        # layout.addWidget(self.panel, 0)
-        # layout.addWidget(self.plotter.interactor, 1)
+        # container interno do scroll
+        legend_container = QtWidgets.QWidget()
+        legend_container_layout = QtWidgets.QVBoxLayout(legend_container)
+        legend_container_layout.setContentsMargins(0, 0, 0, 0)
+        legend_container_layout.addWidget(self.facies_legend_table)
 
-        layout.addWidget(self.panel, 0)
+        scroll.setWidget(legend_container)
+
+        # adiciona scroll dentro do groupbox (e NUNCA no panel_layout!)
+        legend_layout.addWidget(scroll)
+
+        # adiciona o groupbox ao painel
+        panel_layout.addWidget(self.legend_group)
+
 
         # --------- plotter + abas à direita ----------
         self.plotter = BackgroundPlotter(show=False)
 
+        self.plotter.interactor.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
+
         # cria o QTabWidget
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
         # Aba 1: Visualização 3D
         self.viz_tab = QtWidgets.QWidget()
@@ -139,94 +206,177 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.metrics_tab, "Métricas Globais")
 
         # adiciona o conjunto de abas no lado direito
+        layout.addWidget(self.panel)
         layout.addWidget(self.tabs, 1)
 
         self.populate_facies_legend()
 
         # Carrega visualização inicial
         self.state = dict()
-        self.state["reservoir_facies"] = reservoir_facies
-        run(mode=mode, z_exag=z_exag, show_scalar_bar=show_scalar_bar, 
-            external_plotter=self.plotter, external_state=self.state)
+        self.state["reservoir_facies"] = initial_reservoir
+
+        run(
+            mode=mode,
+            z_exag=z_exag,
+            show_scalar_bar=show_scalar_bar,
+            external_plotter=self.plotter,
+            external_state=self.state,
+        )
+
+        for i in range(self.reservoir_list.count()):
+            fac = self.reservoir_list.item(i).data(QtCore.Qt.UserRole)
+            if fac in initial_reservoir:
+                self.reservoir_list.item(i).setCheckState(QtCore.Qt.Checked)
         
     
     def populate_facies_legend(self):
         colors_dict = load_facies_colors()
+
+        # facies presentes no modelo
         present = sorted(set(int(v) for v in np.unique(facies)))
 
+        # conta número de células por fácies
+        vals, counts = np.unique(facies.astype(int), return_counts=True)
+        count_dict = {int(v): int(c) for v, c in zip(vals, counts)}
+
+        # agora a tabela tem 3 colunas: Cor | Fácies | Células
+        self.facies_legend_table.clear()
         self.facies_legend_table.setRowCount(len(present))
+        self.facies_legend_table.setColumnCount(3)
+        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "Fácies", "Células"])
 
         for row, fac in enumerate(present):
             rgba = colors_dict.get(fac, (200, 200, 200, 255))
             r, g, b, a = rgba
+            # se vier em 0–1, converte pra 0–255
             if r <= 1 and g <= 1 and b <= 1:
                 r, g, b = int(r * 255), int(g * 255), int(b * 255)
 
+            # coluna 0: cor
             color_item = QtWidgets.QTableWidgetItem()
             color = QColor(r, g, b)
             color_item.setBackground(QBrush(color))
             color_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.facies_legend_table.setItem(row, 0, color_item)
 
+            # coluna 1: id da fácies
             text_item = QtWidgets.QTableWidgetItem(str(fac))
             text_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.facies_legend_table.setItem(row, 1, text_item)
 
-        self.facies_legend_table.resizeColumnsToContents()
-        self.facies_legend_table.setColumnWidth(0, 30)
+            # coluna 2: número de células da fácies
+            n_cells = count_dict.get(fac, 0)
+            cells_item = QtWidgets.QTableWidgetItem(str(n_cells))
+            cells_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            self.facies_legend_table.setItem(row, 2, cells_item)
 
-        # --- ajusta altura pra caber tudo sem scroll ---
-        header_h = self.facies_legend_table.horizontalHeader().height()
-        row_h = self.facies_legend_table.verticalHeader().defaultSectionSize()
-        n_rows = self.facies_legend_table.rowCount()
-        frame = 2 * self.facies_legend_table.frameWidth()
-
-        total_height = header_h + n_rows * row_h + frame + 4
-        self.facies_legend_table.setFixedHeight(total_height)
-
-        # --- ajusta largura pra caber só as duas colunas ---
+        # ajustar larguras das colunas
         self.facies_legend_table.resizeColumnsToContents()
         self.facies_legend_table.setColumnWidth(0, 26)
 
-        header_h = self.facies_legend_table.horizontalHeader().height()
-        row_h = self.facies_legend_table.verticalHeader().defaultSectionSize()
-        n_rows = self.facies_legend_table.rowCount()
+        # largura compacta
         frame = 2 * self.facies_legend_table.frameWidth()
-
-        # quantas linhas queremos mostrar sem scroll?
-        max_visible_rows = 14
-
-        if n_rows <= max_visible_rows:
-            # cabe tudo: sem scroll, altura exata
-            total_height = header_h + n_rows * row_h + frame + 4
-            self.facies_legend_table.setFixedHeight(total_height)
-            self.facies_legend_table.setVerticalScrollBarPolicy(
-                QtCore.Qt.ScrollBarAlwaysOff
-            )
-        else:
-            # muitas fácies: limita altura e ativa scroll
-            total_height = header_h + max_visible_rows * row_h + frame + 4
-            self.facies_legend_table.setFixedHeight(total_height)
-            self.facies_legend_table.setVerticalScrollBarPolicy(
-                QtCore.Qt.ScrollBarAsNeeded
-            )
-
-        # largura compacta (como já tínhamos)
         vh = self.facies_legend_table.verticalHeader().width()
         col_w = (
             self.facies_legend_table.columnWidth(0)
             + self.facies_legend_table.columnWidth(1)
+            + self.facies_legend_table.columnWidth(2)
+        )
+        padding = 16
+        total_width = col_w + vh + frame + 4 + padding
+        group_width = total_width + 16  # pequeno extra pros frames/margens
+
+        self.legend_group.setMaximumWidth(group_width)
+        if hasattr(self, "res_group"):
+            self.res_group.setMaximumWidth(group_width)
+        self.facies_legend_table.setFixedWidth(total_width)
+
+    def populate_clusters_legend(self):
+        """
+        Preenche a mesma tabela de legenda, mas com:
+        Cor | Cluster | Células
+        usando as infos pré-computadas em visualize.run
+        (state['clusters_lut'] e state['clusters_sizes']).
+        """
+        if not hasattr(self, "state"):
+            return
+
+        sizes_dict = self.state.get("clusters_sizes")
+        lut = self.state.get("clusters_lut")
+
+        if not sizes_dict or lut is None:
+            # se não tiver nada calculado ainda, limpa a tabela
+            self.facies_legend_table.clear()
+            self.facies_legend_table.setRowCount(0)
+            self.facies_legend_table.setColumnCount(0)
+            return
+
+        # ordena clusters do maior para o menor (igual ao visualize)
+        labels = sorted(sizes_dict.keys(), key=lambda k: sizes_dict[k], reverse=True)
+
+        self.facies_legend_table.clear()
+        self.facies_legend_table.setColumnCount(3)
+        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "Cluster", "Células"])
+        self.facies_legend_table.setRowCount(len(labels))
+
+        for row, lab in enumerate(labels):
+            # pega a cor do LUT (0–1)
+            r, g, b, a = lut.GetTableValue(int(lab))
+            if r <= 1 and g <= 1 and b <= 1:
+                r_i, g_i, b_i = int(r * 255), int(g * 255), int(b * 255)
+            else:
+                r_i, g_i, b_i = int(r), int(g), int(b)
+
+            # coluna 0: quadradinho de cor
+            color_item = QtWidgets.QTableWidgetItem()
+            color = QColor(r_i, g_i, b_i)
+            color_item.setBackground(QBrush(color))
+            color_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            self.facies_legend_table.setItem(row, 0, color_item)
+
+            # coluna 1: id do cluster
+            id_item = QtWidgets.QTableWidgetItem(str(lab))
+            id_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            self.facies_legend_table.setItem(row, 1, id_item)
+
+            # coluna 2: número de células
+            size_item = QtWidgets.QTableWidgetItem(str(sizes_dict[lab]))
+            size_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            self.facies_legend_table.setItem(row, 2, size_item)
+
+        # ajustar larguras das colunas
+        self.facies_legend_table.resizeColumnsToContents()
+        self.facies_legend_table.setColumnWidth(0, 26)
+
+        frame = 2 * self.facies_legend_table.frameWidth()
+        vh = self.facies_legend_table.verticalHeader().width()
+        col_w = (
+            self.facies_legend_table.columnWidth(0)
+            + self.facies_legend_table.columnWidth(1)
+            + self.facies_legend_table.columnWidth(2)
         )
         padding = 10
         total_width = col_w + vh + frame + 4 + padding
         self.facies_legend_table.setFixedWidth(total_width)
 
 
+
     # ----------------------------------------------------------------------
     def change_mode(self, new_mode):
         print("Modo:", new_mode)
         self.state["mode"] = new_mode
-        self.state["refresh"]()   # função que você já tem no visualize.py
+
+        # Atualiza o tipo de legenda no painel esquerdo
+        if new_mode == "clusters":
+            self.legend_group.setTitle("Legenda de Clusters")
+            self.populate_clusters_legend()
+            
+        else:
+            self.legend_group.setTitle("Legenda de Fácies")
+            self.populate_facies_legend()
+
+        # redesenha a visualização 3D
+        self.state["refresh"]()
 
 
     def change_thickness_mode(self, label):
@@ -254,8 +404,19 @@ class MainWindow(QtWidgets.QMainWindow):
             except TypeError:
                 return "[" + str(int(arr)) + "]"
 
+        # facies atualmente selecionadas (a partir do state)
+        selected = None
+        if hasattr(self, "state"):
+            selected = self.state.get("reservoir_facies")
+
+        if selected:
+            facies_str = ", ".join(str(int(f)) for f in sorted(selected))
+        else:
+            facies_str = "(nenhuma selecionada)"
+
         lines = []
         lines.append("=== Métricas Globais ===")
+        lines.append(f"Fácies de reservatório: {facies_str}")
         lines.append(f"NTG global           : {metrics['ntg']:.3f}")
         lines.append(f"Total de células     : {metrics['total_cells']}")
         lines.append(f"Células reservatório : {metrics['res_cells']}")
@@ -332,3 +493,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.facies_table.setItem(i, j, item)
 
         self.facies_table.resizeColumnsToContents()
+
+    def change_reservoir_facies(self, item):
+        selected = []
+        for i in range(self.reservoir_list.count()):
+            it = self.reservoir_list.item(i)
+            if it.checkState() == QtCore.Qt.Checked:
+                selected.append(it.data(QtCore.Qt.UserRole))
+
+        # atualiza o estado global
+        self.state["reservoir_facies"] = set(selected)
+
+        print("Reservatório atualizado:", self.state["reservoir_facies"])
+
+        # 1) recalcula arrays de reservatório/clusters no visualize.py
+        if "update_reservoir" in self.state:
+            self.state["update_reservoir"]()
+
+        # 2) recalcula métricas globais para as fácies selecionadas
+        if self.state["reservoir_facies"]:
+            metrics = compute_global_metrics(self.state["reservoir_facies"])
+            perc = compute_directional_percolation(self.state["reservoir_facies"])
+        else:
+            metrics = None
+            perc = None
+
+        self.set_metrics(metrics, perc)
+
+        # 3) se o modo atual for clusters, atualiza também a legenda de clusters
+        if self.state.get("mode") == "clusters":
+            self.legend_group.setTitle("Legenda de Clusters")
+            self.populate_clusters_legend()
+
+        # 4) redesenha o 3D com os arrays novos
+        if "refresh" in self.state:
+            self.state["refresh"]()
+            
+        # 3) Atualiza NTG_local e thickness_local no visualize
+        if "update_reservoir_fields" in self.state:
+            self.state["update_reservoir_fields"](selected)
+
+        # 4) Se estiver em NTG local ou Espessura local, redesenha o 3D
+        if self.state.get("mode") in ("ntg_local", "thickness_local"):
+            self.state["refresh"]()
+
