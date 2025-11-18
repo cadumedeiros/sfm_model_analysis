@@ -4,7 +4,7 @@ import pyvista as pv
 pv.global_theme.allow_empty_mesh = True
 import vtk
 
-from load_data import grid, facies, nx, ny, nz
+from load_data import facies, grid, nx, ny, nz
 from config import load_facies_colors
 from derived_fields import ensure_reservoir, ensure_clusters
 from local_windows import compute_local_ntg
@@ -176,7 +176,7 @@ def make_clusters_lut(clusters_arr):
 
 
 
-def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None, external_state=None):
+def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None, external_state=None, facies_array=None):
     if external_plotter is not None:
         plotter = external_plotter
     else:
@@ -192,23 +192,27 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
     Z_EXAG = z_exag
     SHOW_SCALAR_BAR = show_scalar_bar
 
+    # Escolhe qual array de fácies usar (base ou comparado)
+    from load_data import facies as facies_global
+    if facies_array is None:
+        facies_used = facies_global
+    else:
+        facies_used = facies_array
+
     # ---------- 3. Grid base exagerado ----------
     grid_base = grid.copy()
     x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
     grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
     grid_base.points[:, 2] *= Z_EXAG
 
-    # --------------------------------------------
+    # garante que o grid_base tenha o campo de fácies correto
+    if "Facies" in grid_base.cell_data:
+        grid_base.cell_data["Facies"] = facies_used.astype(
+            grid_base.cell_data["Facies"].dtype
+        )
+    else:
+        grid_base.cell_data["Facies"] = facies_used
 
-    # plotter = pv.Plotter()
-
-    # state = {"bg_actor": None, 
-    #          "main_actor": None, 
-    #          "mode": MODE, 
-    #          "k_min": 0,
-    #          "box_bounds": grid_base.bounds,
-    #          "facies_legend_actor": None,
-    #          }
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
@@ -216,6 +220,8 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
     state.setdefault("box_bounds", grid_base.bounds)
     state.setdefault("facies_legend_actor", None)
     state.setdefault("clusters_legend_actor", None)
+    state.setdefault("on_k_changed", None)
+    state.setdefault("on_box_changed", None)
 
     def init_thickness_presets():
         presets = {}
@@ -691,21 +697,25 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
 
     # ---------- 5b. controle de camada: subir/descer k_min ----------
     def change_k(delta):
-        kmin = state.get("k_min", 0)
-        new = int(np.clip(kmin + delta, 0, N_LAYERS - 1))
-        if new == kmin:
-            return
+        """Sobe/desce a camada mínima (k_min) e redesenha."""
+        k = int(state.get("k_min", 0))
+        k += int(delta)
+        if k < 0:
+            k = 0
+        # opcional: limitar a k_max se você já guarda isso no state
+        state["k_min"] = k
 
-        state["k_min"] = new
+        # redesenha só este viewer
+        if "refresh" in state:
+            state["refresh"]()
 
-        # 1. Começa sempre do grid_base
-        base = grid_base
-        box = state["box_bounds"]
-        base = grid_base.clip_box(box, invert=False, crinkle=True)
-        base = attach_cell_data_from_original(base, grid_base)
-        mesh = apply_k_filter(base)
-        
-        mode = state["mode"]
+        # avisa os outros visualizadores, se alguém tiver registrado callback
+        cb = state.get("on_k_changed")
+        if cb is not None:
+            try:
+                cb(k)
+            except Exception as e:
+                print(f"[visualize.run] on_k_changed callback falhou: {e}")
 
         # 4. Atualiza conforme o modo --------------------------
 
@@ -835,6 +845,14 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
                 mapper.SetScalarVisibility(True)
                 mapper.Update()
 
+        # callback global para sincronizar outros viewers
+        cb = state.get("on_box_changed")
+        if cb is not None:
+            try:
+                cb(box)
+            except Exception as e:
+                print(f"[visualize.run] on_box_changed callback falhou: {e}")
+
     # Box widget
     box_widget = plotter.add_box_widget(
         callback=box_callback,
@@ -884,6 +902,8 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
 
     plotter.reset_camera_clipping_range()
     plotter.render()
+
+    return plotter, state
 
 
     # plotter.show()
