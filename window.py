@@ -13,7 +13,7 @@ from analysis import compute_global_metrics, compute_directional_percolation
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
-        self.setWindowTitle("Suite de Análise e Visualização para Modelos SFM")
+        self.setWindowTitle("SFM View Analysis")
 
         if isinstance(reservoir_facies, (int, np.integer)):
             initial_reservoir = {int(reservoir_facies)}

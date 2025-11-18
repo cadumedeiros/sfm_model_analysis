@@ -11,13 +11,13 @@ from derived_fields import ensure_reservoir
 from local_windows import compute_local_ntg
 from visualize import show_thickness_2d, set_thickness_scalar
 
-from ui.window import MainWindow
+from window import MainWindow
 import sys
 from PyQt5 import QtWidgets
 
 def main():
     
-    RESERVOIR_FACIES = {0}
+    RESERVOIR_FACIES = {13}
     
     MODE = "facies"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
