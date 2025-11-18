@@ -4,7 +4,7 @@ from pyvistaqt import BackgroundPlotter
 from PyQt5.QtGui import QPixmap
 import numpy as np
           
-from visualize import run
+from visualize import run, update_2d_plot
 from load_data import facies
 from config import load_facies_colors
 from analysis import compute_global_metrics, compute_directional_percolation
@@ -74,7 +74,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- Submodos thickness_local ----
         self.thick_combo = QtWidgets.QComboBox()
-        self.thick_combo.addItems(["Espessura", "NTG coluna", "NTG envelope"])
+        self.thick_combo.addItems([
+            "Espessura",
+            "NTG coluna",
+            "NTG envelope",
+            "Maior pacote",
+            "Nº pacotes",
+            "ICV",
+            "Qv",
+            "Qv absoluto",
+        ])
         self.thick_combo.currentTextChanged.connect(self.change_thickness_mode)
 
         sub_group = QtWidgets.QGroupBox("Thickness Local")
@@ -164,6 +173,13 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Expanding
         )
 
+        # Plotter 2D para o mapa (aba "Mapa 2D")
+        self.plotter_2d = BackgroundPlotter(show=False)
+        self.plotter_2d.interactor.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
+
         # cria o QTabWidget
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setSizePolicy(
@@ -176,6 +192,13 @@ class MainWindow(QtWidgets.QMainWindow):
         viz_layout = QtWidgets.QVBoxLayout(self.viz_tab)
         viz_layout.addWidget(self.plotter.interactor)
         self.tabs.addTab(self.viz_tab, "Visualização 3D")
+
+        # Aba 2: Mapa 2D
+        self.map2d_tab = QtWidgets.QWidget()
+        map2d_layout = QtWidgets.QVBoxLayout(self.map2d_tab)
+        map2d_layout.addWidget(self.plotter_2d.interactor)
+        self.tabs.addTab(self.map2d_tab, "Mapa 2D")
+
 
 
         # Aba 2: Métricas
@@ -222,6 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
             external_plotter=self.plotter,
             external_state=self.state,
         )
+
+        self.update_2d_map()
 
         for i in range(self.reservoir_list.count()):
             fac = self.reservoir_list.item(i).data(QtCore.Qt.UserRole)
@@ -391,6 +416,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.state.get("mode") == "thickness_local":
             self.state["refresh"]()
 
+        if self.state.get("mode") in ("ntg_local", "thickness_local"):
+            self.state["refresh"]()
+
+        # Atualiza o mapa 2D com as novas métricas
+        self.update_2d_map()
+
     def set_metrics(self, metrics, perc):
         if metrics is None:
             self.metrics_text.setPlainText("Nenhuma análise calculada.")
@@ -536,4 +567,33 @@ class MainWindow(QtWidgets.QMainWindow):
         # 4) Se estiver em NTG local ou Espessura local, redesenha o 3D
         if self.state.get("mode") in ("ntg_local", "thickness_local"):
             self.state["refresh"]()
+
+        self.update_2d_map()
+
+    def update_2d_map(self):
+        """
+        Atualiza o plotter 2D com a métrica vertical selecionada
+        no combo "Thickness Local".
+        """
+        if not hasattr(self, "plotter_2d"):
+            return
+
+        presets = self.state.get("thickness_presets") or {}
+        mode_label = self.state.get("thickness_mode", "Espessura")
+
+        if mode_label not in presets:
+            # tenta cair para Espessura como fallback
+            if "Espessura" in presets:
+                mode_label = "Espessura"
+            else:
+                return
+
+        scalar_name, title = presets[mode_label]
+
+        try:
+            update_2d_plot(self.plotter_2d, scalar_name, title)
+        except Exception as e:
+            print("Erro ao atualizar mapa 2D:", e)
+
+
 

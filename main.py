@@ -23,7 +23,7 @@ def main():
 
 
     if MODE == "thickness_local":
-        visualizar = "Espessura" # "Espessura", "NTG coluna", "NTG envelope"
+        visualizar = "Espessura" # "Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv"
 
     Z_EXAG = 15.0
     SHOW_SCALAR_BAR = True
@@ -55,41 +55,51 @@ def main():
     facies_df = pd.read_excel("results/facies_metrics.xlsx")
 
 # --------------------------------------------------------------------------
-    RESERVOIR_FACIES = RESERVOIR_FACIES.pop()
     add_vertical_facies_metrics(RESERVOIR_FACIES)
 
-    scalar = f"vert_Ttot_f{RESERVOIR_FACIES}"
-    set_thickness_scalar(scalar, title=f"Espessura total fácies {RESERVOIR_FACIES} (m)")
-    
     if MODE == "thickness_local":
-    
-        # 1) ESPESSURA TOTAL
-        if visualizar == "Espessura":
-            scalar = f"vert_Ttot_f{RESERVOIR_FACIES}"
-            surf_Ttot = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_Ttot_f{RESERVOIR_FACIES}",
-            array_name_2d=f"vert_Ttot_f{RESERVOIR_FACIES}_2d",
-        )
-            show_thickness_2d(surf_Ttot, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"Espessura total fácies {RESERVOIR_FACIES} (m)")
+        scalar_map = {
+            "Espessura": (
+                "vert_Ttot_reservoir",
+                "Espessura total reservatório (m)",
+            ),
+            "NTG coluna": (
+                "vert_NTG_col_reservoir",
+                "NTG coluna (reservatório)",
+            ),
+            "NTG envelope": (
+                "vert_NTG_env_reservoir",
+                "NTG envelope (reservatório)",
+            ),
+            "Maior pacote": (
+                "vert_Tpack_max_reservoir",
+                "Maior pacote vertical (m)",
+            ),
+            "Nº pacotes": (
+                "vert_n_packages_reservoir",
+                "Número de pacotes verticais",
+            ),
+            "ICV": (
+                "vert_ICV_reservoir",
+                "Índice de continuidade vertical (ICV)",
+            ),
+            "Qv": (
+                "vert_Qv_reservoir",
+                "Índice combinado Qv",
+            ),
+        }
 
-        elif visualizar == "NTG coluna":
-            scalar = f"vert_NTG_col_f{RESERVOIR_FACIES}"
-            surf_NTG_col = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_NTG_col_f{RESERVOIR_FACIES}",
-            array_name_2d=f"vert_NTG_col_f{RESERVOIR_FACIES}_2d",
-        )
-            show_thickness_2d(surf_NTG_col, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"NTG coluna fácies {RESERVOIR_FACIES}")   
+        scalar_name, title = scalar_map[visualizar]
 
-        elif visualizar == "NTG envelope":
-            scalar = f"vert_NTG_env_f{RESERVOIR_FACIES}"
-            surf_NTG_env = make_thickness_2d_from_grid(
-            array_name_3d=f"vert_NTG_env_f{RESERVOIR_FACIES}",
-            array_name_2d=f"vert_NTG_env_f{RESERVOIR_FACIES}_2d",
+        # gera o mapa 2D (superfície estruturada) a partir do array 3D
+        surf = make_thickness_2d_from_grid(
+            array_name_3d=scalar_name,
+            array_name_2d=scalar_name + "_2d",
         )
-            show_thickness_2d(surf_NTG_env, scalar_name=f"{scalar}_2d")
-            set_thickness_scalar(scalar, title=f"NTG envelope fácies {RESERVOIR_FACIES}")
+        show_thickness_2d(surf, scalar_name=scalar_name + "_2d")
+
+        # define esse scalar como padrão pro modo "Espessura local" no 3D
+        set_thickness_scalar(scalar_name, title=title)
 
 
     # 1) Cria a aplicação Qt

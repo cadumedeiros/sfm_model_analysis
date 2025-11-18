@@ -8,7 +8,7 @@ from load_data import grid, facies, nx, ny, nz
 from config import load_facies_colors
 from derived_fields import ensure_reservoir, ensure_clusters
 from local_windows import compute_local_ntg
-from analysis import add_vertical_facies_metrics
+from analysis import add_vertical_facies_metrics, make_thickness_2d_from_grid
 
 FACIES_COLORS = load_facies_colors()
 
@@ -33,14 +33,13 @@ def set_thickness_scalar(name, title=None):
     THICKNESS_SCALAR_NAME = name
     THICKNESS_SCALAR_TITLE = title or name
 
-def show_thickness_2d(surf, scalar_name="thickness_2d"):
-    # troca valores negativos por NaN pra ficarem brancos
-    arr = surf.cell_data[scalar_name]
-    arr = np.where(arr < 0, np.nan, arr)
-    surf.cell_data[scalar_name] = arr
-
-    p = pv.Plotter()
-
+def show_thickness_2d(surf, scalar_name, title=None):
+    """
+    Plota o mapa 2D sem duplicar barra de cores.
+    """
+    p = pv.Plotter(window_size=(1000, 800))
+    
+    # REMOVE a barra automática: setamos scalar_bar_args=None
     p.add_mesh(
         surf,
         scalars=scalar_name,
@@ -48,24 +47,69 @@ def show_thickness_2d(surf, scalar_name="thickness_2d"):
         show_edges=True,
         edge_color="black",
         line_width=0.5,
-        lighting=False,
+        scalar_bar_args=None,       # <- isto impede criar a barra automática
         nan_color="white",
-        interpolate_before_map=False,  # não suaviza
-        preference="cell",             # <<< usa cell_data na sua versão
+        preference="cell",
     )
 
-    p.reset_camera_clipping_range()
-
-    p.remove_scalar_bar()
-
-    p.set_background("white")
-    p.remove_bounds_axes()
     p.view_xy()
     p.enable_parallel_projection()
-    p.enable_terrain_style()
-    p.add_scalar_bar(title="Thickness")
-
+    p.enable_image_style()
+    p.set_background("white")
+    p.add_scalar_bar(title=title if title else scalar_name)  # apenas UMA barra
     p.show()
+
+def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
+    """
+    Atualiza um plotter PyVista (QtInteractor/BackgroundPlotter) com o mapa 2D
+    da métrica vertical 'array_name_3d'.
+
+    - NÃO usa screenshot nem PNG.
+    - NÃO duplica barra de cores.
+    """
+    # Gera a superfície 2D (X, Y) a partir do array 3D
+    surf = make_thickness_2d_from_grid(
+        array_name_3d,
+        array_name_3d + "_2d",
+    )
+    scalar_name_2d = array_name_3d + "_2d"
+
+    # Valores negativos viram NaN (branco)
+    arr = surf.cell_data[scalar_name_2d]
+    arr = np.where(arr < 0, np.nan, arr)
+    surf.cell_data[scalar_name_2d] = arr
+
+    # Limpa o plotter 2D
+    plotter.clear()
+
+    # Desenha o mapa, SEM barra automática
+    plotter.add_mesh(
+        surf,
+        scalars=scalar_name_2d,
+        cmap="plasma",
+        show_edges=True,
+        edge_color="black",
+        line_width=0.5,
+        scalar_bar_args=None,  # impede barra automática
+        lighting=False,
+        nan_color="white",
+        interpolate_before_map=False,
+        preference="cell",
+    )
+
+    # Configura a câmera 2D
+    plotter.view_xy()
+    plotter.enable_parallel_projection()
+    plotter.enable_image_style()
+    plotter.set_background("white")
+    plotter.remove_bounds_axes()
+
+    # Uma única barra de cores, com o título correto
+    plotter.remove_scalar_bar()
+    plotter.add_scalar_bar(title=title)
+
+    plotter.reset_camera()
+
 
 
 def compute_cluster_sizes(clusters_array):
@@ -176,27 +220,57 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
     def init_thickness_presets():
         presets = {}
 
-        # procura arrays que já existem no grid_base
-        ttot_keys = [k for k in grid_base.cell_data.keys() if k.startswith("vert_Ttot_")]
-        col_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_col_")]
-        env_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_env_")]
+        if "vert_Ttot_reservoir" in grid_base.cell_data:
+            presets["Espessura"] = (
+                "vert_Ttot_reservoir",
+                "Espessura total reservatório (m)",
+            )
 
-        if ttot_keys:
-            name = ttot_keys[0]
-            fac  = name.split("f")[-1]
-            presets["Espessura"] = (name, f"Espessura total fácies {fac} (m)")
+        if "vert_NTG_col_reservoir" in grid_base.cell_data:
+            presets["NTG coluna"] = (
+                "vert_NTG_col_reservoir",
+                "NTG coluna (reservatório)",
+            )
 
-        if col_keys:
-            name = col_keys[0]
-            fac  = name.split("f")[-1]
-            presets["NTG coluna"] = (name, f"NTG coluna fácies {fac}")
+        if "vert_NTG_env_reservoir" in grid_base.cell_data:
+            presets["NTG envelope"] = (
+                "vert_NTG_env_reservoir",
+                "NTG envelope (reservatório)",
+            )
 
-        if env_keys:
-            name = env_keys[0]
-            fac  = name.split("f")[-1]
-            presets["NTG envelope"] = (name, f"NTG envelope fácies {fac}")
+        if "vert_Tpack_max_reservoir" in grid_base.cell_data:
+            presets["Maior pacote"] = (
+                "vert_Tpack_max_reservoir",
+                "Maior pacote vertical (m)",
+            )
+
+        if "vert_n_packages_reservoir" in grid_base.cell_data:
+            presets["Nº pacotes"] = (
+                "vert_n_packages_reservoir",
+                "Número de pacotes verticais",
+            )
+
+        if "vert_ICV_reservoir" in grid_base.cell_data:
+            presets["ICV"] = (
+                "vert_ICV_reservoir",
+                "Índice de continuidade vertical (ICV)",
+            )
+
+        if "vert_Qv_reservoir" in grid_base.cell_data:
+            presets["Qv"] = (
+                "vert_Qv_reservoir",
+                "Índice combinado Qv",
+            )
+
+        if "vert_Qv_abs_reservoir" in grid_base.cell_data:
+            presets["Qv absoluto"] = (
+                "vert_Qv_abs_reservoir",
+                "Índice de qualidade vertical absoluta (Qv_abs)",
+            )
 
         return presets
+
+
     
     def _sync_from_grid_to_grid_base(names):
         """Copia alguns arrays do grid original para o grid_base exagerado."""
@@ -236,9 +310,9 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
         # 4) Copia arrays importantes pro grid_base
         sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local"]
         for key in grid.cell_data.keys():
-            if key.startswith("vert_Ttot_") or key.startswith("vert_Tenv_") or \
-            key.startswith("vert_NTG_col_") or key.startswith("vert_NTG_env_"):
+            if key.startswith("vert_"):
                 sync_names.append(key)
+
 
         _sync_from_grid_to_grid_base(sync_names)
 

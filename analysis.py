@@ -286,23 +286,44 @@ def make_thickness_2d_from_grid(array_name_3d="thickness_local", array_name_2d="
 
 def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
     """
-    Calcula métricas verticais (T_tot, T_env, NTG_col, NTG_env) considerando
-    TODAS as fácies selecionadas como parte do reservatório.
-    facies_selected: int, list, set
-    """
+    Calcula métricas verticais coluna a coluna para o conjunto de fácies selecionadas.
 
+    Para cada coluna (i, j) calcula:
+      - T_tot: espessura total de reservatório na coluna
+      - T_env: espessura do envelope (entre topo e base do pacote total)
+      - NTG_col: T_tot / T_col_total  (T_col_total = espessura total da coluna)
+      - NTG_env: T_tot / T_env
+      - n_packages: número de pacotes verticais (intervalos consecutivos de reservatório)
+      - Tpack_max: espessura do maior pacote
+      - Tgap_sum: soma das espessuras de folhelho entre pacotes
+      - Tgap_max: maior espessura de folhelho entre pacotes
+      - ICV: índice de continuidade vertical = Tpack_max / T_env
+      - Qv: índice combinado simples = NTG_col * ICV
+      - Qv_abs: índice de qualidade vertical absoluta =
+                ICV * (Tpack_max / T_col_total)
+
+    Os valores são gravados em arrays 3D no grid, com nomes:
+      prefix + "Ttot_reservoir"
+      prefix + "Tenv_reservoir"
+      prefix + "NTG_col_reservoir"
+      prefix + "NTG_env_reservoir"
+      prefix + "n_packages_reservoir"
+      prefix + "Tpack_max_reservoir"
+      prefix + "Tgap_sum_reservoir"
+      prefix + "Tgap_max_reservoir"
+      prefix + "ICV_reservoir"
+      prefix + "Qv_reservoir"
+      prefix + "Qv_abs_reservoir"
+    """
     # normalizar entrada para conjunto de ints
     if isinstance(facies_selected, (int, np.integer)):
         facies_set = {int(facies_selected)}
     else:
         facies_set = {int(f) for f in facies_selected}
 
+    # reshapes 3D
     facies_xyz = facies.reshape((nx, ny, nz), order="F")
-
-    # geometria vertical média
-    z_min, z_max = grid.bounds[4], grid.bounds[5]
-    dz_mean = (z_max - z_min) / nz
-    T_col_total = (z_max - z_min)
+    z_xyz = grid.cell_centers().points[:, 2].reshape((nx, ny, nz), order="F")
 
     # arrays 3D de saída
     Ttot_3d   = np.zeros((nx, ny, nz), dtype=float)
@@ -310,51 +331,135 @@ def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
     NTGcol_3d = np.zeros((nx, ny, nz), dtype=float)
     NTGenv_3d = np.zeros((nx, ny, nz), dtype=float)
 
+    Npack_3d     = np.zeros((nx, ny, nz), dtype=float)
+    Tpackmax_3d  = np.zeros((nx, ny, nz), dtype=float)
+    Tgap_sum_3d  = np.zeros((nx, ny, nz), dtype=float)
+    Tgap_max_3d  = np.zeros((nx, ny, nz), dtype=float)
+    ICV_3d       = np.zeros((nx, ny, nz), dtype=float)
+    Qv_3d        = np.zeros((nx, ny, nz), dtype=float)
+    Qvabs_3d     = np.zeros((nx, ny, nz), dtype=float)
+
     for ix in range(nx):
         for iy in range(ny):
-            col = facies_xyz[ix, iy, :]
+            col_fac = facies_xyz[ix, iy, :]
+            col_z   = z_xyz[ix, iy, :]
+
+            # geometria da coluna inteira
+            z_col_min = float(np.nanmin(col_z))
+            z_col_max = float(np.nanmax(col_z))
+            T_col_total = abs(z_col_max - z_col_min)
+            if nz > 0:
+                dz_mean_col = T_col_total / nz
+            else:
+                dz_mean_col = 0.0
 
             # máscara combinada: todas as fácies selecionadas
-            mask = np.isin(col, list(facies_set))
-
-            if not mask.any():
+            mask = np.isin(col_fac, list(facies_set))
+            if not mask.any() or dz_mean_col == 0.0 or T_col_total == 0.0:
                 continue
 
-            z_idx = np.where(mask)[0]
-            n_tot = z_idx.size
-            n_env = int(z_idx[-1] - z_idx[0] + 1)
+            idx = np.where(mask)[0]
+            n_tot = idx.size
+            n_env = int(idx[-1] - idx[0] + 1)
 
-            # convertendo para espessuras em metros
-            T_tot = n_tot * dz_mean
-            T_env = n_env * dz_mean
+            # espessuras usando dz médio da coluna
+            T_tot = n_tot * dz_mean_col
+            T_env = n_env * dz_mean_col
 
             NTG_col = T_tot / T_col_total if T_col_total > 0 else 0.0
             NTG_env = T_tot / T_env if T_env > 0 else 0.0
 
+            # --- pacotes verticais (intervalos consecutivos de idx) ---
+            packages = []
+            start = idx[0]
+            prev = idx[0]
+            for k in idx[1:]:
+                if k == prev + 1:
+                    prev = k
+                else:
+                    packages.append((start, prev))
+                    start = prev = k
+            packages.append((start, prev))
+
+            n_packages = len(packages)
+            thickness_packs = []
+            for (k0, k1) in packages:
+                n_cells = int(k1 - k0 + 1)
+                thickness_packs.append(n_cells * dz_mean_col)
+            Tpack_max = max(thickness_packs) if thickness_packs else 0.0
+
+            # gaps de folhelho entre pacotes
+            gaps = []
+            if n_packages > 1:
+                for (s1, e1), (s2, e2) in zip(packages[:-1], packages[1:]):
+                    gap_cells = int(s2 - e1 - 1)
+                    if gap_cells > 0:
+                        gaps.append(gap_cells * dz_mean_col)
+            Tgap_sum = float(sum(gaps)) if gaps else 0.0
+            Tgap_max = max(gaps) if gaps else 0.0
+
+            # índices
+            ICV = Tpack_max / T_env if T_env > 0 else 0.0
+            ICV = max(0.0, min(1.0, ICV))
             NTG_col = max(0.0, min(1.0, NTG_col))
             NTG_env = max(0.0, min(1.0, NTG_env))
 
-            # grava os valores em TODAS as células da coluna pertencentes ao conjunto de fácies
+            Qv = NTG_col * ICV
+            frac_pack = Tpack_max / T_col_total if T_col_total > 0 else 0.0
+            Qv_abs = ICV * frac_pack
+
+            # grava valores nas células de reservatório da coluna
             Ttot_3d[ix, iy, mask]   = T_tot
             Tenv_3d[ix, iy, mask]   = T_env
             NTGcol_3d[ix, iy, mask] = NTG_col
             NTGenv_3d[ix, iy, mask] = NTG_env
 
-    # salva arrays — não usa mais id único na chave
+            Npack_3d[ix, iy, mask]    = float(n_packages)
+            Tpackmax_3d[ix, iy, mask] = Tpack_max
+            Tgap_sum_3d[ix, iy, mask] = Tgap_sum
+            Tgap_max_3d[ix, iy, mask] = Tgap_max
+            ICV_3d[ix, iy, mask]      = ICV
+            Qv_3d[ix, iy, mask]       = Qv
+            Qvabs_3d[ix, iy, mask]    = Qv_abs
+
+    # salva arrays no grid
     name_Ttot   = prefix + "Ttot_reservoir"
     name_Tenv   = prefix + "Tenv_reservoir"
     name_NTGcol = prefix + "NTG_col_reservoir"
     name_NTGenv = prefix + "NTG_env_reservoir"
+
+    name_Npack    = prefix + "n_packages_reservoir"
+    name_Tpackmax = prefix + "Tpack_max_reservoir"
+    name_Tgap_sum = prefix + "Tgap_sum_reservoir"
+    name_Tgap_max = prefix + "Tgap_max_reservoir"
+    name_ICV      = prefix + "ICV_reservoir"
+    name_Qv       = prefix + "Qv_reservoir"
+    name_Qvabs    = prefix + "Qv_abs_reservoir"
 
     grid.cell_data[name_Ttot]   = Ttot_3d.reshape(-1, order="F")
     grid.cell_data[name_Tenv]   = Tenv_3d.reshape(-1, order="F")
     grid.cell_data[name_NTGcol] = NTGcol_3d.reshape(-1, order="F")
     grid.cell_data[name_NTGenv] = NTGenv_3d.reshape(-1, order="F")
 
+    grid.cell_data[name_Npack]    = Npack_3d.reshape(-1, order="F")
+    grid.cell_data[name_Tpackmax] = Tpackmax_3d.reshape(-1, order="F")
+    grid.cell_data[name_Tgap_sum] = Tgap_sum_3d.reshape(-1, order="F")
+    grid.cell_data[name_Tgap_max] = Tgap_max_3d.reshape(-1, order="F")
+    grid.cell_data[name_ICV]      = ICV_3d.reshape(-1, order="F")
+    grid.cell_data[name_Qv]       = Qv_3d.reshape(-1, order="F")
+    grid.cell_data[name_Qvabs]    = Qvabs_3d.reshape(-1, order="F")
+
     print("Métricas verticais recalculadas para conjunto de fácies:", facies_set)
     print("  →", name_Ttot)
     print("  →", name_Tenv)
     print("  →", name_NTGcol)
     print("  →", name_NTGenv)
+    print("  →", name_Npack)
+    print("  →", name_Tpackmax)
+    print("  →", name_Tgap_sum)
+    print("  →", name_Tgap_max)
+    print("  →", name_ICV)
+    print("  →", name_Qv)
+    print("  →", name_Qvabs)
 
 
