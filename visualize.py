@@ -1,12 +1,14 @@
 # visualize_all.py
 import numpy as np
 import pyvista as pv
-import os
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+pv.global_theme.allow_empty_mesh = True
+import vtk
 
 from load_data import grid, facies, nx, ny, nz
 from config import load_facies_colors
+from derived_fields import ensure_reservoir, ensure_clusters
+from local_windows import compute_local_ntg
+from analysis import add_vertical_facies_metrics
 
 FACIES_COLORS = load_facies_colors()
 
@@ -65,76 +67,6 @@ def show_thickness_2d(surf, scalar_name="thickness_2d"):
 
     p.show()
 
-def add_facies_legend(plotter, position=(0.87, 0.30)):
-    """
-    Cria a legenda de fácies como PNG, mas APENAS para as fácies
-    que realmente aparecem no modelo (np.unique(facies)).
-    """
-    # cores brutas do config
-    raw_colors = load_facies_colors()
-
-    # fácies presentes no modelo
-    present = set(int(v) for v in np.unique(facies))
-
-    # ordena só as fácies que existem no modelo
-    facies_list = [fac for fac in sorted(raw_colors.keys()) if fac in present]
-
-    # normaliza só se precisar
-    facies_colors = {}
-    for fac in facies_list:
-        r, g, b, a = raw_colors[fac]
-        if r > 1 or g > 1 or b > 1:  # veio 0–255
-            facies_colors[fac] = (r / 255, g / 255, b / 255)
-        else:  # já veio 0–1
-            facies_colors[fac] = (r, g, b)
-
-    # monta figura da legenda
-    n = len(facies_list)
-    fig_height = max(2, n * 0.28)
-    fig, ax = plt.subplots(figsize=(2.4, fig_height))
-    ax.axis("off")
-
-    for i, fac in enumerate(facies_list):
-        y = n - i - 1
-        color = facies_colors[fac]
-
-        # quadradinho de cor
-        ax.add_patch(
-            Rectangle(
-                (0.0, y * 0.32),
-                0.4,
-                0.3,
-                facecolor=color,
-                edgecolor="black",
-                linewidth=0.8,
-            )
-        )
-
-        # texto da fácies
-        ax.text(
-            0.45,
-            y * 0.32 + 0.04,
-            str(fac),
-            va="bottom",
-            fontsize=8.5,
-            fontweight="bold",
-            color="black",
-        )
-
-    ax.set_xlim(0, 1.5)
-    ax.set_ylim(0, n * 0.32)
-    fig.tight_layout(pad=0.2)
-
-    tmpfile = "assets/_facies_legend.png"
-    fig.savefig(tmpfile, dpi=200, transparent=True)
-    plt.close(fig)
-
-    legend = plotter.add_logo_widget(
-        tmpfile, position=position, size=(0.25, 0.55)
-    )
-    legend.SetProcessEvents(False)
-    return legend
-
 
 def compute_cluster_sizes(clusters_array):
     """
@@ -145,42 +77,6 @@ def compute_cluster_sizes(clusters_array):
     mask = arr > 0
     labels, counts = np.unique(arr[mask], return_counts=True)
     return {int(l): int(c) for l, c in zip(labels, counts)}
-
-
-def add_clusters_legend(plotter, sizes_dict, lut, position=(0.87, 0.05)):
-    """
-    Cria uma legenda gráfica Cluster -> cor + tamanho (células)
-    usando o mesmo esquema da add_facies_legend.
-    """
-    # ordena clusters do maior para o menor
-    labels = sorted(sizes_dict.keys(), key=lambda k: sizes_dict[k], reverse=True)
-    n = len(labels)
-    if n == 0:
-        return None
-
-    fig_height = max(2, n * 0.28)
-    fig, ax = plt.subplots(figsize=(2.4, fig_height))
-    ax.axis("off")
-
-    for i, lab in enumerate(labels):
-        y = n - i - 1
-        # obtenho cor do LUT
-        r, g, b, a = lut.GetTableValue(int(lab))
-
-        ax.add_patch(Rectangle((0, y), 0.4, 1, color=(r, g, b)))
-        txt = f"Cluster {lab}  ({sizes_dict[lab]} células)"
-        ax.text(0.45, y + 0.5, txt, va="center", fontsize=8)
-
-    fig.tight_layout(pad=0.2)
-
-    tmpfile = "_clusters_legend_tmp.png"
-    fig.savefig(tmpfile, dpi=200, transparent=True)
-    plt.close(fig)
-
-    legend = plotter.add_logo_widget(tmpfile, position=position, size=(0.28, 0.35))
-    legend.SetProcessEvents(False)
-    return legend
-
 
 
 # ---------- 2. LUTs ----------
@@ -197,33 +93,43 @@ def make_facies_lut():
     return lut, (0, max_fac)
 
 
-def make_reservoir_lut():
-    lut = pv.LookupTable(n_values=2)
-    lut.SetTableValue(0, 0.8, 0.8, 0.8, 1.0)  # fundo cinza transparente
-    lut.SetTableValue(1, 0.0, 0.5, 1.0, 1.0)   # reservatório sólido
-    return lut, (0, 1)
+def make_clusters_lut(clusters_arr):
+    """
+    Gera LUT categórica usando paletas Brewer do VTK.
+    Cores totalmente distintas, sem tons parecidos.
+    """
+    import vtk
+
+    labels = np.unique(clusters_arr)
+    labels = labels[labels > 0]  # ignora 0 (não reservatório)
+
+    n = len(labels)
+
+    # cria LUT
+    lut = vtk.vtkLookupTable()
+    lut.SetNumberOfTableValues(n + 1)
+    lut.Build()
+
+    # cor para cluster 0
+    lut.SetTableValue(0, 0.2, 0.2, 0.2, 1.0)
+
+    # usar paleta Brewer Set3
+    series = vtk.vtkColorSeries()
+    series.SetColorScheme(series.BREWER_QUALITATIVE_SET3)
+
+    n_colors = series.GetNumberOfColors()
+
+    # atribuir cores distintas (cíclicas se n > 12)
+    for idx, lab in enumerate(labels, start=1):
+        color = series.GetColor(idx % n_colors)
+        r = color.GetRed()   / 255.0
+        g = color.GetGreen() / 255.0
+        b = color.GetBlue()  / 255.0
+        lut.SetTableValue(idx, r, g, b, 1.0)
+
+    return lut, (0, n + 1)
 
 
-def make_largest_lut():
-    lut = pv.LookupTable(n_values=2)
-    lut.SetTableValue(0, 0.8, 0.8, 0.8, 1.0)  # fundo
-    lut.SetTableValue(1, 1.0, 0.0, 0.0, 1.0)   # maior cluster sólido
-    return lut, (0, 1)
-
-
-def make_clusters_lut(clusters_array):
-    n_clusters = int(clusters_array.max()) + 1
-    lut = pv.LookupTable(n_values=n_clusters)
-
-    # não vamos mostrar o 0 aqui, mas deixa com alpha 1
-    lut.SetTableValue(0, 1, 1, 1, 1.0)
-
-    rng = np.random.RandomState(42)
-    for i in range(1, n_clusters):
-        r, g, b = rng.rand(3)
-        lut.SetTableValue(i, r, g, b, 1.0)
-
-    return lut, (0, n_clusters - 1)
 
 
 def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None, external_state=None):
@@ -271,9 +177,9 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
         presets = {}
 
         # procura arrays que já existem no grid_base
-        ttot_keys = [k for k in grid_base.cell_data.keys() if k.startswith("vert_Ttot_f")]
-        col_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_col_f")]
-        env_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_env_f")]
+        ttot_keys = [k for k in grid_base.cell_data.keys() if k.startswith("vert_Ttot_")]
+        col_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_col_")]
+        env_keys  = [k for k in grid_base.cell_data.keys() if k.startswith("vert_NTG_env_")]
 
         if ttot_keys:
             name = ttot_keys[0]
@@ -291,9 +197,70 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
             presets["NTG envelope"] = (name, f"NTG envelope fácies {fac}")
 
         return presets
+    
+    def _sync_from_grid_to_grid_base(names):
+        """Copia alguns arrays do grid original para o grid_base exagerado."""
+        for name in names:
+            if name in grid.cell_data:
+                grid_base.cell_data[name] = grid.cell_data[name].copy()
+
+    def update_reservoir_fields(reservoir_facies):
+        """
+        Recalcula:
+        - array Reservoir (0/1)
+        - Clusters e LargestCluster
+        - NTG_local (janelas deslizantes)
+        - métricas verticais de espessura para uma fácies de referência
+        e sincroniza tudo para o grid_base.
+        """
+        # 1) Recalcula reservatório e clusters no grid original
+        res_arr = ensure_reservoir(reservoir_facies)
+        clusters_arr, largest_arr = ensure_clusters(reservoir_facies)
+
+        grid.cell_data["Reservoir"] = res_arr.astype(np.uint8)
+        grid.cell_data["Clusters"] = clusters_arr.astype(np.int32)
+        grid.cell_data["LargestCluster"] = largest_arr.astype(np.uint8)
+
+        # 2) NTG local (usa a máscara de reservatório)
+        compute_local_ntg(res_arr, window=(1, 1, 5))  # mesmo window do main
+
+        # 3) Espessura vertical: escolhe uma fácies de referência
+        fac_set = reservoir_facies
+        if isinstance(fac_set, (set, list, tuple)):
+            fac_set = set(int(f) for f in fac_set)
+        else:
+            fac_set = {int(fac_set)}
+
+        add_vertical_facies_metrics(fac_set)
+
+        # 4) Copia arrays importantes pro grid_base
+        sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local"]
+        for key in grid.cell_data.keys():
+            if key.startswith("vert_Ttot_") or key.startswith("vert_Tenv_") or \
+            key.startswith("vert_NTG_col_") or key.startswith("vert_NTG_env_"):
+                sync_names.append(key)
+
+        _sync_from_grid_to_grid_base(sync_names)
+
+        # 5) Recalcula LUT e tamanhos de clusters para o modo "clusters"
+        if "Clusters" in grid_base.cell_data:
+            full_clusters_arr = grid_base.cell_data["Clusters"]
+            state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(full_clusters_arr)
+            state["clusters_sizes"] = compute_cluster_sizes(full_clusters_arr)
+
+        # 6) Atualiza o range do thickness_local com o novo scalar
+        scalar_name = THICKNESS_SCALAR_NAME
+        if scalar_name in grid_base.cell_data:
+            arr = grid_base.cell_data[scalar_name]
+            vmin = 1e-6
+            vmax = arr.max()
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            state["thickness_clim"] = (vmin, vmax)
 
     state.setdefault("thickness_presets", init_thickness_presets())
     state.setdefault("thickness_mode", "Espessura")
+    state["update_reservoir_fields"] = update_reservoir_fields
 
     def _update_thickness_from_state():
         """
@@ -627,14 +594,6 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
             state["bg_actor"] = bg_actor
             state["main_actor"] = main_actor
             plotter.remove_scalar_bar()
-
-            if "clusters_lut" in state and "clusters_sizes" in state:
-                legend = add_clusters_legend(
-                    plotter,
-                    state["clusters_sizes"],
-                    state["clusters_lut"],
-                )
-                state["clusters_legend_actor"] = legend
         
         elif mode == "ntg_local":
             main_actor = plotter.add_mesh(
@@ -718,7 +677,31 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
         plotter.render()
 
 
+    def _update_reservoir_from_state():
+        """
+        Recalcula Reservoir / Clusters / LargestCluster para o
+        conjunto state['reservoir_facies'] e sincroniza em grid_base.
+        Também atualiza a LUT e os tamanhos dos clusters no state.
+        """
+        rf = state.get("reservoir_facies")
+        if not rf:
+            return
 
+        # recalcula no grid "global"
+        res_arr = ensure_reservoir(rf)
+        clusters_arr, largest_arr = ensure_clusters(rf)
+
+        # copia os arrays para o grid_base usado na visualização
+        grid_base.cell_data["Reservoir"] = res_arr
+        grid_base.cell_data["Clusters"] = clusters_arr
+        grid_base.cell_data["LargestCluster"] = largest_arr
+
+        # atualiza LUT e tamanhos de clusters no state
+        state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(clusters_arr)
+        state["clusters_sizes"] = compute_cluster_sizes(clusters_arr)
+    
+
+    _update_reservoir_from_state()
 
 
 
@@ -821,6 +804,7 @@ def run(mode="facies", z_exag=15.0, show_scalar_bar=False, external_plotter=None
         mesh = apply_k_filter(base)
         show_mesh(mesh)
 
+    state["update_reservoir"] = _update_reservoir_from_state
     state["refresh"] = _refresh
     state["update_thickness"] = _update_thickness_from_state
 

@@ -4,17 +4,23 @@ from scipy.ndimage import label, generate_binary_structure
 from load_data import grid, facies, nx, ny, nz
 
 def ensure_reservoir(reservoir_facies):
-    if "Reservoir" in grid.cell_data:
-        return grid.cell_data["Reservoir"]
+    """
+    Recalcula SEMPRE o array de reservatório (0/1) para o conjunto
+    de fácies passado e grava em grid.cell_data["Reservoir"].
+    """
     is_res = np.isin(facies, list(reservoir_facies)).astype(np.int8)
     grid.cell_data["Reservoir"] = is_res
     return is_res
 
 def ensure_clusters(reservoir_facies):
-    # se já tem, só retorna
-    if "Clusters" in grid.cell_data and "LargestCluster" in grid.cell_data:
-        return grid.cell_data["Clusters"], grid.cell_data["LargestCluster"]
-
+    """
+    Recalcula SEMPRE os clusters de reservatório e o maior cluster
+    para o conjunto de fácies passado.
+    Grava em:
+      - grid.cell_data["Clusters"]
+      - grid.cell_data["LargestCluster"]
+    """
+    # recalcula o reservatório para o novo conjunto
     is_res = ensure_reservoir(reservoir_facies)
 
     # 1D -> 3D

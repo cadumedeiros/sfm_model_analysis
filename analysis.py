@@ -1,12 +1,11 @@
 # analysis.py
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
 import os
 from datetime import datetime
 import pyvista as pv
 
-from load_data import facies, nx, ny, nz, grid
+from load_data import grid, facies, nx, ny, nz
 from derived_fields import ensure_reservoir, ensure_clusters
 
 def compute_global_metrics(reservoir_facies):
@@ -83,25 +82,6 @@ def get_cluster_sizes(reservoir_facies):
         counts[0] = 0  # tira o fundo
     cluster_sizes = counts[counts > 0]
     return cluster_sizes
-
-def plot_cluster_histogram(reservoir_facies, bins=30):
-    """
-    Plota o histograma reaproveitando o que tinha no hist_clusters.py
-    """
-    cluster_sizes = get_cluster_sizes(reservoir_facies)
-
-    print(f"Nº de clusters: {cluster_sizes.size}")
-    if cluster_sizes.size:
-        print(f"Tamanho mínimo: {cluster_sizes.min()}")
-        print(f"Tamanho máximo: {cluster_sizes.max()}")
-
-    plt.figure()
-    plt.hist(cluster_sizes, bins=bins)
-    plt.xlabel("Tamanho do cluster (nº de células)")
-    plt.ylabel("Frequência")
-    plt.title("Histograma de tamanhos de cluster")
-    plt.tight_layout()
-    plt.show()
 
 
 # --- análise fácie a fácie com volume ---
@@ -276,123 +256,6 @@ def export_facies_metrics_to_excel(output_path=None):
         df.to_excel(alt_path, index=False, sheet_name="Facies Metrics")
         print(f"\nO arquivo original estava bloqueado. Salvei como: {alt_path}")
 
-def print_facies_metrics():
-    facies_data = compute_facies_metrics()
-    print("=== MÉTRICAS POR FÁCIES ===")
-    for item in facies_data:
-        fac = item["facies"]
-        print(f"\nFácies {fac}:")
-        print(f"  Células               : {item['cells']}")
-        print(f"  % no modelo           : {item['fraction']*100:.2f}%")
-        print(f"  Nº de clusters        : {item['n_clusters']}")
-        print(f"  Maior cluster (células): {item['largest_size']}")
-        print(f"  Fração conectada      : {item['connected_fraction']:.3f}")
-        print(f"  Volume total          : {item['volume_total']:.3f}")
-        print(f"  Volume maior cluster  : {item['volume_largest_cluster']:.3f}")
-        print(f"  Espessura maior clust.: {item['thickness_largest_cluster']:.3f}")
-        print(f"  Perc Xmin→Xmax        : {item['perc']['x_perc']}")
-        print(f"  Perc Ymin→Ymax        : {item['perc']['y_perc']}")
-        print(f"  Perc Topo→Base        : {item['perc']['z_perc']}")
-
-
-def add_local_thickness_of_facies(facie_id: int, array_name="thickness_local"):
-    """
-    Calcula a espessura por coluna (x,y) do maior cluster da fácies indicada,
-    considerando blocos verticais separados. Se o bloco tiver só 1 célula,
-    usa uma espessura mínima aproximada (altura média da camada) pra não dar 0.
-    """
-    from scipy.ndimage import label, generate_binary_structure
-    import numpy as np
-
-    if isinstance(facie_id, (set, list, tuple)):
-        if len(facie_id) != 1:
-            raise ValueError("Passe apenas UMA fácies por vez para espessura local.")
-        facie_id = list(facie_id)[0]
-    facie_id = int(facie_id)
-
-    # espessura mínima aproximada (altura média de uma camada)
-    dz_default = (grid.bounds[5] - grid.bounds[4]) / nz
-
-    # 1) máscara da fácies
-    is_fac = (facies == facie_id).astype(np.uint8)
-
-    # 2) rotula só essa fácies
-    arr_xyz = is_fac.reshape((nx, ny, nz), order="F")
-    arr_zyx = arr_xyz.transpose(2, 1, 0)
-    struct = generate_binary_structure(3, 1)
-    labeled_zyx, _ = label(arr_zyx, structure=struct)
-    labeled_xyz = labeled_zyx.transpose(2, 1, 0)
-    clusters_1d = labeled_xyz.reshape(-1, order="F")
-
-    # 3) maior cluster
-    counts = np.bincount(clusters_1d)
-    counts[0] = 0
-    largest_label = counts.argmax()
-    if largest_label == 0:
-        print(f"Nenhum cluster encontrado para a fácies {facie_id}")
-        grid.cell_data[array_name] = np.zeros(facies.size)
-        return
-
-    # 4) z dos centros
-    z_centers = grid.cell_centers().points[:, 2]
-    z_xyz = z_centers.reshape((nx, ny, nz), order="F")
-
-    # 5) máscara 3D do maior cluster
-    cluster_xyz = (clusters_1d == largest_label).reshape((nx, ny, nz), order="F")
-
-    # array de saída
-    thickness_per_cell = np.zeros(facies.size, dtype=float)
-
-    # 6) percorre cada coluna
-    for ix in range(nx):
-        for iy in range(ny):
-            col_mask = cluster_xyz[ix, iy, :]
-            if not col_mask.any():
-                continue
-
-            z_idx = np.where(col_mask)[0]
-            z_vals = z_xyz[ix, iy, :][col_mask]
-
-            # separa em blocos contíguos
-            blocks = []
-            current = [z_idx[0]]
-            for prev, cur in zip(z_idx, z_idx[1:]):
-                if cur == prev + 1:
-                    current.append(cur)
-                else:
-                    blocks.append(current)
-                    current = [cur]
-            blocks.append(current)
-
-            max_thick = 0.0
-            for block in blocks:
-                # z dos centros desse bloco
-                mask_block = np.isin(z_idx, block)
-                block_z = z_vals[mask_block]
-
-                if block_z.size == 1:
-                    dz = dz_default
-                else:
-                    dz = float(block_z.max() - block_z.min())
-
-                if dz > max_thick:
-                    max_thick = dz
-
-            idx_1d = np.ravel_multi_index(
-                (np.full(z_idx.size, ix), np.full(z_idx.size, iy), z_idx),
-                dims=(nx, ny, nz),
-                order="F"
-            )
-            thickness_per_cell[idx_1d] = max_thick
-
-    grid.cell_data[array_name] = thickness_per_cell
-    grid.active_scalars_name = array_name
-
-    print(f"Espessura local (com blocos verticais) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
-
-
-import numpy as np
-from load_data import grid, facies, nx, ny, nz
 
 def make_thickness_2d_from_grid(array_name_3d="thickness_local", array_name_2d="thickness_2d"):
     if array_name_3d not in grid.cell_data:
@@ -421,216 +284,18 @@ def make_thickness_2d_from_grid(array_name_3d="thickness_local", array_name_2d="
     surf.cell_data[array_name_2d] = thickness_cells
     return surf
 
-
-import numpy as np
-from load_data import grid, facies, nx, ny, nz
-
-def add_local_thickness_of_facies_all_clusters(facie_id, array_name="thickness_local"):
+def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
     """
-    Calcula a espessura local (por coluna, com blocos verticais) para
-    todos os clusters da fácies indicada e grava diretamente em
-    grid.cell_data["thickness_local"]
-    """
-    # aceita {23}, [23], (23,) ou 23
-    if isinstance(facie_id, (set, list, tuple)):
-        if len(facie_id) != 1:
-            raise ValueError("Passe apenas uma fácies por vez.")
-        facie_id = list(facie_id)[0]
-    facie_id = int(facie_id)
-
-    from scipy.ndimage import label, generate_binary_structure
-
-    # máscara só da fácies
-    is_fac = (facies == facie_id).astype(np.uint8)
-
-    # reshapes para rotular
-    arr_xyz = is_fac.reshape((nx, ny, nz), order="F")
-    arr_zyx = arr_xyz.transpose(2, 1, 0)
-
-    struct = generate_binary_structure(3, 1)
-    labeled_zyx, n_clusters = label(arr_zyx, structure=struct)
-    labeled_xyz = labeled_zyx.transpose(2, 1, 0)
-    clusters_1d = labeled_xyz.reshape(-1, order="F")
-
-    if n_clusters == 0:
-        print(f"Nenhum cluster encontrado para a fácies {facie_id}")
-        grid.cell_data[array_name] = np.zeros(facies.size, dtype=float)
-        grid.active_scalars_name = array_name
-        return
-
-    # z dos centros das células
-    z_centers = grid.cell_centers().points[:, 2]
-    z_xyz = z_centers.reshape((nx, ny, nz), order="F")
-
-    # espessura mínima (1 camada)
-    dz_default = (grid.bounds[5] - grid.bounds[4]) / nz
-
-    # array final (mesmo tamanho do modelo)
-    thickness_per_cell = np.zeros(facies.size, dtype=float)
-
-    # percorre TODOS os clusters dessa fácies
-    for clabel in range(1, n_clusters + 1):
-        cluster_xyz = (clusters_1d == clabel).reshape((nx, ny, nz), order="F")
-        if not cluster_xyz.any():
-            continue
-
-        for ix in range(nx):
-            for iy in range(ny):
-                col_mask = cluster_xyz[ix, iy, :]
-                if not col_mask.any():
-                    continue
-
-                z_idx = np.where(col_mask)[0]
-                z_vals = z_xyz[ix, iy, :][col_mask]
-
-                # quebra em blocos contíguos em z
-                blocks = []
-                current = [z_idx[0]]
-                for prev, cur in zip(z_idx, z_idx[1:]):
-                    if cur == prev + 1:
-                        current.append(cur)
-                    else:
-                        blocks.append(current)
-                        current = [cur]
-                blocks.append(current)
-
-                # pega a maior espessura entre os blocos
-                max_thick = 0.0
-                for block in blocks:
-                    mask_block = np.isin(z_idx, block)
-                    block_z = z_vals[mask_block]
-                    if block_z.size == 1:
-                        dz = dz_default
-                    else:
-                        dz = float(block_z.max() - block_z.min())
-                    if dz > max_thick:
-                        max_thick = dz
-
-                # grava esse valor nas células desse cluster nessa coluna
-                idx_1d = np.ravel_multi_index(
-                    (np.full(z_idx.size, ix), np.full(z_idx.size, iy), z_idx),
-                    dims=(nx, ny, nz),
-                    order="F"
-                )
-                thickness_per_cell[idx_1d] = max_thick
-
-    # salva COM O MESMO NOME de antes
-    grid.cell_data[array_name] = thickness_per_cell
-    grid.active_scalars_name = array_name
-    print(f"Espessura local (todos os clusters) da fácies {facie_id} salva em grid.cell_data['{array_name}']")
-
-
-def add_vertical_thickness_basic(facie_id, prefix="vert_"):
-    """
-    Para UMA fácies, calcula por coluna (x,y):
-
-      - T_f_tot(x,y): espessura total da fácies na coluna
-      - NTG_f(x,y)  : T_f_tot / T_col (NTG vertical da fácies)
-
-    e grava dois arrays 3D em grid.cell_data:
-
-      prefix + f"Ttot_f{facie_id}"
-      prefix + f"NTG_f{facie_id}"
-
-    Cada coluna (x,y) recebe o mesmo valor em todas as células em z.
-    """
-    import numpy as np
-    from load_data import grid, facies, nx, ny, nz  # usa o que você já tem
-
-    # aceita {21}, [21], (21,) ou 21
-    if isinstance(facie_id, (set, list, tuple)):
-        if len(facie_id) != 1:
-            raise ValueError("Passe apenas UMA fácies por vez.")
-        facie_id = list(facie_id)[0]
-    facie_id = int(facie_id)
-
-    # facies em 3D
-    facies_xyz = facies.reshape((nx, ny, nz), order="F")
-
-    # z dos centros em 3D
-    z_centers = grid.cell_centers().points[:, 2]
-    z_xyz = z_centers.reshape((nx, ny, nz), order="F")
-
-    # espessura mínima aproximada de uma camada (mesmo esquema das outras funções)
-    dz_default = (grid.bounds[5] - grid.bounds[4]) / nz
-
-    # arrays 3D de saída (mesmo valor repetido em z para cada coluna)
-    Ttot_3d = np.zeros((nx, ny, nz), dtype=float)
-    NTG_3d  = np.zeros((nx, ny, nz), dtype=float)
-
-    for ix in range(nx):
-        for iy in range(ny):
-            z_col = z_xyz[ix, iy, :]
-            # espessura total da coluna (topo-base)
-            if z_col.size == 0:
-                continue
-            T_col = float(z_col.max() - z_col.min())
-            if T_col <= 0:
-                continue
-
-            # células dessa fácies na coluna
-            fac_mask_col = (facies_xyz[ix, iy, :] == facie_id)
-            if not fac_mask_col.any():
-                # não tem essa fácies na coluna → NTG = 0, Ttot = 0 (já está)
-                continue
-
-            z_idx = np.where(fac_mask_col)[0]  # índices em z onde tem a fácies
-
-            # separa em blocos contíguos em z (igual você já faz)
-            blocks = []
-            current = [z_idx[0]]
-            for prev, cur in zip(z_idx, z_idx[1:]):
-                if cur == prev + 1:
-                    current.append(cur)
-                else:
-                    blocks.append(current)
-                    current = [cur]
-            blocks.append(current)
-
-            # soma espessura de todos os blocos
-            T_tot = 0.0
-            for block in blocks:
-                block_z = z_col[block]
-                if block_z.size == 1:
-                    dz = dz_default
-                else:
-                    dz = float(block_z.max() - block_z.min())
-                T_tot += dz
-
-            # NTG vertical da fácies nessa coluna
-            ntg_col = T_tot / T_col if T_col > 0 else 0.0
-
-            # grava o mesmo valor em todas as células da coluna (x,y,:)
-            Ttot_3d[ix, iy, :] = T_tot
-            NTG_3d[ix,  iy, :] = ntg_col
-
-    # achata em 1D e salva no grid
-    name_Ttot = prefix + f"Ttot_f{facie_id}"
-    name_NTG  = prefix + f"NTG_f{facie_id}"
-
-    grid.cell_data[name_Ttot] = Ttot_3d.reshape(-1, order="F")
-    grid.cell_data[name_NTG]  = NTG_3d.reshape(-1,  order="F")
-
-    grid.active_scalars_name = name_Ttot
-
-    print(f"Espessura total por coluna da fácies {facie_id} salva em grid.cell_data['{name_Ttot}']")
-    print(f"NTG vertical por coluna da fácies {facie_id} salvo em grid.cell_data['{name_NTG}']")
-
-
-import numpy as np
-from load_data import grid, facies, nx, ny, nz
-
-def add_vertical_facies_metrics(facie_id, prefix="vert_"):
-    """
-      - T_tot   = espessura total da fácies (m)
-      - T_env   = espessura do envelope da fácies (m)
-      - NTG_col = T_tot / T_col_total   (coluna inteira)
-      - NTG_env = T_tot / T_env         (só dentro do envelope)
+    Calcula métricas verticais (T_tot, T_env, NTG_col, NTG_env) considerando
+    TODAS as fácies selecionadas como parte do reservatório.
+    facies_selected: int, list, set
     """
 
-    if isinstance(facie_id, (set, list, tuple)):
-        facie_id = list(facie_id)[0]
-    facie_id = int(facie_id)
+    # normalizar entrada para conjunto de ints
+    if isinstance(facies_selected, (int, np.integer)):
+        facies_set = {int(facies_selected)}
+    else:
+        facies_set = {int(f) for f in facies_selected}
 
     facies_xyz = facies.reshape((nx, ny, nz), order="F")
 
@@ -639,7 +304,7 @@ def add_vertical_facies_metrics(facie_id, prefix="vert_"):
     dz_mean = (z_max - z_min) / nz
     T_col_total = (z_max - z_min)
 
-    # arrays 3D de saída (tudo começa em zero)
+    # arrays 3D de saída
     Ttot_3d   = np.zeros((nx, ny, nz), dtype=float)
     Tenv_3d   = np.zeros((nx, ny, nz), dtype=float)
     NTGcol_3d = np.zeros((nx, ny, nz), dtype=float)
@@ -648,7 +313,10 @@ def add_vertical_facies_metrics(facie_id, prefix="vert_"):
     for ix in range(nx):
         for iy in range(ny):
             col = facies_xyz[ix, iy, :]
-            mask = (col == facie_id)
+
+            # máscara combinada: todas as fácies selecionadas
+            mask = np.isin(col, list(facies_set))
+
             if not mask.any():
                 continue
 
@@ -656,41 +324,37 @@ def add_vertical_facies_metrics(facie_id, prefix="vert_"):
             n_tot = z_idx.size
             n_env = int(z_idx[-1] - z_idx[0] + 1)
 
-            # em número de células
-            Ttot_cells = n_tot
-            Tenv_cells = n_env
-
-            # converte pra metros
-            T_tot = Ttot_cells * dz_mean
-            T_env = Tenv_cells * dz_mean
+            # convertendo para espessuras em metros
+            T_tot = n_tot * dz_mean
+            T_env = n_env * dz_mean
 
             NTG_col = T_tot / T_col_total if T_col_total > 0 else 0.0
             NTG_env = T_tot / T_env if T_env > 0 else 0.0
 
-            # garante intervalo [0,1]
             NTG_col = max(0.0, min(1.0, NTG_col))
             NTG_env = max(0.0, min(1.0, NTG_env))
 
-            # grava o MESMO valor em TODAS as células da fácies nessa coluna,
-            # e 0 nas demais (já estão 0)
+            # grava os valores em TODAS as células da coluna pertencentes ao conjunto de fácies
             Ttot_3d[ix, iy, mask]   = T_tot
             Tenv_3d[ix, iy, mask]   = T_env
             NTGcol_3d[ix, iy, mask] = NTG_col
             NTGenv_3d[ix, iy, mask] = NTG_env
 
-    name_Ttot   = prefix + f"Ttot_f{facie_id}"
-    name_Tenv   = prefix + f"Tenv_f{facie_id}"
-    name_NTGcol = prefix + f"NTG_col_f{facie_id}"
-    name_NTGenv = prefix + f"NTG_env_f{facie_id}"
+    # salva arrays — não usa mais id único na chave
+    name_Ttot   = prefix + "Ttot_reservoir"
+    name_Tenv   = prefix + "Tenv_reservoir"
+    name_NTGcol = prefix + "NTG_col_reservoir"
+    name_NTGenv = prefix + "NTG_env_reservoir"
 
     grid.cell_data[name_Ttot]   = Ttot_3d.reshape(-1, order="F")
     grid.cell_data[name_Tenv]   = Tenv_3d.reshape(-1, order="F")
     grid.cell_data[name_NTGcol] = NTGcol_3d.reshape(-1, order="F")
     grid.cell_data[name_NTGenv] = NTGenv_3d.reshape(-1, order="F")
 
-    print("Métricas verticais calculadas para fácies", facie_id)
+    print("Métricas verticais recalculadas para conjunto de fácies:", facies_set)
     print("  →", name_Ttot)
     print("  →", name_Tenv)
     print("  →", name_NTGcol)
     print("  →", name_NTGenv)
+
 

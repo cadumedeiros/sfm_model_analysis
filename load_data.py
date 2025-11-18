@@ -1,7 +1,6 @@
 # load_data.py
 import pyvista as pv
 import numpy as np
-import config as cfg
 
 grdecl_path = "assets/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
 

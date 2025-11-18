@@ -1,18 +1,10 @@
 # main.py
-
-import visualize
-import pyvista as pv
 import pandas as pd
 
 from analysis import (compute_global_metrics, 
                       compute_directional_percolation, 
-                      plot_cluster_histogram, 
-                      print_facies_metrics, 
-                      export_facies_metrics_to_excel, 
-                      add_local_thickness_of_facies, 
+                      export_facies_metrics_to_excel,
                       make_thickness_2d_from_grid,
-                      add_local_thickness_of_facies_all_clusters,
-                      add_vertical_thickness_basic,
                       add_vertical_facies_metrics,
 )
 from derived_fields import ensure_reservoir
@@ -25,7 +17,7 @@ from PyQt5 import QtWidgets
 
 def main():
     
-    RESERVOIR_FACIES = {23}
+    RESERVOIR_FACIES = {0}
     
     MODE = "facies"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 
@@ -57,9 +49,8 @@ def main():
     print("==============================")
 
     res_mask = ensure_reservoir(RESERVOIR_FACIES)
-    compute_local_ntg(res_mask, window=(1, 1, 5)) # (5, 5, 3)
 
-    # print_facies_metrics()
+    compute_local_ntg(res_mask, window=(1, 1, 5)) # (5, 5, 3)
     export_facies_metrics_to_excel()
     facies_df = pd.read_excel("results/facies_metrics.xlsx")
 
@@ -100,9 +91,6 @@ def main():
             show_thickness_2d(surf_NTG_env, scalar_name=f"{scalar}_2d")
             set_thickness_scalar(scalar, title=f"NTG envelope fácies {RESERVOIR_FACIES}")
 
-
-    # visualize.run(mode=MODE, z_exag=Z_EXAG, show_scalar_bar=SHOW_SCALAR_BAR)
-    # plot_cluster_histogram(RESERVOIR_FACIES, bins=30)
 
     # 1) Cria a aplicação Qt
     app = QtWidgets.QApplication(sys.argv)
