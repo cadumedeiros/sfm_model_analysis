@@ -1,13 +1,20 @@
 from PyQt5 import QtWidgets, QtCore
-from PyQt5.QtGui import QColor, QBrush
+from PyQt5.QtGui import QColor, QBrush, QPixmap
 from pyvistaqt import BackgroundPlotter
-from PyQt5.QtGui import QPixmap
 import numpy as np
-          
+import os
+
 from visualize import run, update_2d_plot
-from load_data import facies
+from load_data import facies, grdecl_path, load_facies_from_grdecl
 from config import load_facies_colors
-from analysis import compute_global_metrics, compute_directional_percolation
+from analysis import (
+    compute_global_metrics,
+    compute_directional_percolation,
+    facies_distribution_array,
+    reservoir_facies_distribution_array,
+    compute_global_metrics_for_array,
+)
+
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -21,7 +28,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # já é iterável (lista, set, etc.)
             initial_reservoir = {int(f) for f in reservoir_facies}
 
-        self.resize(1100, 700)
+        self.resize(1600, 900)
         self.setMinimumSize(800, 600)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
@@ -228,6 +235,75 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tabs.addTab(self.metrics_tab, "Métricas Globais")
 
+                # Aba 3: Comparação entre modelos
+        self.compare_tab = QtWidgets.QWidget()
+        comp_layout = QtWidgets.QVBoxLayout(self.compare_tab)
+
+        # cabeçalho com nomes dos modelos
+        base_name = os.path.basename(grdecl_path)
+        self.base_model_label = QtWidgets.QLabel(f"Modelo base: {base_name}")
+        self.comp_model_label = QtWidgets.QLabel("Modelo comparado: (nenhum)")
+        self.select_model_btn = QtWidgets.QPushButton("Selecionar modelo para comparar...")
+        self.select_model_btn.clicked.connect(self.select_comparison_model)
+
+        header_layout = QtWidgets.QHBoxLayout()
+        header_layout.addWidget(self.base_model_label)
+        header_layout.addWidget(self.comp_model_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.select_model_btn)
+
+        comp_layout.addLayout(header_layout)
+
+        # ----- grupo 1: métricas globais do reservatório -----
+        global_group = QtWidgets.QGroupBox("Métricas globais do reservatório")
+        gl_layout = QtWidgets.QVBoxLayout(global_group)
+
+        self.global_compare_table = QtWidgets.QTableWidget()
+        self.global_compare_table.setColumnCount(4)
+        self.global_compare_table.setHorizontalHeaderLabels(
+            ["Métrica", "Base", "Comparado", "Diferença (Comp - Base)"]
+        )
+        self.global_compare_table.verticalHeader().setVisible(False)
+        self.global_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+
+        gl_layout.addWidget(self.global_compare_table)
+        comp_layout.addWidget(global_group)
+
+        # ----- grupo 2: distribuição de fácies no grid inteiro -----
+        fac_group = QtWidgets.QGroupBox("Distribuição de fácies (grid inteiro)")
+        fac_layout = QtWidgets.QVBoxLayout(fac_group)
+
+        self.facies_compare_table = QtWidgets.QTableWidget()
+        self.facies_compare_table.setColumnCount(5)
+        self.facies_compare_table.setHorizontalHeaderLabels(
+            ["Fácies", "Células Base", "% Base", "Células Comp", "% Comp"]
+        )
+        self.facies_compare_table.verticalHeader().setVisible(False)
+        self.facies_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+
+        fac_layout.addWidget(self.facies_compare_table)
+        comp_layout.addWidget(fac_group)
+
+        # ----- grupo 3: distribuição de fácies no reservatório -----
+        res_group = QtWidgets.QGroupBox("Distribuição de fácies no reservatório")
+        res_layout_cmp = QtWidgets.QVBoxLayout(res_group)
+
+        self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
+        self.reservoir_facies_compare_table.setColumnCount(5)
+        self.reservoir_facies_compare_table.setHorizontalHeaderLabels(
+            ["Fácies (res)", "Células Base", "% do res Base", "Células Comp", "% do res Comp"]
+        )
+        self.reservoir_facies_compare_table.verticalHeader().setVisible(False)
+        self.reservoir_facies_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+
+        res_layout_cmp.addWidget(self.reservoir_facies_compare_table)
+        comp_layout.addWidget(res_group)
+
+        comp_layout.addStretch()
+
+        self.tabs.addTab(self.compare_tab, "Comparação")
+
+
         # adiciona o conjunto de abas no lado direito
         layout.addWidget(self.panel)
         layout.addWidget(self.tabs, 1)
@@ -238,6 +314,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state = dict()
         self.state["reservoir_facies"] = initial_reservoir
 
+        # ------ estado para comparação entre modelos ------
+        # Base (modelo carregado em load_data)
+        self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
+        self.base_res_stats = {}
+        self.base_res_total = 0
+        self.base_metrics = None
+        self.base_perc = None
+
+        # Modelo comparado (carregado via diálogo)
+        self.compare_path = None
+        self.compare_facies = None
+        self.compare_facies_stats = None
+        self.compare_total_cells = 0
+        self.comp_res_stats = {}
+        self.comp_res_total = 0
+        self.compare_metrics = None
+        self.compare_perc = None
+
         run(
             mode=mode,
             z_exag=z_exag,
@@ -247,6 +341,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.update_2d_map()
+        self.update_comparison_tables()
 
         for i in range(self.reservoir_list.count()):
             fac = self.reservoir_list.item(i).data(QtCore.Qt.UserRole)
@@ -427,6 +522,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.metrics_text.setPlainText("Nenhuma análise calculada.")
             return
         
+        self.base_metrics = metrics
+        self.base_perc = perc
+        
         def fmt_clusters(arr):
             if arr is None:
                 return "[]"
@@ -474,6 +572,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         self.metrics_text.setPlainText("\n".join(lines))
+
+        self.update_comparison_tables()
 
     def set_facies_metrics(self, df):
         """
@@ -551,6 +651,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.set_metrics(metrics, perc)
 
+                # ----- distribuições de fácies dentro do reservatório -----
+        rf = self.state["reservoir_facies"]
+
+        if rf:
+            # base
+            self.base_res_stats, self.base_res_total = reservoir_facies_distribution_array(facies, rf)
+
+            # modelo comparado (se existir)
+            if self.compare_facies is not None:
+                self.comp_res_stats, self.comp_res_total = reservoir_facies_distribution_array(
+                    self.compare_facies, rf
+                )
+                # também atualiza métricas globais do comparado
+                self.compare_metrics, self.compare_perc = compute_global_metrics_for_array(
+                    self.compare_facies, rf
+                )
+            else:
+                self.comp_res_stats, self.comp_res_total = {}, 0
+                self.compare_metrics, self.compare_perc = None, None
+        else:
+            self.base_res_stats, self.base_res_total = {}, 0
+            self.comp_res_stats, self.comp_res_total = {}, 0
+            self.compare_metrics, self.compare_perc = None, None
+
+        # atualiza as tabelas da aba de comparação
+        self.update_comparison_tables()
+
+
         # 3) se o modo atual for clusters, atualiza também a legenda de clusters
         if self.state.get("mode") == "clusters":
             self.legend_group.setTitle("Legenda de Clusters")
@@ -594,6 +722,144 @@ class MainWindow(QtWidgets.QMainWindow):
             update_2d_plot(self.plotter_2d, scalar_name, title)
         except Exception as e:
             print("Erro ao atualizar mapa 2D:", e)
+
+    
+    def select_comparison_model(self):
+        """
+        Abre um diálogo para selecionar outro grid (.grdecl) na pasta assets
+        e calcula distribuições/métricas para comparação com o modelo base.
+        """
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Selecionar modelo para comparar",
+            "assets",
+            "GRDECL (*.grdecl);;Todos os arquivos (*)",
+        )
+        if not path:
+            return
+
+        fac = load_facies_from_grdecl(path)
+        self.compare_path = path
+        self.compare_facies = fac
+
+        # distribuição de fácies no grid inteiro
+        self.compare_facies_stats, self.compare_total_cells = facies_distribution_array(fac)
+
+        # métricas globais e distribuição de fácies dentro do reservatório,
+        # com as fácies atualmente marcadas
+        rf = self.state.get("reservoir_facies") or set()
+        if rf:
+            self.compare_metrics, self.compare_perc = compute_global_metrics_for_array(fac, rf)
+            self.comp_res_stats, self.comp_res_total = reservoir_facies_distribution_array(fac, rf)
+        else:
+            self.compare_metrics = None
+            self.compare_perc = None
+            self.comp_res_stats, self.comp_res_total = {}, 0
+
+        name = os.path.basename(path)
+        self.comp_model_label.setText(f"Modelo comparado: {name}")
+
+        self.update_comparison_tables()
+
+
+    def update_comparison_tables(self):
+        """
+        Atualiza todas as tabelas da aba 'Comparação' com base nas
+        estatísticas e métricas disponíveis.
+        """
+
+        # --------- 1) Tabela de métricas globais do reservatório ---------
+        m0 = getattr(self, "base_metrics", None)
+        m1 = getattr(self, "compare_metrics", None)
+        p0 = getattr(self, "base_perc", None)
+        p1 = getattr(self, "compare_perc", None)
+
+        rows = []
+
+        def get(m, key):
+            return None if m is None else m.get(key)
+
+        rows.append(("NTG global", get(m0, "ntg"), get(m1, "ntg")))
+        rows.append(("Total de células", get(m0, "total_cells"), get(m1, "total_cells")))
+        rows.append(("Células de reservatório", get(m0, "res_cells"), get(m1, "res_cells")))
+        rows.append(("Nº de clusters", get(m0, "n_clusters"), get(m1, "n_clusters")))
+        rows.append(("Tamanho do maior cluster", get(m0, "largest_size"), get(m1, "largest_size")))
+        rows.append(("Fração conectada", get(m0, "connected_fraction"), get(m1, "connected_fraction")))
+
+        def flag(per, key):
+            if per is None:
+                return None
+            return "Sim" if per.get(key) else "Não"
+
+        if p0 is not None:
+            rows.append(("Percolação X (Sim/Não)", flag(p0, "x_perc"), flag(p1, "x_perc")))
+            rows.append(("Percolação Y (Sim/Não)", flag(p0, "y_perc"), flag(p1, "y_perc")))
+            rows.append(("Percolação Z (Sim/Não)", flag(p0, "z_perc"), flag(p1, "z_perc")))
+
+        self.global_compare_table.setRowCount(len(rows))
+
+        def fmt_num(val):
+            if val is None:
+                return "-"
+            if isinstance(val, (float, np.floating)):
+                return f"{val:.3f}"
+            return str(val)
+
+        for i, (label, a, b) in enumerate(rows):
+            self.global_compare_table.setItem(i, 0, QtWidgets.QTableWidgetItem(label))
+            self.global_compare_table.setItem(i, 1, QtWidgets.QTableWidgetItem(fmt_num(a)))
+            self.global_compare_table.setItem(i, 2, QtWidgets.QTableWidgetItem(fmt_num(b)))
+
+            if isinstance(a, (int, np.integer, float, np.floating)) and isinstance(
+                b, (int, np.integer, float, np.floating)
+            ):
+                diff = float(b) - float(a)
+                self.global_compare_table.setItem(
+                    i, 3, QtWidgets.QTableWidgetItem(f"{diff:.3f}")
+                )
+            else:
+                self.global_compare_table.setItem(i, 3, QtWidgets.QTableWidgetItem("-"))
+
+        self.global_compare_table.resizeColumnsToContents()
+
+        # --------- 2) Distribuição de fácies no grid inteiro ---------
+        stats0 = getattr(self, "base_facies_stats", None)
+        stats1 = getattr(self, "compare_facies_stats", None)
+        if stats0 is None:
+            return
+
+        facs_union = sorted(set(stats0.keys()) | (set(stats1.keys()) if stats1 else set()))
+        self.facies_compare_table.setRowCount(len(facs_union))
+
+        for row, fac in enumerate(facs_union):
+            s0 = stats0.get(fac, {"cells": 0, "fraction": 0.0})
+            s1 = stats1.get(fac, {"cells": 0, "fraction": 0.0}) if stats1 else {"cells": 0, "fraction": 0.0}
+
+            self.facies_compare_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(fac)))
+            self.facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0["cells"])))
+            self.facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0['fraction']:.2f}"))
+            self.facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1["cells"])))
+            self.facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1['fraction']:.2f}"))
+
+        self.facies_compare_table.resizeColumnsToContents()
+
+        # --------- 3) Distribuição de fácies dentro do reservatório ---------
+        stats0r = getattr(self, "base_res_stats", None) or {}
+        stats1r = getattr(self, "comp_res_stats", None) or {}
+        facs_res_union = sorted(set(stats0r.keys()) | set(stats1r.keys()))
+        self.reservoir_facies_compare_table.setRowCount(len(facs_res_union))
+
+        for row, fac in enumerate(facs_res_union):
+            s0 = stats0r.get(fac, {"cells": 0, "fraction": 0.0})
+            s1 = stats1r.get(fac, {"cells": 0, "fraction": 0.0})
+
+            self.reservoir_facies_compare_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(fac)))
+            self.reservoir_facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0["cells"])))
+            self.reservoir_facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0['fraction']:.2f}"))
+            self.reservoir_facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1["cells"])))
+            self.reservoir_facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1['fraction']:.2f}"))
+
+        self.reservoir_facies_compare_table.resizeColumnsToContents()
 
 
 

@@ -7,6 +7,8 @@ import pyvista as pv
 
 from load_data import grid, facies, nx, ny, nz
 from derived_fields import ensure_reservoir, ensure_clusters
+from typing import Iterable
+from scipy.ndimage import label as nd_label, generate_binary_structure
 
 def compute_global_metrics(reservoir_facies):
     res_arr = ensure_reservoir(reservoir_facies)
@@ -69,6 +71,141 @@ def compute_directional_percolation(reservoir_facies):
         "z_perc": bool(z_common),
         "z_clusters": z_common,
     }
+
+
+def compute_global_and_perc_for_array(
+    facies_array: np.ndarray,
+    nx_: int,
+    ny_: int,
+    nz_: int,
+    reservoir_facies: Iterable[int],
+):
+    """
+    Versão genérica das métricas globais + percolação direcional
+    para um array 1D de fácies (qualquer grid externo).
+
+    facies_array: array 1D já com orientação igual ao grid principal.
+    nx_, ny_, nz_: dimensões do grid.
+    reservoir_facies: conjunto/lista/int de fácies de reservatório.
+    """
+    # normaliza as fácies de reservatório
+    if isinstance(reservoir_facies, (int, np.integer)):
+        fac_set = {int(reservoir_facies)}
+    else:
+        fac_set = {int(f) for f in reservoir_facies}
+
+    total_cells = facies_array.size
+    if total_cells == 0:
+        return (
+            {
+                "total_cells": 0,
+                "res_cells": 0,
+                "ntg": 0.0,
+                "n_clusters": 0,
+                "largest_label": 0,
+                "largest_size": 0,
+                "connected_fraction": 0.0,
+            },
+            {
+                "x_perc": False,
+                "x_clusters": set(),
+                "y_perc": False,
+                "y_clusters": set(),
+                "z_perc": False,
+                "z_clusters": set(),
+            },
+        )
+
+    # reshape para 3D
+    arr_xyz = facies_array.reshape((nx_, ny_, nz_), order="F")
+
+    # máscara de reservatório
+    mask = np.isin(arr_xyz, list(fac_set))
+    res_cells = int(mask.sum())
+    ntg = res_cells / total_cells if total_cells else 0.0
+
+    if res_cells == 0:
+        metrics = {
+            "total_cells": total_cells,
+            "res_cells": 0,
+            "ntg": 0.0,
+            "n_clusters": 0,
+            "largest_label": 0,
+            "largest_size": 0,
+            "connected_fraction": 0.0,
+        }
+        perc = {
+            "x_perc": False,
+            "x_clusters": set(),
+            "y_perc": False,
+            "y_clusters": set(),
+            "z_perc": False,
+            "z_clusters": set(),
+        }
+        return metrics, perc
+
+    # rotula clusters 3D (ZYX para usar nd_label)
+    arr_zyx = mask.transpose(2, 1, 0)  # (z, y, x)
+    structure = generate_binary_structure(3, 1)
+    labeled_zyx, _ = nd_label(arr_zyx, structure=structure)
+    labeled_xyz = labeled_zyx.transpose(2, 1, 0)  # volta para (x, y, z)
+
+    clusters_1d = labeled_xyz.reshape(-1, order="F").astype(np.int32)
+
+    counts = np.bincount(clusters_1d)
+    if counts.size > 0:
+        counts[0] = 0  # remove o fundo
+
+    n_clusters = int((counts > 0).sum())
+    largest_label = int(counts.argmax()) if counts.size > 0 else 0
+    largest_size = int(counts[largest_label]) if counts.size > 0 else 0
+    connected_fraction = largest_size / res_cells if res_cells > 0 else 0.0
+
+    # --- percolação direcional ---
+    clusters_xyz = clusters_1d.reshape((nx_, ny_, nz_), order="F")
+
+    # X
+    left = clusters_xyz[0, :, :]
+    right = clusters_xyz[-1, :, :]
+    left_ids = set(np.unique(left)); left_ids.discard(0)
+    right_ids = set(np.unique(right)); right_ids.discard(0)
+    x_common = left_ids.intersection(right_ids)
+
+    # Y
+    front = clusters_xyz[:, 0, :]
+    back = clusters_xyz[:, -1, :]
+    f_ids = set(np.unique(front)); f_ids.discard(0)
+    b_ids = set(np.unique(back)); b_ids.discard(0)
+    y_common = f_ids.intersection(b_ids)
+
+    # Z
+    top = clusters_xyz[:, :, 0]
+    bottom = clusters_xyz[:, :, -1]
+    t_ids = set(np.unique(top)); t_ids.discard(0)
+    bo_ids = set(np.unique(bottom)); bo_ids.discard(0)
+    z_common = t_ids.intersection(bo_ids)
+
+    metrics = {
+        "total_cells": total_cells,
+        "res_cells": res_cells,
+        "ntg": ntg,
+        "n_clusters": n_clusters,
+        "largest_label": largest_label,
+        "largest_size": largest_size,
+        "connected_fraction": connected_fraction,
+    }
+
+    perc = {
+        "x_perc": bool(x_common),
+        "x_clusters": x_common,
+        "y_perc": bool(y_common),
+        "y_clusters": y_common,
+        "z_perc": bool(z_common),
+        "z_clusters": z_common,
+    }
+
+    return metrics, perc
+
 
 def get_cluster_sizes(reservoir_facies):
     """
@@ -461,5 +598,157 @@ def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
     print("  →", name_ICV)
     print("  →", name_Qv)
     print("  →", name_Qvabs)
+
+def facies_distribution_array(facies_array):
+    """
+    Distribuição de fácies no grid inteiro.
+    Retorna:
+      - stats: {facies: {"cells": count, "fraction": fração_no_grid}}
+      - total_cells: número total de células
+    """
+    arr = np.asarray(facies_array).astype(int)
+    total = arr.size
+    if total == 0:
+        return {}, 0
+
+    vals, counts = np.unique(arr, return_counts=True)
+    stats = {}
+    for v, c in zip(vals, counts):
+        stats[int(v)] = {
+            "cells": int(c),
+            "fraction": c / total,
+        }
+    return stats, total
+
+
+def reservoir_facies_distribution_array(facies_array, reservoir_facies):
+    """
+    Distribuição de fácies considerando apenas as células de reservatório.
+    Retorna:
+      - stats_res: {facies: {"cells": count, "fraction": fração_no_reservatório}}
+      - res_total: número total de células de reservatório
+    """
+    arr = np.asarray(facies_array).astype(int)
+
+    if isinstance(reservoir_facies, (int, np.integer)):
+        fac_set = {int(reservoir_facies)}
+    else:
+        fac_set = {int(f) for f in reservoir_facies}
+
+    mask = np.isin(arr, list(fac_set))
+    res_total = int(mask.sum())
+    if res_total == 0:
+        return {}, 0
+
+    arr_res = arr[mask]
+    vals, counts = np.unique(arr_res, return_counts=True)
+    stats = {}
+    for v, c in zip(vals, counts):
+        stats[int(v)] = {
+            "cells": int(c),
+            "fraction": c / res_total,
+        }
+    return stats, res_total
+
+
+def compute_global_metrics_for_array(facies_array, reservoir_facies):
+    """
+    Versão independente de compute_global_metrics/compute_directional_percolation
+    que funciona para QUALQUER array 1D de fácies com dimensões (nx, ny, nz)
+    do load_data.
+    """
+    from load_data import nx, ny, nz  # evita import circular no topo
+
+    arr = np.asarray(facies_array).astype(int)
+    total_cells = arr.size
+
+    if isinstance(reservoir_facies, (int, np.integer)):
+        fac_set = {int(reservoir_facies)}
+    else:
+        fac_set = {int(f) for f in reservoir_facies}
+
+    mask = np.isin(arr, list(fac_set))
+    res_cells = int(mask.sum())
+    ntg = res_cells / total_cells if total_cells else 0.0
+
+    if res_cells == 0:
+        metrics = {
+            "total_cells": int(total_cells),
+            "res_cells": res_cells,
+            "ntg": ntg,
+            "n_clusters": 0,
+            "largest_label": 0,
+            "largest_size": 0,
+            "connected_fraction": 0.0,
+        }
+        perc = {
+            "x_perc": False,
+            "x_clusters": set(),
+            "y_perc": False,
+            "y_clusters": set(),
+            "z_perc": False,
+            "z_clusters": set(),
+        }
+        return metrics, perc
+
+    # reshape para 3D (mesmas dimensões do modelo base)
+    res_xyz = mask.reshape((nx, ny, nz), order="F")
+
+    # clusterização 3D
+    structure = generate_binary_structure(3, 1)
+    labeled, _ = nd_label(res_xyz, structure=structure)
+    clusters_1d = labeled.reshape(-1, order="F")
+
+    counts = np.bincount(clusters_1d)
+    if counts.size > 0:
+        counts[0] = 0
+    n_clusters = int((counts > 0).sum())
+    largest_label = int(counts.argmax()) if counts.size > 0 else 0
+    largest_size = int(counts[largest_label]) if counts.size > 0 else 0
+    connected_fraction = largest_size / res_cells if res_cells > 0 else 0.0
+
+    # percolação direcional
+    labeled_xyz = labeled  # (nx, ny, nz)
+
+    # X
+    left = labeled_xyz[0, :, :]
+    right = labeled_xyz[-1, :, :]
+    left_ids = set(np.unique(left)); left_ids.discard(0)
+    right_ids = set(np.unique(right)); right_ids.discard(0)
+    x_common = left_ids.intersection(right_ids)
+
+    # Y
+    front = labeled_xyz[:, 0, :]
+    back = labeled_xyz[:, -1, :]
+    f_ids = set(np.unique(front)); f_ids.discard(0)
+    b_ids = set(np.unique(back)); b_ids.discard(0)
+    y_common = f_ids.intersection(b_ids)
+
+    # Z
+    top = labeled_xyz[:, :, 0]
+    bottom = labeled_xyz[:, :, -1]
+    t_ids = set(np.unique(top)); t_ids.discard(0)
+    bo_ids = set(np.unique(bottom)); bo_ids.discard(0)
+    z_common = t_ids.intersection(bo_ids)
+
+    metrics = {
+        "total_cells": int(total_cells),
+        "res_cells": res_cells,
+        "ntg": float(ntg),
+        "n_clusters": n_clusters,
+        "largest_label": largest_label,
+        "largest_size": largest_size,
+        "connected_fraction": float(connected_fraction),
+    }
+    perc = {
+        "x_perc": bool(x_common),
+        "x_clusters": x_common,
+        "y_perc": bool(y_common),
+        "y_clusters": y_common,
+        "z_perc": bool(z_common),
+        "z_clusters": z_common,
+    }
+    return metrics, perc
+
 
 

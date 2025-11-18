@@ -61,3 +61,18 @@ facies = facies_3d.reshape(-1, order="F")             # volta pra 1D
 
 grid.cell_data["Facies"] = facies
 
+def load_facies_from_grdecl(path):
+    """
+    Lê um GRDECL externo e devolve o array 1D de fácies já
+    com a mesma inversão em Z usada no modelo base.
+    """
+    fac = read_keyword_array(path, "Facies")
+    nx2, ny2, nz2 = read_specgrid(path)
+
+    fac_3d = fac.reshape((nx2, ny2, nz2), order="F")
+    fac_3d = fac_3d[:, :, ::-1]
+    fac_1d = fac_3d.reshape(-1, order="F")
+
+    return fac_1d
+
+
