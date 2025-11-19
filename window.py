@@ -1,6 +1,6 @@
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtGui import QColor, QBrush, QPixmap
-from pyvistaqt import BackgroundPlotter
+from pyvistaqt import BackgroundPlotter, QtInteractor
 import numpy as np
 import os
 
@@ -130,41 +130,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- UI SETUP ---
         self.create_menus()
-        self.create_nav_toolbar()
+        # self.create_nav_toolbar() # REMOVED
         self.create_docks()
 
-        # --- CENTRAL WIDGET (TABS ONLY) ---
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central) 
-        self.setCentralWidget(central)
+        # --- RIBBON SETUP (Top Toolbar) ---
+        self.ribbon = QtWidgets.QTabWidget()
+        self.ribbon.setFixedHeight(120) # Altura fixa para o Ribbon
+        self.ribbon.setStyleSheet("QTabWidget::pane { border: 0; }") # Remove borda do pane
+        
+        ribbon_toolbar = QtWidgets.QToolBar()
+        ribbon_toolbar.addWidget(self.ribbon)
+        ribbon_toolbar.setMovable(False)
+        ribbon_toolbar.setFloatable(False)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, ribbon_toolbar)
 
-        # --- ÁREA DIREITA (TABs) -> Agora ocupa tudo ---
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.tabBar().hide() # Esconde abas para usar navegação Ribbon
-        
-        # 1. Aba 3D Principal
-        self.plotter = BackgroundPlotter(show=False)
-        self.viz_tab = QtWidgets.QWidget()
-        vl = QtWidgets.QVBoxLayout(self.viz_tab)
-        vl.setContentsMargins(0,0,0,0)
-        
-        # [NOVO] Toolbar Local
-        self.mode_actions = {} # Inicializa dict
-        self.viz_toolbar = self.create_local_toolbar(self.mode_actions, self.change_mode, is_compare=False)
-        vl.addWidget(self.viz_toolbar)
-        
-        vl.addWidget(self.plotter.interactor)
-        self.tabs.addTab(self.viz_tab, "Visualização 3D")
-        
-        # 2. Aba 2D
-        self.plotter_2d = BackgroundPlotter(show=False)
-        self.map2d_tab = QtWidgets.QWidget()
-        ml = QtWidgets.QVBoxLayout(self.map2d_tab)
-        ml.setContentsMargins(0,0,0,0)
-        ml.addWidget(self.plotter_2d.interactor)
-        self.tabs.addTab(self.map2d_tab, "Mapa 2D")
+        # --- CENTRAL STACK (Content) ---
+        self.stack = QtWidgets.QStackedWidget()
+        self.setCentralWidget(self.stack)
 
-        # 3. Aba Métricas Globais
+        # 1. Visualização 3D
+        self.mode_actions = {}
+        self.viz_toolbar = self.create_ribbon_page(self.mode_actions, self.change_mode, is_compare=False)
+        self.ribbon.addTab(self.viz_toolbar, "Visualização 3D")
+        
+        # 1. Visualização 3D
+        self.mode_actions = {}
+        self.viz_toolbar = self.create_ribbon_page(self.mode_actions, self.change_mode, is_compare=False)
+        self.ribbon.addTab(self.viz_toolbar, "Visualização 3D")
+        
+        self.plotter = QtInteractor(self)
+        # [FIX] Wrap interactor in a container widget
+        self.viz_container = QtWidgets.QWidget()
+        viz_layout = QtWidgets.QVBoxLayout(self.viz_container)
+        viz_layout.setContentsMargins(0,0,0,0)
+        viz_layout.addWidget(self.plotter)
+        self.stack.addWidget(self.viz_container)
+        
+        # 2. Mapas 2D
+        self.map2d_toolbar = QtWidgets.QWidget() # Placeholder toolbar
+        self.ribbon.addTab(self.map2d_toolbar, "Mapas 2D")
+        
+        # 2. Mapas 2D
+        self.map2d_toolbar = QtWidgets.QWidget() # Placeholder toolbar
+        self.ribbon.addTab(self.map2d_toolbar, "Mapas 2D")
+        
+        self.plotter_2d = QtInteractor(self)
+        # [FIX] Wrap interactor in a container widget
+        self.map2d_container = QtWidgets.QWidget()
+        map2d_layout = QtWidgets.QVBoxLayout(self.map2d_container)
+        map2d_layout.setContentsMargins(0,0,0,0)
+        map2d_layout.addWidget(self.plotter_2d)
+        self.stack.addWidget(self.map2d_container)
+
+        # 3. Métricas
+        self.metrics_toolbar = QtWidgets.QWidget() # Placeholder toolbar
+        self.ribbon.addTab(self.metrics_toolbar, "Métricas")
+        
         self.metrics_tab = QtWidgets.QWidget()
         self.metrics_layout = QtWidgets.QVBoxLayout(self.metrics_tab)
         metrics_group = QtWidgets.QGroupBox("Análises do Modelo")
@@ -180,17 +201,15 @@ class MainWindow(QtWidgets.QMainWindow):
         fg_layout.addWidget(self.facies_table)
         self.metrics_layout.addWidget(facies_group)
         self.metrics_layout.addStretch()
-        self.tabs.addTab(self.metrics_tab, "Métricas Globais")
+        self.stack.addWidget(self.metrics_tab)
 
-        # --- 4. ABA COMPARAÇÃO ---
+        # 4. Comparação
+        self.compare_mode_actions = {}
+        self.comp_toolbar = self.create_ribbon_page(self.compare_mode_actions, self.change_compare_mode, is_compare=True)
+        self.ribbon.addTab(self.comp_toolbar, "Comparação")
+        
         self.compare_tab = QtWidgets.QWidget()
         comp_layout = QtWidgets.QVBoxLayout(self.compare_tab)
-        
-        # [NOVO] Toolbar Local de Comparação
-        self.compare_mode_actions = {}
-        self.comp_toolbar = self.create_local_toolbar(self.compare_mode_actions, self.change_compare_mode, is_compare=True)
-        comp_layout.addWidget(self.comp_toolbar)
-
         self.compare_tabs = QtWidgets.QTabWidget()
         comp_layout.addWidget(self.compare_tabs)
         
@@ -238,15 +257,15 @@ class MainWindow(QtWidgets.QMainWindow):
         c2d_layout = QtWidgets.QHBoxLayout(self.compare_2d_widget)
         
         l_col_2d = QtWidgets.QVBoxLayout()
-        self.comp_plotter_base_2d = BackgroundPlotter(show=False)
+        self.comp_plotter_base_2d = QtInteractor(self)
         l_col_2d.addWidget(QtWidgets.QLabel("Mapa Base"))
-        l_col_2d.addWidget(self.comp_plotter_base_2d.interactor)
+        l_col_2d.addWidget(self.comp_plotter_base_2d)
         c2d_layout.addLayout(l_col_2d)
 
         r_col_2d = QtWidgets.QVBoxLayout()
-        self.comp_plotter_comp_2d = BackgroundPlotter(show=False)
+        self.comp_plotter_comp_2d = QtInteractor(self)
         r_col_2d.addWidget(QtWidgets.QLabel("Mapa Comparado"))
-        r_col_2d.addWidget(self.comp_plotter_comp_2d.interactor)
+        r_col_2d.addWidget(self.comp_plotter_comp_2d)
         c2d_layout.addLayout(r_col_2d)
 
         self.compare_tabs.addTab(self.compare_2d_widget, "Mapas 2D")
@@ -263,20 +282,20 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.setContentsMargins(0,0,0,0)
         top_layout.setSpacing(2)
 
-        self.comp_plotter_base = BackgroundPlotter(show=False)
+        self.comp_plotter_base = QtInteractor(self)
         l_container = QtWidgets.QWidget()
         l_layout = QtWidgets.QVBoxLayout(l_container)
         l_layout.setContentsMargins(0,0,0,0)
         l_layout.addWidget(QtWidgets.QLabel("Modelo Base"))
-        l_layout.addWidget(self.comp_plotter_base.interactor)
+        l_layout.addWidget(self.comp_plotter_base)
         top_layout.addWidget(l_container)
 
-        self.comp_plotter_comp = BackgroundPlotter(show=False)
+        self.comp_plotter_comp = QtInteractor(self)
         r_container = QtWidgets.QWidget()
         r_layout = QtWidgets.QVBoxLayout(r_container)
         r_layout.setContentsMargins(0,0,0,0)
         r_layout.addWidget(QtWidgets.QLabel("Modelo Comparado"))
-        r_layout.addWidget(self.comp_plotter_comp.interactor)
+        r_layout.addWidget(self.comp_plotter_comp)
         top_layout.addWidget(r_container)
         splitter.addWidget(top_widget)
 
@@ -312,9 +331,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setSizes([800, 400])
 
         self.compare_tabs.addTab(self.compare_3d_widget, "Visualização 3D")
-        self.tabs.addTab(self.compare_tab, "Comparação")
-
-        layout.addWidget(self.tabs)
+        self.stack.addWidget(self.compare_tab)
 
         # --- INITIALIZATION ---
         self.populate_facies_legend()
@@ -343,8 +360,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # [NOVO]: Chama atualização inicial dos mapas 2D
         self.update_compare_2d_maps()
 
-        # Conecta sinal de mudança de aba APÓS inicialização do state
-        self.tabs.currentChanged.connect(self.on_tab_changed)
+        # Conecta sinal de mudança de aba
+        self.ribbon.currentChanged.connect(self.on_tab_changed)
 
     def create_menus(self):
         menubar = self.menuBar()
@@ -388,83 +405,62 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addSeparator()
         self.view_docks_menu = view_menu.addMenu("Janelas")
 
-    def create_nav_toolbar(self):
-        """Cria a barra de navegação principal (Abas)."""
-        nav_toolbar = QtWidgets.QToolBar("Navegação")
-        nav_toolbar.setMovable(False)
-        nav_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        nav_toolbar.setIconSize(QtCore.QSize(32, 32))
-        self.addToolBar(QtCore.Qt.TopToolBarArea, nav_toolbar)
+    # create_nav_toolbar REMOVED
 
-        def add_nav_btn(label, icon_type, index):
-            icon = self.style().standardIcon(icon_type)
-            action = QtWidgets.QAction(icon, label, self)
-            action.setCheckable(True)
-            action.triggered.connect(lambda: self.tabs.setCurrentIndex(index))
-            nav_toolbar.addAction(action)
-            return action
-
-        self.nav_actions = []
-        self.nav_actions.append(add_nav_btn("Visualização 3D", QtWidgets.QStyle.SP_DesktopIcon, 0))
-        self.nav_actions.append(add_nav_btn("Mapa 2D", QtWidgets.QStyle.SP_FileDialogDetailedView, 1))
-        self.nav_actions.append(add_nav_btn("Métricas", QtWidgets.QStyle.SP_FileDialogInfoView, 2))
-        self.nav_actions.append(add_nav_btn("Comparação", QtWidgets.QStyle.SP_FileDialogContentsView, 3))
-        
-        # Default selection
-        self.nav_actions[0].setChecked(True)
-
-    def create_local_toolbar(self, target_dict, callback, is_compare=False):
+    def create_ribbon_page(self, target_dict, callback, is_compare=False):
         """Cria uma toolbar local (QWidget) para ser inserida dentro da aba."""
         toolbar = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(toolbar)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
         
-        # Helper button
-        def add_btn(label, icon_type, mode_code):
-            btn = QtWidgets.QToolButton()
-            btn.setText(label)
-            
-            if isinstance(icon_type, str):
-                if os.path.exists(icon_type):
-                    btn.setIcon(QtGui.QIcon(icon_type))
-                else:
-                    btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning))
-            else:
-                btn.setIcon(self.style().standardIcon(icon_type))
-                
-            btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-            btn.setCheckable(True)
-            btn.setAutoExclusive(True) # Comportamento de rádio
-            btn.setIconSize(QtCore.QSize(32, 32)) # Aumentei um pouco para ver melhor a imagem
-            btn.clicked.connect(lambda: callback(mode_code))
-            layout.addWidget(btn)
-            target_dict[mode_code] = btn
-            return btn
-
-        # Modos
-        # [CUSTOM ICON] Fácies
-        facies_icon_path = os.path.join(os.path.dirname(__file__), "assets", "facies_icon.png")
-        b1 = add_btn("Fácies", facies_icon_path, "facies")
-        b1.setChecked(True)
-        add_btn("Reservatório", QtWidgets.QStyle.SP_DirHomeIcon, "reservoir")
-        add_btn("Clusters", QtWidgets.QStyle.SP_FileIcon, "clusters")
-        
-        if not is_compare:
-            add_btn("Maior Cluster", QtWidgets.QStyle.SP_TitleBarMaxButton, "largest")
-            
-        # [NOVO] Botões solicitados
-        add_btn("Espessura Local", QtWidgets.QStyle.SP_FileDialogDetailedView, "thickness_local")
-        add_btn("NTG Local", QtWidgets.QStyle.SP_FileDialogInfoView, "ntg_local")
-
-        # Separador
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.VLine)
-        line.setFrameShadow(QtWidgets.QFrame.Sunken)
-        layout.addWidget(line)
-
-        # Sync (Só Comparação)
         if is_compare:
+            # --- MODO COMPARAÇÃO (Botões individuais + Combo) ---
+            def add_btn(label, icon_type, mode_code):
+                btn = QtWidgets.QToolButton()
+                btn.setText(label)
+                
+                if isinstance(icon_type, str):
+                    if os.path.exists(icon_type):
+                        btn.setIcon(QtGui.QIcon(icon_type))
+                    else:
+                        btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning))
+                else:
+                    btn.setIcon(self.style().standardIcon(icon_type))
+                    
+                btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+                btn.setCheckable(True)
+                btn.setAutoExclusive(True)
+                btn.setIconSize(QtCore.QSize(32, 32))
+                btn.clicked.connect(lambda: callback(mode_code))
+                layout.addWidget(btn)
+                target_dict[mode_code] = btn
+                return btn
+
+            # Modos
+            facies_icon_path = os.path.join(os.path.dirname(__file__), "assets", "facies_icon.png")
+            b1 = add_btn("Fácies", facies_icon_path, "facies")
+            b1.setChecked(True)
+
+            reservoir_icon_path = os.path.join(os.path.dirname(__file__), "assets", "reservoir_icon.png")
+            add_btn("Reservatório", reservoir_icon_path, "reservoir")
+
+            clusters_icon_path = os.path.join(os.path.dirname(__file__), "assets", "clusters_icon.png")
+            add_btn("Clusters", clusters_icon_path, "clusters")
+            
+            thickness_icon_path = os.path.join(os.path.dirname(__file__), "assets", "thickness_icon.png")
+            add_btn("Espessura Local", thickness_icon_path, "thickness_local")
+            
+            ntg_icon_path = os.path.join(os.path.dirname(__file__), "assets", "ntg_icon.png")
+            add_btn("NTG Local", ntg_icon_path, "ntg_local")
+
+            # Separador
+            line = QtWidgets.QFrame()
+            line.setFrameShape(QtWidgets.QFrame.VLine)
+            line.setFrameShadow(QtWidgets.QFrame.Sunken)
+            layout.addWidget(line)
+
+            # Sync
             self.sync_btn = QtWidgets.QToolButton()
             self.sync_btn.setText("Sincronizar")
             self.sync_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
@@ -479,34 +475,129 @@ class MainWindow(QtWidgets.QMainWindow):
             line2.setFrameShape(QtWidgets.QFrame.VLine)
             line2.setFrameShadow(QtWidgets.QFrame.Sunken)
             layout.addWidget(line2)
-
-        # Combo Métrica
-        container = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(container)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
-        lbl = QtWidgets.QLabel("Métrica Local")
-        lbl.setAlignment(QtCore.Qt.AlignCenter)
-        lbl.setStyleSheet("font-size: 10px; color: #555;")
-        
-        combo = QtWidgets.QComboBox()
-        combo.setMinimumWidth(120)
-        combo.addItems([
-            "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
-            "Nº pacotes", "ICV", "Qv", "Qv absoluto",
-        ])
-        combo.currentTextChanged.connect(self.change_thickness_mode)
-        
-        # Guarda referência do combo correto dependendo do contexto
-        if is_compare:
+            
+            # Combo Métrica (Legacy para Comparação)
+            container = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(container)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            lbl = QtWidgets.QLabel("Métrica Local")
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setStyleSheet("font-size: 10px; color: #555;")
+            
+            combo = QtWidgets.QComboBox()
+            combo.setMinimumWidth(120)
+            combo.addItems([
+                "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
+                "Nº pacotes", "ICV", "Qv", "Qv absoluto",
+            ])
+            combo.currentTextChanged.connect(self.change_thickness_mode)
             self.thick_combo_compare = combo
-        else:
-            self.thick_combo = combo
+            
+            lay.addWidget(combo)
+            lay.addWidget(lbl)
+            layout.addWidget(container)
 
-        lay.addWidget(combo)
-        lay.addWidget(lbl)
-        layout.addWidget(container)
-        
+        else:
+            # --- MODO PRINCIPAL (Dropdown "Perspectiva") ---
+            persp_btn = QtWidgets.QToolButton()
+            persp_btn.setText("Perspectiva")
+            persp_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+            persp_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            
+            # Ícone principal
+            persp_icon_path = os.path.join(os.path.dirname(__file__), "assets", "facies_icon.png") 
+            if os.path.exists(persp_icon_path):
+                persp_btn.setIcon(QtGui.QIcon(persp_icon_path))
+            persp_btn.setIconSize(QtCore.QSize(32, 32))
+            
+            menu = QtWidgets.QMenu(persp_btn)
+            persp_btn.setMenu(menu)
+            
+            group = QtWidgets.QActionGroup(toolbar)
+            
+            def add_action(label, icon_path, mode_code):
+                if os.path.exists(icon_path):
+                    icon = QtGui.QIcon(icon_path)
+                else:
+                    icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
+                
+                action = QtWidgets.QAction(icon, label, menu)
+                action.setCheckable(True)
+                action.triggered.connect(lambda: callback(mode_code))
+                menu.addAction(action)
+                group.addAction(action)
+                target_dict[mode_code] = action
+                return action
+
+            # Adicionando as ações
+            add_action("Fácies", os.path.join(os.path.dirname(__file__), "assets", "facies_icon.png"), "facies").setChecked(True)
+            add_action("Reservatório", os.path.join(os.path.dirname(__file__), "assets", "reservoir_icon.png"), "reservoir")
+            add_action("Clusters", os.path.join(os.path.dirname(__file__), "assets", "clusters_icon.png"), "clusters")
+            add_action("Maior Cluster", os.path.join(os.path.dirname(__file__), "assets", "largest_icon.png"), "largest")
+            add_action("Espessura Local", os.path.join(os.path.dirname(__file__), "assets", "thickness_icon.png"), "thickness_local")
+            add_action("NTG Local", os.path.join(os.path.dirname(__file__), "assets", "ntg_icon.png"), "ntg_local")
+            
+            layout.addWidget(persp_btn)
+            
+            # Separador
+            line = QtWidgets.QFrame()
+            line.setFrameShape(QtWidgets.QFrame.VLine)
+            line.setFrameShadow(QtWidgets.QFrame.Sunken)
+            layout.addWidget(line)
+            
+            # --- VIEW SECTION ---
+            view_container = QtWidgets.QWidget()
+            view_layout = QtWidgets.QHBoxLayout(view_container)
+            view_layout.setContentsMargins(0, 0, 0, 0)
+            view_layout.setSpacing(2)
+            
+            def add_view_btn(label, icon_sp):
+                btn = QtWidgets.QToolButton()
+                btn.setText(label)
+                btn.setIcon(self.style().standardIcon(icon_sp))
+                btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+                btn.setIconSize(QtCore.QSize(24, 24))
+                view_layout.addWidget(btn)
+                return btn
+                
+            add_view_btn("Inspector", QtWidgets.QStyle.SP_FileDialogInfoView)
+            add_view_btn("Clone", QtWidgets.QStyle.SP_TitleBarNormalButton)
+            add_view_btn("Layout", QtWidgets.QStyle.SP_TitleBarMaxButton)
+            
+            layout.addWidget(view_container)
+            
+            # Separador
+            line_view = QtWidgets.QFrame()
+            line_view.setFrameShape(QtWidgets.QFrame.VLine)
+            line_view.setFrameShadow(QtWidgets.QFrame.Sunken)
+            layout.addWidget(line_view)
+
+            # --- METRICS (Panes Style) ---
+            self.metrics_btn = QtWidgets.QToolButton()
+            self.metrics_btn.setText("Métricas")
+            self.metrics_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+            self.metrics_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+            self.metrics_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+            
+            metrics_menu = QtWidgets.QMenu(self.metrics_btn)
+            self.metrics_btn.setMenu(metrics_menu)
+            
+            metrics_options = [
+                "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
+                "Nº pacotes", "ICV", "Qv", "Qv absoluto",
+            ]
+            
+            def set_metric(m):
+                self.change_thickness_mode(m)
+                
+            for m in metrics_options:
+                action = QtWidgets.QAction(m, metrics_menu)
+                action.triggered.connect(lambda checked, val=m: set_metric(val))
+                metrics_menu.addAction(action)
+                
+            layout.addWidget(self.metrics_btn)
+
         layout.addStretch()
         return toolbar
 
@@ -564,14 +655,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_docks_menu.addAction(self.legend_dock.toggleViewAction())
 
     def on_tab_changed(self, index):
-        # Atualiza botões de navegação
-        for i, action in enumerate(self.nav_actions):
-            action.setChecked(i == index)
-            
-        # Atualiza barra de opções
-        # self.update_options_toolbar() -> REMOVIDO
-
-        tab_text = self.tabs.tabText(index)
+        # Sincroniza o Stack com o Ribbon
+        self.stack.setCurrentIndex(index)
+        
+        tab_text = self.ribbon.tabText(index)
         
         if tab_text == "Comparação":
             if self.comparison_dirty:
@@ -882,9 +969,12 @@ class MainWindow(QtWidgets.QMainWindow):
         print("Thickness:", label)
         self.state["thickness_mode"] = label
         
-        # Atualiza Combo se foi chamado programaticamente
-        if self.thick_combo.currentText() != label:
-            self.thick_combo.setCurrentText(label)
+        # Atualiza UI (Botão ou Combo)
+        if hasattr(self, "metrics_btn"):
+            self.metrics_btn.setText(label)
+        elif hasattr(self, "thick_combo") and self.thick_combo:
+            if self.thick_combo.currentText() != label:
+                self.thick_combo.setCurrentText(label)
 
         # Atualiza visualizador principal 3D
         if "update_thickness" in self.state:
@@ -892,7 +982,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["refresh"]()
 
         # Lazy Update Comparação
-        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        current_tab = self.ribbon.tabText(self.ribbon.currentIndex())
         
         if current_tab == "Comparação":
             # Atualiza visualizadores de COMPARAÇÃO
@@ -1048,7 +1138,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state["refresh"]()
             
         # 3. Lazy Update Mapa 2D Principal
-        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        current_tab = self.ribbon.tabText(self.ribbon.currentIndex())
         if current_tab == "Mapa 2D":
             self.update_2d_map()
             self.main_2d_dirty = False

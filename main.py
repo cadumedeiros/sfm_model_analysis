@@ -13,7 +13,7 @@ from visualize import show_thickness_2d, set_thickness_scalar
 
 from window import MainWindow
 import sys
-from PyQt5 import QtWidgets
+from PyQt5 import QtWidgets, QtCore
 
 def main():
     
@@ -25,7 +25,7 @@ def main():
     if MODE == "thickness_local":
         visualizar = "Espessura" # "Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv"
 
-    Z_EXAG = 15.0
+    Z_EXAG = 10.0
     SHOW_SCALAR_BAR = True
     
     
@@ -103,6 +103,7 @@ def main():
 
 
     # 1) Cria a aplicação Qt
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
     app = QtWidgets.QApplication(sys.argv)
 
     # 2) Cria a janela principal

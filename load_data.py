@@ -2,7 +2,7 @@
 import pyvista as pv
 import numpy as np
 
-grdecl_path = "assets/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
+grdecl_path = "assets/MCh_Inferior_Versao_0-2_SIM_Sim208_.grdecl"
 
 grid = pv.read_grdecl(grdecl_path)
 
