@@ -16,14 +16,28 @@ from analysis import (
 )
 
 def make_facies_table():
+    """
+    Cria a tabela de Fácies compacta (largura ajustada ao conteúdo).
+    """
     table = QtWidgets.QTableWidget()
     table.setColumnCount(4)
     table.setHorizontalHeaderLabels(["Cor", "Fácies", "Células", "Sel."])
+    
+    # Configuração Visual
     table.verticalHeader().setVisible(False)
     table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
     table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-    table.setMaximumHeight(150)
-    table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+    
+    # Permite crescer verticalmente, mas TRAVA horizontalmente
+    table.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+    table.setMinimumWidth(250)
+    table.setMaximumWidth(320) # [AJUSTE]: Largura máxima para ficar compacta
+    
+    # [AJUSTE]: Colunas se ajustam ao texto, não esticam para preencher vazio
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+    header.setStretchLastSection(False) 
+    
     return table
 
 
@@ -85,58 +99,46 @@ class MainWindow(QtWidgets.QMainWindow):
         if isinstance(reservoir_facies, (int, np.integer)):
             initial_reservoir = {int(reservoir_facies)}
         else:
-            # já é iterável (lista, set, etc.)
             initial_reservoir = {int(f) for f in reservoir_facies}
 
-        # ---------- MODELOS (BASE e COMPARADO) ----------
-        # Base: é o modelo carregado por default (load_data.facies)
-        # Compare: será preenchido quando você escolher um GRDECL externo
+        # ---------- MODELOS ----------
         self.models = {
             "base": {
                 "name": "BaseModel",
-                "facies": facies,                    # do load_data
+                "facies": facies,
                 "reservoir_facies": set(initial_reservoir),
             },
             "compare": {
-                "name": None,                        # caminho ou rótulo do modelo comparado
-                "facies": None,                      # array 1D de fácies do modelo comparado
-                "reservoir_facies": set(),           # fácies de reservatório do modelo comparado
+                "name": None,
+                "facies": None,
+                "reservoir_facies": set(),
             },
         }
 
-
         self.resize(1600, 900)
         self.setMinimumSize(800, 600)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding
-        )
 
-        # Layout base
         central = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        # Painel lateral --------------------------------------------------
+        # --- PAINEL LATERAL ---
         self.panel = QtWidgets.QWidget()
         panel_layout = QtWidgets.QVBoxLayout(self.panel)
+        self.panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.panel.setMaximumWidth(300) 
 
-        self.panel.setSizePolicy(
-            QtWidgets.QSizePolicy.Preferred,
-            QtWidgets.QSizePolicy.Expanding
-        )
-
+        # Logo
         logo_label = QtWidgets.QLabel()
-        pix = QPixmap("assets/forward_PNG.png")   # caminho do seu logo
-        pix = pix.scaledToWidth(140, QtCore.Qt.SmoothTransformation)  # ajusta o tamanho
-        logo_label.setPixmap(pix)
+        pix = QPixmap("assets/forward_PNG.png")
+        if not pix.isNull():
+            pix = pix.scaledToWidth(140, QtCore.Qt.SmoothTransformation)
+            logo_label.setPixmap(pix)
         logo_label.setAlignment(QtCore.Qt.AlignCenter)
-
         panel_layout.addWidget(logo_label)
-
         panel_layout.addSpacing(10)
 
-        # ---- Botões de modos ----
+        # Botões
         modes = {
             "Fácies": "facies",
             "Reservatório": "reservoir",
@@ -145,371 +147,352 @@ class MainWindow(QtWidgets.QMainWindow):
             "Espessura local": "thickness_local",
             "NTG local": "ntg_local",
         }
-
         group = QtWidgets.QGroupBox("Modo de Visualização")
         group_layout = QtWidgets.QVBoxLayout(group)
-
         for label, mode_code in modes.items():
             btn = QtWidgets.QPushButton(label)
             btn.clicked.connect(lambda _, mm=mode_code: self.change_mode(mm))
             group_layout.addWidget(btn)
-
         panel_layout.addWidget(group)
 
-        # ---- Submodos thickness_local ----
+        # Thickness
         self.thick_combo = QtWidgets.QComboBox()
         self.thick_combo.addItems([
-            "Espessura",
-            "NTG coluna",
-            "NTG envelope",
-            "Maior pacote",
-            "Nº pacotes",
-            "ICV",
-            "Qv",
-            "Qv absoluto",
+            "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
+            "Nº pacotes", "ICV", "Qv", "Qv absoluto",
         ])
         self.thick_combo.currentTextChanged.connect(self.change_thickness_mode)
-
         sub_group = QtWidgets.QGroupBox("Thickness Local")
         sub_layout = QtWidgets.QVBoxLayout(sub_group)
         sub_layout.addWidget(self.thick_combo)
         panel_layout.addWidget(sub_group)
 
-        # ---- Seleção de fácies reservatório ----
+        # Lista Reservatório
         self.res_group = QtWidgets.QGroupBox("Fácies do Reservatório")
         res_layout = QtWidgets.QVBoxLayout(self.res_group)
-
         self.reservoir_list = QtWidgets.QListWidget()
         self.reservoir_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-
-        self.reservoir_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        # preencher com fácies existentes no modelo
         present = sorted(set(int(v) for v in np.unique(facies)))
         for fac in present:
             item = QtWidgets.QListWidgetItem(str(fac))
             item.setCheckState(QtCore.Qt.Unchecked)
             item.setData(QtCore.Qt.UserRole, fac)
             self.reservoir_list.addItem(item)
-
         self.reservoir_list.itemChanged.connect(self.change_reservoir_facies)
-
         res_layout.addWidget(self.reservoir_list)
         panel_layout.addWidget(self.res_group)
 
-        # --- grupo da legenda ---
+        # Legenda Lateral
         self.legend_group = QtWidgets.QGroupBox("Legenda de Fácies")
-        self.legend_group.setSizePolicy(
-            QtWidgets.QSizePolicy.Preferred,
-            QtWidgets.QSizePolicy.Expanding
-        )
         legend_layout = QtWidgets.QVBoxLayout(self.legend_group)
-
-        # tabela da legenda
-        self.facies_legend_table = QtWidgets.QTableWidget()
-        self.facies_legend_table.setColumnCount(2)
-        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "Fácies"])
-        self.facies_legend_table.verticalHeader().setVisible(False)
-        self.facies_legend_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.facies_legend_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.facies_legend_table.setShowGrid(False)
-
-        header = self.facies_legend_table.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-
-        self.facies_legend_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.facies_legend_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        # --- scroll só para a legenda ---
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-
-        scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding
-        )
-
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        # container interno do scroll
-        legend_container = QtWidgets.QWidget()
-        legend_container_layout = QtWidgets.QVBoxLayout(legend_container)
-        legend_container_layout.setContentsMargins(0, 0, 0, 0)
-        legend_container_layout.addWidget(self.facies_legend_table)
-
-        scroll.setWidget(legend_container)
-
-        # adiciona scroll dentro do groupbox (e NUNCA no panel_layout!)
-        legend_layout.addWidget(scroll)
-
-        # adiciona o groupbox ao painel
+        self.facies_legend_table = self._create_legend_table()
+        legend_layout.addWidget(self.facies_legend_table)
         panel_layout.addWidget(self.legend_group)
 
+        panel_layout.addStretch()
 
-        # --------- plotter + abas à direita ----------
-        self.plotter = BackgroundPlotter(show=False)
-
-        self.plotter.interactor.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding
-        )
-
-        # Plotter 2D para o mapa (aba "Mapa 2D")
-        self.plotter_2d = BackgroundPlotter(show=False)
-        self.plotter_2d.interactor.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding
-        )
-
-        # cria o QTabWidget
+        # --- ÁREA DIREITA (TABs) ---
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding
-        )
-
-        # Aba 1: Visualização 3D
+        
+        # 1. Aba 3D Principal
+        self.plotter = BackgroundPlotter(show=False)
         self.viz_tab = QtWidgets.QWidget()
-        viz_layout = QtWidgets.QVBoxLayout(self.viz_tab)
-        viz_layout.addWidget(self.plotter.interactor)
+        vl = QtWidgets.QVBoxLayout(self.viz_tab)
+        vl.setContentsMargins(0,0,0,0)
+        vl.addWidget(self.plotter.interactor)
         self.tabs.addTab(self.viz_tab, "Visualização 3D")
-
-        # Aba 2: Mapa 2D
+        
+        # 2. Aba 2D
+        self.plotter_2d = BackgroundPlotter(show=False)
         self.map2d_tab = QtWidgets.QWidget()
-        map2d_layout = QtWidgets.QVBoxLayout(self.map2d_tab)
-        map2d_layout.addWidget(self.plotter_2d.interactor)
+        ml = QtWidgets.QVBoxLayout(self.map2d_tab)
+        ml.setContentsMargins(0,0,0,0)
+        ml.addWidget(self.plotter_2d.interactor)
         self.tabs.addTab(self.map2d_tab, "Mapa 2D")
 
-
-
-        # Aba 2: Métricas
+        # 3. Aba Métricas Globais
         self.metrics_tab = QtWidgets.QWidget()
         self.metrics_layout = QtWidgets.QVBoxLayout(self.metrics_tab)
-
-        # ---- métricas globais ----
         metrics_group = QtWidgets.QGroupBox("Análises do Modelo")
         mg_layout = QtWidgets.QVBoxLayout(metrics_group)
-
         self.metrics_text = QtWidgets.QTextEdit()
         self.metrics_text.setReadOnly(True)
         self.metrics_text.setMinimumHeight(120)
-
         mg_layout.addWidget(self.metrics_text)
         self.metrics_layout.addWidget(metrics_group)
-
-        # ---- métricas por fácies (Excel) ----
         facies_group = QtWidgets.QGroupBox("Análises por Fácies")
         fg_layout = QtWidgets.QVBoxLayout(facies_group)
-
         self.facies_table = QtWidgets.QTableWidget()
         fg_layout.addWidget(self.facies_table)
-
         self.metrics_layout.addWidget(facies_group)
         self.metrics_layout.addStretch()
-
         self.tabs.addTab(self.metrics_tab, "Métricas Globais")
 
-                # ------------------------------------------------------------------
-        # TABELAS PARA A ABA DE COMPARAÇÃO (MÉTRICAS)
-        # ------------------------------------------------------------------
-        # 1) Tabela de métricas globais (base x comparado)
-        self.global_compare_table = QtWidgets.QTableWidget()
-        self.global_compare_table.setColumnCount(4)
-        self.global_compare_table.setHorizontalHeaderLabels(
-            ["Métrica", "Base", "Comparado", "Diferença (Comp - Base)"]
-        )
-        self.global_compare_table.verticalHeader().setVisible(False)
-        self.global_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-
-        # 2) Tabela de distribuição de fácies no grid inteiro
-        self.facies_compare_table = QtWidgets.QTableWidget()
-        self.facies_compare_table.setColumnCount(5)
-        self.facies_compare_table.setHorizontalHeaderLabels(
-            ["Fácies", "Células Base", "% Base", "Células Comp", "% Comp"]
-        )
-        self.facies_compare_table.verticalHeader().setVisible(False)
-        self.facies_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-
-        # 3) Tabela de distribuição de fácies dentro do reservatório
-        self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
-        self.reservoir_facies_compare_table.setColumnCount(5)
-        self.reservoir_facies_compare_table.setHorizontalHeaderLabels(
-            ["Fácies (res)", "Células Base", "% do res Base", "Células Comp", "% do res Comp"]
-        )
-        self.reservoir_facies_compare_table.verticalHeader().setVisible(False)
-        self.reservoir_facies_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-
-
-        # ------------------------------------------------------------------
-        # ABA: COMPARAÇÃO (contém duas sub-abas: Métricas e Visualização 3D)
-        # ------------------------------------------------------------------
+        # --- 4. ABA COMPARAÇÃO ---
         self.compare_tab = QtWidgets.QWidget()
         comp_layout = QtWidgets.QVBoxLayout(self.compare_tab)
-
-        # ----- Sub-abas internas -----
         self.compare_tabs = QtWidgets.QTabWidget()
         comp_layout.addWidget(self.compare_tabs)
-
-        # ==========================
-        # 1) SUB-ABA: MÉTRICAS
-        # ==========================
+        
+        # 4.1 Sub-aba Métricas (MANTIDA IGUAL)
         self.compare_metrics_widget = QtWidgets.QWidget()
         cmp_metrics_layout = QtWidgets.QVBoxLayout(self.compare_metrics_widget)
-
-        # --- HEADERS: Base e Comparado ---
-        self.base_model_label = QtWidgets.QLabel("Modelo base: (carregado automaticamente)")
+        
+        hl = QtWidgets.QHBoxLayout()
+        self.base_model_label = QtWidgets.QLabel("Modelo base: (carregado)")
         self.comp_model_label = QtWidgets.QLabel("Modelo comparado: (nenhum)")
-
-        header_layout = QtWidgets.QHBoxLayout()
-        header_layout.addWidget(self.base_model_label)
-        header_layout.addWidget(self.comp_model_label)
-        cmp_metrics_layout.addLayout(header_layout)
-
-        # --- Botão para selecionar modelo comparado ---
-        self.select_compare_btn = QtWidgets.QPushButton("Selecionar modelo para comparar...")
+        hl.addWidget(self.base_model_label)
+        hl.addWidget(self.comp_model_label)
+        cmp_metrics_layout.addLayout(hl)
+        
+        self.select_compare_btn = QtWidgets.QPushButton("Selecionar modelo...")
         self.select_compare_btn.clicked.connect(self.open_compare_dialog)
         cmp_metrics_layout.addWidget(self.select_compare_btn)
+        
+        self.global_compare_table = QtWidgets.QTableWidget()
+        self.global_compare_table.setColumnCount(4)
+        self.global_compare_table.setHorizontalHeaderLabels(["Métrica", "Base", "Comparado", "Dif"])
+        self.global_compare_table.verticalHeader().setVisible(False)
+        
+        self.facies_compare_table = QtWidgets.QTableWidget()
+        self.facies_compare_table.setColumnCount(5)
+        self.facies_compare_table.setHorizontalHeaderLabels(["Fácies", "Cél. Base", "% Base", "Cél. Comp", "% Comp"])
+        self.facies_compare_table.verticalHeader().setVisible(False)
+        
+        self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
+        self.reservoir_facies_compare_table.setColumnCount(5)
+        self.reservoir_facies_compare_table.setHorizontalHeaderLabels(["Fácies (Res)", "Cél. Base", "% Base", "Cél. Comp", "% Comp"])
+        self.reservoir_facies_compare_table.verticalHeader().setVisible(False)
 
-        # --- tabelas existentes (que você já tinha) ---
-        # Basta mover aqui as suas três tabelas:
-        #   self.global_compare_table
-        #   self.facies_compare_table
-        #   self.reservoir_facies_compare_table
-
-        # Exemplo:
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Métricas Globais"))
         cmp_metrics_layout.addWidget(self.global_compare_table)
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Fácies (Grid Inteiro)"))
         cmp_metrics_layout.addWidget(self.facies_compare_table)
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Fácies (Reservatório)"))
         cmp_metrics_layout.addWidget(self.reservoir_facies_compare_table)
-
-        cmp_metrics_layout.addStretch()
-
+        
         self.compare_tabs.addTab(self.compare_metrics_widget, "Métricas")
 
-        # ==========================
-        # 2) SUB-ABA: VISUALIZAÇÃO 3D
-        # ==========================
+        # =====================================================================
+        # 4.2 Sub-aba MAPAS 2D (NOVA)
+        # =====================================================================
+        self.compare_2d_widget = QtWidgets.QWidget()
+        c2d_layout = QtWidgets.QHBoxLayout(self.compare_2d_widget)
+        
+        # Plotter Base 2D
+        l_col_2d = QtWidgets.QVBoxLayout()
+        self.comp_plotter_base_2d = BackgroundPlotter(show=False)
+        l_col_2d.addWidget(QtWidgets.QLabel("Mapa Base"))
+        l_col_2d.addWidget(self.comp_plotter_base_2d.interactor)
+        c2d_layout.addLayout(l_col_2d)
+
+        # Plotter Comparado 2D
+        r_col_2d = QtWidgets.QVBoxLayout()
+        self.comp_plotter_comp_2d = BackgroundPlotter(show=False)
+        r_col_2d.addWidget(QtWidgets.QLabel("Mapa Comparado"))
+        r_col_2d.addWidget(self.comp_plotter_comp_2d.interactor)
+        c2d_layout.addLayout(r_col_2d)
+
+        self.compare_tabs.addTab(self.compare_2d_widget, "Mapas 2D")
+
+        # =====================================================================
+        # 4.3 Sub-aba Visualização 3D (MANTIDA IGUAL)
+        # =====================================================================
         self.compare_3d_widget = QtWidgets.QWidget()
-        cmp3d_layout = QtWidgets.QHBoxLayout(self.compare_3d_widget)
+        c3d_main_layout = QtWidgets.QVBoxLayout(self.compare_3d_widget)
+        c3d_main_layout.setContentsMargins(0,0,0,0)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        c3d_main_layout.addWidget(splitter)
 
-        # criaremos os plotters aqui depois
-        # -------------------------------
-        # COLUNA ESQUERDA: MODELO BASE
-        # -------------------------------
-        left_col = QtWidgets.QVBoxLayout()
+        # Topo 3D
+        top_widget = QtWidgets.QWidget()
+        top_layout = QtWidgets.QHBoxLayout(top_widget)
+        top_layout.setContentsMargins(0,0,0,0)
+        top_layout.setSpacing(2)
 
-        title_left = QtWidgets.QLabel("Modelo base")
-        title_left.setAlignment(QtCore.Qt.AlignCenter)
-        left_col.addWidget(title_left)
-
-        # plotter base
         self.comp_plotter_base = BackgroundPlotter(show=False)
-        left_col.addWidget(self.comp_plotter_base.interactor)
-        # deixa o estilo padrão por enquanto; depois ajustamos interação se precisar
+        l_container = QtWidgets.QWidget()
+        l_layout = QtWidgets.QVBoxLayout(l_container)
+        l_layout.setContentsMargins(0,0,0,0)
+        l_layout.addWidget(QtWidgets.QLabel("Modelo Base"))
+        l_layout.addWidget(self.comp_plotter_base.interactor)
+        top_layout.addWidget(l_container)
 
+        self.comp_plotter_comp = BackgroundPlotter(show=False)
+        r_container = QtWidgets.QWidget()
+        r_layout = QtWidgets.QVBoxLayout(r_container)
+        r_layout.setContentsMargins(0,0,0,0)
+        r_layout.addWidget(QtWidgets.QLabel("Modelo Comparado"))
+        r_layout.addWidget(self.comp_plotter_comp.interactor)
+        top_layout.addWidget(r_container)
+        splitter.addWidget(top_widget)
 
-        # tabela de fácies do BASE
-        left_col.addWidget(QtWidgets.QLabel("Reservatório (base):"))
+        # Baixo Tabelas
+        bottom_widget = QtWidgets.QWidget()
+        bottom_widget.setMinimumHeight(200) 
+        bottom_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        bottom_layout = QtWidgets.QHBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(10, 10, 10, 10)
+
+        base_group = QtWidgets.QGroupBox("Dados Base")
+        bg_layout = QtWidgets.QHBoxLayout(base_group)
         self.res_table_base_cmp = make_facies_table()
         self.res_table_base_cmp.itemChanged.connect(self.update_base_reservoir_compare)
-        left_col.addWidget(self.res_table_base_cmp)
+        bg_layout.addWidget(self.res_table_base_cmp)
+        self.clus_table_base_cmp = self._create_legend_table(["Cor", "Cluster", "Células"])
+        self.clus_table_base_cmp.setVisible(False)
+        bg_layout.addWidget(self.clus_table_base_cmp)
+        bottom_layout.addWidget(base_group)
 
-        # -------------------------------
-        # COLUNA DIREITA: MODELO COMPARADO
-        # -------------------------------
-        right_col = QtWidgets.QVBoxLayout()
-
-        title_right = QtWidgets.QLabel("Modelo comparado")
-        title_right.setAlignment(QtCore.Qt.AlignCenter)
-        right_col.addWidget(title_right)
-
-        # plotter comparado
-        self.comp_plotter_comp = BackgroundPlotter(show=False)
-        right_col.addWidget(self.comp_plotter_comp.interactor)
-        # idem para o modelo comparado
-
-
-        # tabela de fácies do COMPARADO
-        right_col.addWidget(QtWidgets.QLabel("Reservatório (comparado):"))
+        comp_group = QtWidgets.QGroupBox("Dados Comparado")
+        cg_layout = QtWidgets.QHBoxLayout(comp_group)
         self.res_table_comp_cmp = make_facies_table()
         self.res_table_comp_cmp.itemChanged.connect(self.update_compare_reservoir_compare)
-        right_col.addWidget(self.res_table_comp_cmp)
+        cg_layout.addWidget(self.res_table_comp_cmp)
+        self.clus_table_comp_cmp = self._create_legend_table(["Cor", "Cluster", "Células"])
+        self.clus_table_comp_cmp.setVisible(False)
+        cg_layout.addWidget(self.clus_table_comp_cmp)
+        bottom_layout.addWidget(comp_group)
+        
+        splitter.addWidget(bottom_widget)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([800, 400])
 
-        # adiciona lado a lado
-        cmp3d_layout.addLayout(left_col, stretch=1)
-        cmp3d_layout.addLayout(right_col, stretch=1)
-
-
-        # por enquanto deixa vazio
         self.compare_tabs.addTab(self.compare_3d_widget, "Visualização 3D")
-
-        # adiciona aba Comparação no tab principal
         self.tabs.addTab(self.compare_tab, "Comparação")
 
+        layout.addWidget(self.panel, 1)
+        layout.addWidget(self.tabs, 5)
 
-        # adiciona o conjunto de abas no lado direito
-        layout.addWidget(self.panel)
-        layout.addWidget(self.tabs, 1)
-
+        # ... (Restante do __init__ continua igual)
         self.populate_facies_legend()
-
-        # Carrega visualização inicial
         self.state = dict()
         self.state["reservoir_facies"] = initial_reservoir
-
-        # ------ estado para comparação entre modelos ------
-        # Base (modelo carregado em load_data)
+        self.compare_states = {"base": {}, "compare": {}}
         self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
         self.base_res_stats = {}
-        self.base_res_total = 0
-        self.base_metrics = None
-        self.base_perc = None
-
-        # Modelo comparado (carregado via diálogo)
         self.compare_path = None
         self.compare_facies = None
-        self.compare_facies_stats = None
-        self.compare_total_cells = 0
-        self.comp_res_stats = {}
-        self.comp_res_total = 0
         self.compare_metrics = None
-        self.compare_perc = None
-        self.compare_states = {
-            "base": {},
-            "compare": {},
-        }
 
-        run(
+        _, self.state = run(
             mode=mode,
             z_exag=z_exag,
             show_scalar_bar=show_scalar_bar,
             external_plotter=self.plotter,
             external_state=self.state,
         )
+        
+        self.reservoir_list.blockSignals(True)
+        for i in range(self.reservoir_list.count()):
+            item = self.reservoir_list.item(i)
+            fac = item.data(QtCore.Qt.UserRole)
+            if fac in initial_reservoir:
+                item.setCheckState(QtCore.Qt.Checked)
+        self.reservoir_list.blockSignals(False)
 
+        self.change_reservoir_facies(None) 
         self.update_2d_map()
         self.update_comparison_tables()
         self.init_compare_3d()
+        # [NOVO]: Chama atualização inicial dos mapas 2D
+        self.update_compare_2d_maps()
 
-        for i in range(self.reservoir_list.count()):
-            fac = self.reservoir_list.item(i).data(QtCore.Qt.UserRole)
-            if fac in initial_reservoir:
-                self.reservoir_list.item(i).setCheckState(QtCore.Qt.Checked)
+    # Helper para criar tabela
+    def _create_legend_table(self, headers=["Cor", "Fácies", "Células", "Sel."]):
+        """Cria tabela compacta para legendas extras."""
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        table.setShowGrid(False)
+        
+        # Compacta horizontalmente, expande verticalmente
+        table.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        table.setMaximumWidth(320)
+        
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        
+        return table
+
+    # Helper para UI de comparação (caso você não tenha separado ainda)
+    def _init_comparison_ui(self):
+        self.compare_tab = QtWidgets.QWidget()
+        comp_layout = QtWidgets.QVBoxLayout(self.compare_tab)
+        self.compare_tabs = QtWidgets.QTabWidget()
+        comp_layout.addWidget(self.compare_tabs)
+        
+        # Sub-aba Métricas
+        self.compare_metrics_widget = QtWidgets.QWidget()
+        cmp_metrics_layout = QtWidgets.QVBoxLayout(self.compare_metrics_widget)
+        
+        # Headers
+        self.base_model_label = QtWidgets.QLabel("Modelo base: (carregado)")
+        self.comp_model_label = QtWidgets.QLabel("Modelo comparado: (nenhum)")
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.base_model_label)
+        hl.addWidget(self.comp_model_label)
+        cmp_metrics_layout.addLayout(hl)
+        
+        self.select_compare_btn = QtWidgets.QPushButton("Selecionar modelo...")
+        self.select_compare_btn.clicked.connect(self.open_compare_dialog)
+        cmp_metrics_layout.addWidget(self.select_compare_btn)
+        
+        # Tabelas
+        self.global_compare_table = QtWidgets.QTableWidget()
+        self.facies_compare_table = QtWidgets.QTableWidget()
+        self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
+        
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Métricas Globais"))
+        cmp_metrics_layout.addWidget(self.global_compare_table)
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Fácies (Grid Inteiro)"))
+        cmp_metrics_layout.addWidget(self.facies_compare_table)
+        cmp_metrics_layout.addWidget(QtWidgets.QLabel("Fácies (Reservatório)"))
+        cmp_metrics_layout.addWidget(self.reservoir_facies_compare_table)
+        
+        self.compare_tabs.addTab(self.compare_metrics_widget, "Métricas")
+        
+        # Sub-aba 3D
+        self.compare_3d_widget = QtWidgets.QWidget()
+        c3d_layout = QtWidgets.QHBoxLayout(self.compare_3d_widget)
+        
+        # Base
+        l_col = QtWidgets.QVBoxLayout()
+        l_col.addWidget(QtWidgets.QLabel("Modelo Base"))
+        self.comp_plotter_base = BackgroundPlotter(show=False)
+        l_col.addWidget(self.comp_plotter_base.interactor)
+        self.res_table_base_cmp = make_facies_table()
+        self.res_table_base_cmp.itemChanged.connect(self.update_base_reservoir_compare)
+        l_col.addWidget(self.res_table_base_cmp)
+        
+        # Compare
+        r_col = QtWidgets.QVBoxLayout()
+        r_col.addWidget(QtWidgets.QLabel("Modelo Comparado"))
+        self.comp_plotter_comp = BackgroundPlotter(show=False)
+        r_col.addWidget(self.comp_plotter_comp.interactor)
+        self.res_table_comp_cmp = make_facies_table()
+        self.res_table_comp_cmp.itemChanged.connect(self.update_compare_reservoir_compare)
+        r_col.addWidget(self.res_table_comp_cmp)
+        
+        c3d_layout.addLayout(l_col)
+        c3d_layout.addLayout(r_col)
+        
+        self.compare_tabs.addTab(self.compare_3d_widget, "Visualização 3D")
+        self.tabs.addTab(self.compare_tab, "Comparação")
         
     
     def populate_facies_legend(self):
+        """Restaura a tabela LATERAL para o modo Fácies."""
         colors_dict = load_facies_colors()
-
-        # facies presentes no modelo
         present = sorted(set(int(v) for v in np.unique(facies)))
-
-        # conta número de células por fácies
         vals, counts = np.unique(facies.astype(int), return_counts=True)
         count_dict = {int(v): int(c) for v, c in zip(vals, counts)}
 
-        # agora a tabela tem 3 colunas: Cor | Fácies | Células
         self.facies_legend_table.clear()
         self.facies_legend_table.setRowCount(len(present))
         self.facies_legend_table.setColumnCount(3)
@@ -518,155 +501,166 @@ class MainWindow(QtWidgets.QMainWindow):
         for row, fac in enumerate(present):
             rgba = colors_dict.get(fac, (200, 200, 200, 255))
             r, g, b, a = rgba
-            # se vier em 0–1, converte pra 0–255
             if r <= 1 and g <= 1 and b <= 1:
                 r, g, b = int(r * 255), int(g * 255), int(b * 255)
 
-            # coluna 0: cor
             color_item = QtWidgets.QTableWidgetItem()
             color = QColor(r, g, b)
             color_item.setBackground(QBrush(color))
             color_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.facies_legend_table.setItem(row, 0, color_item)
 
-            # coluna 1: id da fácies
             text_item = QtWidgets.QTableWidgetItem(str(fac))
             text_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.facies_legend_table.setItem(row, 1, text_item)
 
-            # coluna 2: número de células da fácies
-            n_cells = count_dict.get(fac, 0)
-            cells_item = QtWidgets.QTableWidgetItem(str(n_cells))
+            cells_item = QtWidgets.QTableWidgetItem(str(count_dict.get(fac, 0)))
             cells_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.facies_legend_table.setItem(row, 2, cells_item)
 
-        # ajustar larguras das colunas
         self.facies_legend_table.resizeColumnsToContents()
         self.facies_legend_table.setColumnWidth(0, 26)
-
-        # largura compacta
-        frame = 2 * self.facies_legend_table.frameWidth()
-        vh = self.facies_legend_table.verticalHeader().width()
-        col_w = (
-            self.facies_legend_table.columnWidth(0)
-            + self.facies_legend_table.columnWidth(1)
-            + self.facies_legend_table.columnWidth(2)
-        )
-        padding = 16
-        total_width = col_w + vh + frame + 4 + padding
-        group_width = total_width + 16  # pequeno extra pros frames/margens
-
-        self.legend_group.setMaximumWidth(group_width)
-        if hasattr(self, "res_group"):
-            self.res_group.setMaximumWidth(group_width)
-        self.facies_legend_table.setFixedWidth(total_width)
 
     def populate_clusters_legend(self):
         """
-        Preenche a mesma tabela de legenda, mas com:
-        Cor | Cluster | Células
-        usando as infos pré-computadas em visualize.run
-        (state['clusters_lut'] e state['clusters_sizes']).
+        Preenche a tabela LATERAL (esquerda) com a legenda de Clusters.
+        Reutiliza self.facies_legend_table.
         """
-        if not hasattr(self, "state"):
-            return
+        if not hasattr(self, "state"): return
 
         sizes_dict = self.state.get("clusters_sizes")
         lut = self.state.get("clusters_lut")
-
+        
+        table = self.facies_legend_table
+        
         if not sizes_dict or lut is None:
-            # se não tiver nada calculado ainda, limpa a tabela
-            self.facies_legend_table.clear()
-            self.facies_legend_table.setRowCount(0)
-            self.facies_legend_table.setColumnCount(0)
+            table.setRowCount(0)
             return
+            
+        # Reconfigura colunas para Cluster
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["Cor", "Cluster", "Células"])
 
-        # ordena clusters do maior para o menor (igual ao visualize)
         labels = sorted(sizes_dict.keys(), key=lambda k: sizes_dict[k], reverse=True)
-
-        self.facies_legend_table.clear()
-        self.facies_legend_table.setColumnCount(3)
-        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "Cluster", "Células"])
-        self.facies_legend_table.setRowCount(len(labels))
-
+        table.setRowCount(len(labels))
+        
         for row, lab in enumerate(labels):
-            # pega a cor do LUT (0–1)
             r, g, b, a = lut.GetTableValue(int(lab))
-            if r <= 1 and g <= 1 and b <= 1:
-                r_i, g_i, b_i = int(r * 255), int(g * 255), int(b * 255)
-            else:
-                r_i, g_i, b_i = int(r), int(g), int(b)
+            color = QColor(int(r*255), int(g*255), int(b*255))
+            
+            item_c = QtWidgets.QTableWidgetItem()
+            item_c.setBackground(QBrush(color))
+            item_c.setFlags(QtCore.Qt.ItemIsEnabled)
+            table.setItem(row, 0, item_c)
 
-            # coluna 0: quadradinho de cor
-            color_item = QtWidgets.QTableWidgetItem()
-            color = QColor(r_i, g_i, b_i)
-            color_item.setBackground(QBrush(color))
-            color_item.setFlags(QtCore.Qt.ItemIsEnabled)
-            self.facies_legend_table.setItem(row, 0, color_item)
+            item_id = QtWidgets.QTableWidgetItem(str(lab))
+            item_id.setFlags(QtCore.Qt.ItemIsEnabled)
+            table.setItem(row, 1, item_id)
 
-            # coluna 1: id do cluster
-            id_item = QtWidgets.QTableWidgetItem(str(lab))
-            id_item.setFlags(QtCore.Qt.ItemIsEnabled)
-            self.facies_legend_table.setItem(row, 1, id_item)
+            item_s = QtWidgets.QTableWidgetItem(str(sizes_dict[lab]))
+            item_s.setFlags(QtCore.Qt.ItemIsEnabled)
+            table.setItem(row, 2, item_s)
+            
+        table.resizeColumnsToContents()
 
-            # coluna 2: número de células
-            size_item = QtWidgets.QTableWidgetItem(str(sizes_dict[lab]))
-            size_item.setFlags(QtCore.Qt.ItemIsEnabled)
-            self.facies_legend_table.setItem(row, 2, size_item)
+    def populate_compare_clusters_tables(self):
+        """Preenche as tabelas de clusters específicas da aba de COMPARAÇÃO."""
+        
+        # Helper interno para preencher uma tabela dado um 'state'
+        def fill_one_table(table, st):
+            sizes = st.get("clusters_sizes")
+            lut = st.get("clusters_lut")
+            
+            if not sizes or not lut:
+                table.setRowCount(0)
+                return
+            
+            labels = sorted(sizes.keys(), key=lambda k: sizes[k], reverse=True)
+            table.setRowCount(len(labels))
+            
+            for row, lab in enumerate(labels):
+                r, g, b, a = lut.GetTableValue(int(lab))
+                color = QColor(int(r*255), int(g*255), int(b*255))
+                
+                item_c = QtWidgets.QTableWidgetItem()
+                item_c.setBackground(QBrush(color))
+                item_c.setFlags(QtCore.Qt.ItemIsEnabled)
+                table.setItem(row, 0, item_c)
 
-        # ajustar larguras das colunas
-        self.facies_legend_table.resizeColumnsToContents()
-        self.facies_legend_table.setColumnWidth(0, 26)
+                item_id = QtWidgets.QTableWidgetItem(str(lab))
+                item_id.setFlags(QtCore.Qt.ItemIsEnabled)
+                table.setItem(row, 1, item_id)
 
-        frame = 2 * self.facies_legend_table.frameWidth()
-        vh = self.facies_legend_table.verticalHeader().width()
-        col_w = (
-            self.facies_legend_table.columnWidth(0)
-            + self.facies_legend_table.columnWidth(1)
-            + self.facies_legend_table.columnWidth(2)
-        )
-        padding = 10
-        total_width = col_w + vh + frame + 4 + padding
-        self.facies_legend_table.setFixedWidth(total_width)
+                item_s = QtWidgets.QTableWidgetItem(str(sizes[lab]))
+                item_s.setFlags(QtCore.Qt.ItemIsEnabled)
+                table.setItem(row, 2, item_s)
+            
+            table.resizeColumnsToContents()
 
-
+        # Preenche tabela Base
+        if self.compare_states.get("base"):
+            fill_one_table(self.clus_table_base_cmp, self.compare_states["base"])
+            
+        # Preenche tabela Comparado
+        if self.compare_states.get("compare"):
+            fill_one_table(self.clus_table_comp_cmp, self.compare_states["compare"])
 
     # ----------------------------------------------------------------------
     def change_mode(self, new_mode):
         print("Modo:", new_mode)
         self.state["mode"] = new_mode
 
-        # Atualiza o tipo de legenda no painel esquerdo
+        # --- 1. Painel Principal (Sidebar) ---
         if new_mode == "clusters":
             self.legend_group.setTitle("Legenda de Clusters")
             self.populate_clusters_legend()
-            
         else:
             self.legend_group.setTitle("Legenda de Fácies")
             self.populate_facies_legend()
 
-        # redesenha a visualização 3D
+        # --- 2. Aba Comparação (Bottom Panel) ---
+        # Mostra tabelas de clusters APENAS se o modo for "clusters"
+        is_cluster = (new_mode == "clusters")
+        
+        self.clus_table_base_cmp.setVisible(is_cluster)
+        self.clus_table_comp_cmp.setVisible(is_cluster)
+        
+        # Se não for cluster (ex: facies, reservoir), a tabela de Fácies (res_table)
+        # deve continuar visível e ocupar o espaço deixado pela tabela de clusters oculta.
+        self.res_table_base_cmp.setVisible(True) # Sempre visível
+        self.res_table_comp_cmp.setVisible(True) # Sempre visível
+
+        if is_cluster:
+            self.populate_compare_clusters_tables()
+
+        # Redesenha 3D
         self.state["refresh"]()
         self.update_compare_3d_mode()
 
 
     def change_thickness_mode(self, label):
         print("Thickness:", label)
+        # Atualiza visualizador principal
         self.state["thickness_mode"] = label
-
-        # avisa o visualize.py para atualizar o scalar/clim
         if "update_thickness" in self.state:
             self.state["update_thickness"]()
+        self.state["refresh"]()
 
-        # se já estiver nesse modo, redesenha
-        if self.state.get("mode") == "thickness_local":
-            self.state["refresh"]()
+        # [CORREÇÃO 2]: Atualiza visualizadores de COMPARAÇÃO
+        for key in ["base", "compare"]:
+            st = self.compare_states.get(key)
+            if st:
+                st["thickness_mode"] = label
+                if "update_thickness" in st: 
+                    st["update_thickness"]()
+                if "refresh" in st: 
+                    st["refresh"]()
 
-        if self.state.get("mode") in ("ntg_local", "thickness_local"):
-            self.state["refresh"]()
-
-        # Atualiza o mapa 2D com as novas métricas
+        # Atualiza mapa 2D
         self.update_2d_map()
+
+        # [NOVO] Atualiza mapas 2D da comparação
+        self.update_compare_2d_maps()
 
     def set_metrics(self, metrics, perc):
         if metrics is None:
@@ -778,78 +772,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self.facies_table.resizeColumnsToContents()
 
     def change_reservoir_facies(self, item):
+        """
+        Atualiza o Visualizador Principal e RECALCULA as Métricas (inclusive as de Comparação).
+        NÃO afeta a visualização 3D da aba Comparação.
+        """
+        # 1. Coleta a nova seleção do painel esquerdo
         selected = []
         for i in range(self.reservoir_list.count()):
             it = self.reservoir_list.item(i)
             if it.checkState() == QtCore.Qt.Checked:
-                selected.append(it.data(QtCore.Qt.UserRole))
+                selected.append(int(it.data(QtCore.Qt.UserRole)))
+        
+        selected_set = set(selected)
 
-        # atualiza o estado global
-        self.state["reservoir_facies"] = set(selected)
-
-        print("Reservatório atualizado:", self.state["reservoir_facies"])
-
-        # 1) recalcula arrays de reservatório/clusters no visualize.py
-        if "update_reservoir" in self.state:
-            self.state["update_reservoir"]()
-
-        # 2) recalcula métricas globais para as fácies selecionadas
-        if self.state["reservoir_facies"]:
-            metrics = compute_global_metrics(self.state["reservoir_facies"])
-            perc = compute_directional_percolation(self.state["reservoir_facies"])
-        else:
-            metrics = None
-            perc = None
-
-        self.set_metrics(metrics, perc)
-
-                # ----- distribuições de fácies dentro do reservatório -----
-        rf = self.state["reservoir_facies"]
-
-        if rf:
-            # base
-            self.base_res_stats, self.base_res_total = reservoir_facies_distribution_array(facies, rf)
-
-            # modelo comparado (se existir)
-            if self.compare_facies is not None:
-                self.comp_res_stats, self.comp_res_total = reservoir_facies_distribution_array(
-                    self.compare_facies, rf
-                )
-                # também atualiza métricas globais do comparado
-                self.compare_metrics, self.compare_perc = compute_global_metrics_for_array(
-                    self.compare_facies, rf
-                )
-            else:
-                self.comp_res_stats, self.comp_res_total = {}, 0
-                self.compare_metrics, self.compare_perc = None, None
-        else:
-            self.base_res_stats, self.base_res_total = {}, 0
-            self.comp_res_stats, self.comp_res_total = {}, 0
-            self.compare_metrics, self.compare_perc = None, None
-
-        # atualiza as tabelas da aba de comparação
-        self.init_compare_3d()
-        self.update_comparison_tables()
-
-
-        # 3) se o modo atual for clusters, atualiza também a legenda de clusters
-        if self.state.get("mode") == "clusters":
-            self.legend_group.setTitle("Legenda de Clusters")
-            self.populate_clusters_legend()
-
-        # 4) redesenha o 3D com os arrays novos
+        # 2. Atualiza o Estado Principal (Visualizador 1)
+        self.state["reservoir_facies"] = selected_set
+        
+        # Atualiza visualização 3D Principal
+        if "update_reservoir_fields" in self.state:
+            self.state["update_reservoir_fields"](selected_set)
+        
         if "refresh" in self.state:
             self.state["refresh"]()
             
-        # 3) Atualiza NTG_local e thickness_local no visualize
-        if "update_reservoir_fields" in self.state:
-            self.state["update_reservoir_fields"](selected)
-
-        # 4) Se estiver em NTG local ou Espessura local, redesenha o 3D
-        if self.state.get("mode") in ("ntg_local", "thickness_local"):
-            self.state["refresh"]()
-
         self.update_2d_map()
+
+        # 3. RECALCULO DE MÉTRICAS (Para as Tabelas)
+        # Isso afeta a aba "Métricas Globais" e a aba "Comparação > Métricas"
+        
+        # A) Métricas do Modelo Base
+        # Recalcula métricas globais
+        base_metrics = compute_global_metrics(selected_set)
+        base_perc = compute_directional_percolation(selected_set)
+        
+        # Recalcula distribuição de fácies DENTRO do reservatório (Base)
+        base_res_stats, base_res_total = reservoir_facies_distribution_array(facies, selected_set)
+        
+        # Armazena nos atributos da classe para as tabelas usarem
+        self.base_metrics = base_metrics
+        self.base_perc = base_perc
+        self.base_res_stats = base_res_stats
+        self.base_res_total = base_res_total
+        
+        # Atualiza texto da aba "Métricas Globais"
+        self.set_metrics(base_metrics, base_perc)
+
+        # B) Métricas do Modelo Comparado (Se houver um carregado)
+        # Quando mudamos a definição de "reservatório" na esquerda, 
+        # faz sentido atualizar as métricas do comparado para usar a mesma definição.
+        if self.compare_facies is not None:
+            # Recalcula globais do comparado com a nova seleção
+            c_metrics, c_perc = compute_global_metrics_for_array(self.compare_facies, selected_set)
+            
+            # Recalcula distribuição do reservatório do comparado
+            c_res_stats, c_res_total = reservoir_facies_distribution_array(self.compare_facies, selected_set)
+            
+            self.compare_metrics = c_metrics
+            self.compare_perc = c_perc
+            self.comp_res_stats = c_res_stats
+            self.comp_res_total = c_res_total
+
+        # 4. Atualiza as Tabelas da Aba Comparação
+        # (Isso preenche os números novos sem mexer no 3D)
+        self.update_comparison_tables()
 
     def update_2d_map(self):
         """
@@ -881,63 +866,81 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     def load_compare_model(self, grdecl_path: str):
         """
-        Carrega um GRDECL externo só para COMPARAÇÃO (mesmo tamanho de grid).
-        Salva as fácies no self.models["compare"]["facies"].
+        Carrega um GRDECL externo, salva no state e CALCULA AS MÉTRICAS imediatamente.
         """
-        # lê fácies do GRDECL externo
-        fac_compare = load_facies_from_grdecl(grdecl_path)
+        # 1. Carrega o array de fácies do arquivo
+        try:
+            fac_compare = load_facies_from_grdecl(grdecl_path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erro", f"Falha ao ler arquivo:\n{e}")
+            return
 
-        # checa se tem o mesmo número de células do grid base
+        # 2. Verificação de compatibilidade de grid
         expected = nx * ny * nz
         if fac_compare.size != expected:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Erro ao carregar modelo comparado",
-                f"O modelo '{grdecl_path}' tem {fac_compare.size} células, "
-                f"mas o grid base tem {expected}.",
+                "Erro de Dimensão",
+                f"O modelo carregado tem {fac_compare.size} células, "
+                f"mas o grid base espera {expected} ({nx}x{ny}x{nz}).",
             )
             return
 
-        # salva dentro da estrutura models
+        # 3. Atualiza Estrutura de Dados
         self.models["compare"]["name"] = grdecl_path
         self.models["compare"]["facies"] = fac_compare
-        # por padrão, usa as mesmas fácies de reservatório da base
-        self.models["compare"]["reservoir_facies"] = set(
-            self.models["base"]["reservoir_facies"]
-        )
+        # Garante que o set de reservatório seja o mesmo da base inicialmente
+        self.models["compare"]["reservoir_facies"] = set(self.models["base"]["reservoir_facies"])
 
-        print("\n[COMPARE] Modelo carregado para comparação:")
-        print("  path:", grdecl_path)
-        print("  células:", fac_compare.size)
-        print("  fácies únicas:", np.unique(fac_compare))
+        # 4. Atualiza Variáveis de Estado para as Tabelas (CRÍTICO)
+        self.compare_path = grdecl_path
+        self.compare_facies = fac_compare
+        
+        # --- CÁLCULOS ESTATÍSTICOS ---
+        
+        # A) Distribuição de Fácies (Grid Inteiro)
+        self.compare_facies_stats, self.compare_total_cells = facies_distribution_array(fac_compare)
+        
+        # B) Métricas de Reservatório (Baseado na seleção ATUAL)
+        rf = self.state.get("reservoir_facies", set())
+        
+        if rf:
+            # Métricas Globais (NTG, Clusters, Conectividade)
+            self.compare_metrics, self.compare_perc = compute_global_metrics_for_array(fac_compare, rf)
+            # Distribuição dentro do Reservatório
+            self.comp_res_stats, self.comp_res_total = reservoir_facies_distribution_array(fac_compare, rf)
+        else:
+            self.compare_metrics, self.compare_perc = None, None
+            self.comp_res_stats, self.comp_res_total = {}, 0
 
-        # aqui, mais pra frente, vamos:
-        # - atualizar métricas de comparação
-        # - atualizar visualização 3D de comparação
-        # - atualizar mapas 2D de diferença etc.
+        print(f"\n[COMPARE] Modelo '{os.path.basename(grdecl_path)}' carregado e calculado.")
 
+        # 5. Atualiza a UI
+        self.comp_model_label.setText(f"Modelo comparado: {os.path.basename(grdecl_path)}")
+        
+        # Atualiza listas de seleção nas abas de comparação
+        self.populate_compare_facies_lists()
+        
+        # Atualiza as tabelas de métricas
+        self.update_comparison_tables()
 
-    
+        # Inicializa a visualização 3D Comparada
+        self.init_compare_3d()
+
+        # [NOVO] Atualiza mapas 2D
+        self.update_compare_2d_maps()
+
     def open_compare_dialog(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Selecionar modelo para comparar",
-            "assets",
-            "GRDECL (*.grdecl)"
+            "assets", # ou self.last_dir se tiver
+            "GRDECL (*.grdecl);;Todos os arquivos (*)"
         )
         if not path:
             return
-
+            
         self.load_compare_model(path)
-
-        # atualiza label
-        self.comp_model_label.setText(f"Modelo comparado: {path}")
-
-        # atualiza listas de fácies nas UIs
-        self.populate_compare_facies_lists()
-
-        # faz a renderização inicial
-        self.init_compare_3d()
 
 
 
@@ -1069,6 +1072,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.models["base"]["reservoir_facies"].discard(f)
         self.update_compare_3d_mode()
+        # [NOVO] Recalcula mapa 2D pois a definição de reservatório mudou
+        self.update_compare_2d_maps()
 
     def update_compare_reservoir_compare(self, item):
         if item.column() != 3:
@@ -1080,156 +1085,335 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.models["compare"]["reservoir_facies"].discard(f)
         self.update_compare_3d_mode()
+        # [NOVO]
+        self.update_compare_2d_maps()
 
+
+    # =========================================================================
+    #  COLE ISTO NO FINAL DO SEU window.py (Substituindo as anteriores)
+    # =========================================================================
 
     def init_compare_3d(self):
         """
-        Cria DOIS visualizadores 3D completos (visualize.run) lado a lado,
-        um para o modelo base e outro para o modelo comparado.
+        Inicializa os visualizadores de comparação com correção para evitar
+        duplicação de dados e garantir independência.
         """
         if self.models["base"]["facies"] is None:
             return
 
         from visualize import run
+        from load_data import grid as global_grid
 
         mode = self.state.get("mode", "facies")
         z_exag = self.state.get("z_exag", 15.0)
+        show_sb = self.state.get("show_scalar_bar", False)
 
-        # ---------------- BASE ----------------
+        # --- 1. Lado ESQUERDO: Modelo Base ---
         self.comp_plotter_base.clear()
         self.compare_states["base"] = {}
-
+        
+        # O modelo base usa o grid global original e as fácies originais
         _, state_base = run(
             mode=mode,
             z_exag=z_exag,
-            show_scalar_bar=False,
+            show_scalar_bar=show_sb,
             external_plotter=self.comp_plotter_base,
             external_state=self.compare_states["base"],
-            facies_array=self.models["base"]["facies"],
+            target_grid=global_grid, 
+            target_facies=self.models["base"]["facies"]
         )
 
-        # força o mesmo conjunto de fácies de reservatório do modelo base
-        state_base["reservoir_facies"] = set(self.models["base"]["reservoir_facies"])
+        # Aplica seleção de reservatório da base
+        rf_base = self.models["base"]["reservoir_facies"]
+        state_base["reservoir_facies"] = set(rf_base)
         if "update_reservoir_fields" in state_base:
-            state_base["update_reservoir_fields"](state_base["reservoir_facies"])
+            state_base["update_reservoir_fields"](rf_base)
             state_base["refresh"]()
 
-        # ---------------- COMPARADO ----------------
+        # --- 2. Lado DIREITO: Modelo Comparado ---
         self.comp_plotter_comp.clear()
         self.compare_states["compare"] = {}
 
         if self.models["compare"]["facies"] is not None:
+            # [CORREÇÃO CRÍTICA] Clona o grid E injeta as fácies novas nele
+            # Se não fizermos isso, o visualize pode ler as fácies antigas do grid.
+            comp_grid = global_grid.copy(deep=True)
+            comp_facies = self.models["compare"]["facies"]
+            comp_grid.cell_data["Facies"] = comp_facies  # <--- Injeção explícita
+
             _, state_comp = run(
                 mode=mode,
                 z_exag=z_exag,
-                show_scalar_bar=False,
+                show_scalar_bar=show_sb,
                 external_plotter=self.comp_plotter_comp,
                 external_state=self.compare_states["compare"],
-                facies_array=self.models["compare"]["facies"],
+                target_grid=comp_grid,
+                target_facies=comp_facies
             )
 
-            # aplica o conjunto de fácies de reservatório DO MODELO COMPARADO
-            state_comp["reservoir_facies"] = set(self.models["compare"]["reservoir_facies"])
+            # Aplica seleção de reservatório do comparado
+            rf_comp = self.models["compare"]["reservoir_facies"]
+            state_comp["reservoir_facies"] = set(rf_comp)
             if "update_reservoir_fields" in state_comp:
-                state_comp["update_reservoir_fields"](state_comp["reservoir_facies"])
+                state_comp["update_reservoir_fields"](rf_comp)
                 state_comp["refresh"]()
-        else:
-            state_comp = None
-
-        # registra callbacks de sincronização de k e box
+        
+        # Ativa a sincronização direta entre as duas janelas
         self.install_compare_sync_callbacks()
-
-        # sincroniza a câmera logo na inicialização
         self.sync_compare_cameras()
 
+    def sync_compare_cameras(self):
+        """
+        Sincroniza câmeras de forma robusta, verificando qual janela está ativa
+        para evitar travamento dos widgets.
+        """
+        if not hasattr(self, "comp_plotter_base") or not hasattr(self, "comp_plotter_comp"):
+            return
+
+        plotter_base = self.comp_plotter_base
+        plotter_comp = self.comp_plotter_comp
+        
+        # Referências
+        cam_base = plotter_base.camera
+        cam_comp = plotter_comp.camera
+        
+        # Interactors (para checar se o mouse está clicado)
+        iren_base = plotter_base.iren
+        iren_comp = plotter_comp.iren
+
+        self._camera_syncing = False
+
+        def copy_props(src, dst, dst_plotter):
+            # Copia propriedades físicas
+            dst.position = src.position
+            dst.focal_point = src.focal_point
+            dst.up = src.up
+            dst.parallel_scale = src.parallel_scale
+            dst.view_angle = src.view_angle
+            
+            # Copia Clipping Range com margem para não cortar bolinhas
+            n, f = src.clipping_range
+            dst.clipping_range = (n, f) 
+            
+            dst_plotter.render()
+
+        def on_base_modified(obj, event):
+            if self._camera_syncing: return
+            
+            # [CORREÇÃO CRÍTICA]: Só sincroniza se o mouse estiver ativo nesta janela
+            # State 0 = Idle (parado). Se for != 0, usuário está interagindo.
+            # Isso impede que a Base mande sinal se ela estiver apenas recebendo update.
+            is_active = iren_base.get_interactor_style().GetState() != 0
+            
+            # Ou se for um evento de zoom (scroll não muda state as vezes, então deixamos passar)
+            # Mas a proteção principal é a flag _camera_syncing
+            
+            self._camera_syncing = True
+            try:
+                copy_props(cam_base, cam_comp, plotter_comp)
+            finally:
+                self._camera_syncing = False
+
+        def on_comp_modified(obj, event):
+            if self._camera_syncing: return
+            
+            # Mesmo teste para o lado direito
+            is_active = iren_comp.get_interactor_style().GetState() != 0
+            
+            self._camera_syncing = True
+            try:
+                copy_props(cam_comp, cam_base, plotter_base)
+            finally:
+                self._camera_syncing = False
+
+        # Limpeza
+        cam_base.RemoveAllObservers()
+        cam_comp.RemoveAllObservers()
+
+        # Conexão
+        cam_base.AddObserver("ModifiedEvent", on_base_modified)
+        cam_comp.AddObserver("ModifiedEvent", on_comp_modified)
+
+        # Sync inicial
+        self._camera_syncing = True
+        copy_props(cam_base, cam_comp, plotter_comp)
+        self._camera_syncing = False
+
+    def update_compare_3d_mode(self):
+        """Atualiza o modo (Fácies, Clusters, Thickness) nos dois lados."""
+        mode = self.state.get("mode", "facies")
+        
+        for key in ["base", "compare"]:
+            st = self.compare_states.get(key)
+            if not st: continue
+            
+            st["mode"] = mode
+            # Pega o estado da checkbox de scalar bar da UI principal ou do state principal
+            st["show_scalar_bar"] = self.state.get("show_scalar_bar", False)
+            
+            # Garante consistência dos sub-modos
+            if mode == "thickness_local":
+                st["thickness_mode"] = self.state.get("thickness_mode", "Espessura")
+                if "update_thickness" in st: st["update_thickness"]()
+            
+            # Se mudou para clusters ou reservatório, garante cálculo
+            if mode in ["clusters", "reservoir", "largest"]:
+                if "update_reservoir_fields" in st:
+                    # Usa o conjunto de fácies específico DESTE modelo (base ou compare)
+                    if key == "base":
+                        rf = self.models["base"]["reservoir_facies"]
+                    else:
+                        rf = self.models["compare"]["reservoir_facies"]
+                    st["update_reservoir_fields"](rf)
+
+            if "refresh" in st:
+                st["refresh"]()
 
     def install_compare_sync_callbacks(self):
         """
-        Conecta callbacks para que:
-        - mudar k_min em QUALQUER visualizador (principal ou comparação)
-          atualize os três;
-        - mover o box_widget em QUALQUER visualizador atualize os três.
+        Sincroniza o CORTE (Geometria) entre as janelas, mas NÃO move 
+        os widgets passivos para evitar travamento de interação.
         """
-        main_state = getattr(self, "state", None)
-        base_state = self.compare_states.get("base")
-        comp_state = self.compare_states.get("compare")
+        # Coleta todos os estados ativos
+        states = []
+        if self.state: states.append(self.state)
+        if self.compare_states.get("base"): states.append(self.compare_states["base"])
+        if self.compare_states.get("compare"): states.append(self.compare_states["compare"])
 
-        states = [s for s in (main_state, base_state, comp_state) if s]
+        # Coleta todos os plotters
+        plotters = [self.plotter, self.comp_plotter_base, self.comp_plotter_comp]
 
-        if not states:
-            return
+        self._updating_cut = False
 
         def on_k_changed(new_k):
+            # Sincronia de Camadas (Z)
             for st in states:
                 st["k_min"] = int(new_k)
-                if "refresh" in st:
-                    st["refresh"]()
+                if "refresh" in st: st["refresh"]()
 
         def on_box_changed(bounds):
-            for st in states:
-                st["box_bounds"] = bounds
-                bw = st.get("box_widget")
-                if bw is not None:
-                    try:
-                        bw.PlaceWidget(bounds)
-                    except Exception:
-                        pass
-                if "refresh" in st:
-                    st["refresh"]()
+            # Sincronia de Corte (Box)
+            if self._updating_cut: return
+            self._updating_cut = True
+            
+            try:
+                # 1. Aplica o limite de corte (bounds) em TODOS os estados
+                for st in states:
+                    st["box_bounds"] = bounds
+                    
+                    # Chama o refresh() que recorta o grid internamente
+                    if "refresh" in st: 
+                        st["refresh"]()
+                        
+                    # NOTA: Removemos o 'PlaceWidget' daqui propositalmente.
+                    # Isso faz com que o corte aconteça em todos, mas as 
+                    # 'bolinhas' só se movam na janela ativa, destravando o mouse.
 
-        # registra os callbacks em todos os estados
+                # 2. Renderiza todas as telas para mostrar o corte novo
+                for p in plotters: 
+                    p.render()
+
+            finally:
+                self._updating_cut = False
+
+        # Instala os callbacks
         for st in states:
             st["on_k_changed"] = on_k_changed
             st["on_box_changed"] = on_box_changed
 
-
-
-
-    def sync_compare_cameras(self):
+    def update_compare_2d_maps(self):
         """
-        Mantém as câmeras da comparação alinhadas com a câmera principal.
+        Gera os mapas 2D lado a lado para a aba de comparação.
+        Baseado na métrica selecionada no combo 'Thickness Local'.
         """
-        if not hasattr(self, "plotter"):
+        # Pega a métrica atual
+        if not hasattr(self, "state"): return
+        
+        # Mapeia o nome legível (Combo) para o nome interno do array
+        presets = self.state.get("thickness_presets", {})
+        mode_label = self.state.get("thickness_mode", "Espessura")
+        
+        if mode_label not in presets:
+            mode_label = "Espessura"
+        
+        if mode_label not in presets: return # Segurança
+
+        scalar_name, title = presets[mode_label]
+
+        # 1. Mapa BASE
+        # Precisamos acessar o grid que está sendo usado no plotter 3D da base
+        if self.compare_states.get("base"):
+            grid_base = self.compare_states["base"].get("current_grid_source")
+            # Se não achar no state, tenta o global importado
+            if not grid_base:
+                from load_data import grid as grid_base
+            
+            # Só desenha se o array existir no grid
+            if grid_base and scalar_name in grid_base.cell_data:
+                # Truque: update_2d_plot espera um grid GLOBAL no analysis.py.
+                # Vamos usar uma versão modificada ou injetar temporariamente?
+                # Melhor: Vamos usar a lógica do visualize.py mas passando o grid explicitamente.
+                # Como update_2d_plot do visualize.py usa 'make_thickness_2d_from_grid' que usa 'grid' global,
+                # precisamos de uma versão que aceite grid como argumento
+                
+                # Vamos fazer a lógica local aqui mesmo para não mexer em outros arquivos
+                self._draw_2d_map_local(self.comp_plotter_base_2d, grid_base, scalar_name, title)
+            else:
+                self.comp_plotter_base_2d.clear()
+
+        # 2. Mapa COMPARADO
+        if self.compare_states.get("compare"):
+            grid_comp = self.compare_states["compare"].get("current_grid_source")
+            if grid_comp and scalar_name in grid_comp.cell_data:
+                self._draw_2d_map_local(self.comp_plotter_comp_2d, grid_comp, scalar_name, title)
+            else:
+                self.comp_plotter_comp_2d.clear()
+
+    def _draw_2d_map_local(self, plotter, grid_source, scalar_name_3d, title):
+        """
+        Versão local de desenho 2D que aceita qualquer grid de entrada.
+        """
+        # Requer imports locais
+        from load_data import nx, ny, nz
+        import pyvista as pv
+        import numpy as np
+
+        if scalar_name_3d not in grid_source.cell_data:
+            plotter.clear()
             return
-        if not hasattr(self, "comp_plotter_base") or not hasattr(self, "comp_plotter_comp"):
-            return
 
-        main_cam = self.plotter.camera
+        arr3d = grid_source.cell_data[scalar_name_3d].reshape((nx, ny, nz), order="F")
 
-        def copy_cam(src, dst):
-            dst.position = src.position
-            dst.focal_point = src.focal_point
-            dst.view_up = src.view_up
-            dst.parallel_scale = src.parallel_scale
+        # Calcula espessura 2D (max da coluna)
+        thickness_2d = np.full((nx, ny), np.nan, dtype=float)
+        for ix in range(nx):
+            for iy in range(ny):
+                col_vals = arr3d[ix, iy, :]
+                col_vals = col_vals[col_vals > 0]
+                if col_vals.size > 0:
+                    thickness_2d[ix, iy] = col_vals.max()
 
-        def on_end_interaction_caller(obj, ev):
-            # copiou do main para os outros
-            copy_cam(main_cam, self.comp_plotter_base.camera)
-            copy_cam(main_cam, self.comp_plotter_comp.camera)
-            self.comp_plotter_base.render()
-            self.comp_plotter_comp.render()
+        # Cria grid estruturado 2D
+        x_min, x_max, y_min, y_max, _, z_max = grid_source.bounds
+        xs = np.linspace(x_min, x_max, nx)
+        ys = np.linspace(y_min, y_max, ny)
+        xs, ys = np.meshgrid(xs, ys, indexing="ij")
+        zs = np.full_like(xs, z_max)
+        surf = pv.StructuredGrid(xs, ys, zs)
 
-        # Observa a câmera do visualizador principal
-        if hasattr(self.plotter, "iren") and self.plotter.iren is not None:
-            interactor = self.plotter.iren
-            interactor.add_observer("EndInteractionEvent", on_end_interaction_caller)
+        # Injeta dados
+        scalar_2d_name = scalar_name_3d + "_2d"
+        surf.cell_data[scalar_2d_name] = thickness_2d[:nx-1, :ny-1].ravel(order="F")
 
-
-
-
-
-
-    def update_compare_3d_mode(self):
-        mode = self.state.get("mode", "facies")
-
-        for key in ("base", "compare"):
-            st = self.compare_states.get(key)
-            if not st:
-                continue
-            st["mode"] = mode
-            # thickness_mode já está dentro do state, então o run se vira
-            if "refresh" in st:
-                st["refresh"]()
+        # Renderiza
+        plotter.clear()
+        plotter.add_mesh(surf, scalars=scalar_2d_name, cmap="plasma", show_edges=True, 
+                         edge_color="black", line_width=0.5, nan_color="white", show_scalar_bar=False)
+        plotter.view_xy()
+        plotter.enable_parallel_projection()
+        plotter.set_background("white")
+        plotter.add_scalar_bar(title=title)
+        plotter.reset_camera()
 
 
 
