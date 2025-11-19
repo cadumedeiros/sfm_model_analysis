@@ -427,20 +427,21 @@ def run(
                 except: pass
 
         elif mode == "ntg_local":
-            if "NTG_local" in mesh.cell_data:
+            scalar_name = "vert_NTG_col_reservoir"
+            if scalar_name in mesh.cell_data:
                 if state["bg_actor"]: 
                     try: plotter.remove_actor(state["bg_actor"])
                     except: pass
                     state["bg_actor"] = None
 
                 if not needs_full_reset and state["main_actor"]:
-                     _update_mapper_generic(state["main_actor"], mesh, scalar_name="NTG_local", cmap="plasma", clim=[0,1], show_scalar=True)
+                     _update_mapper_generic(state["main_actor"], mesh, scalar_name=scalar_name, cmap="plasma", clim=[0,1], show_scalar=True)
                 else:
-                    act = plotter.add_mesh(mesh, scalars="NTG_local", cmap="plasma", clim=[0,1], show_edges=True, show_scalar_bar=False)
+                    act = plotter.add_mesh(mesh, scalars=scalar_name, cmap="plasma", clim=[0,1], show_edges=True, show_scalar_bar=False)
                     state["main_actor"] = act
                 
-                plotter.add_scalar_bar(title="NTG Local")
-        
+                plotter.add_scalar_bar(title="NTG Local (Coluna)")
+
         elif mode == "largest":
              try:
                  bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")

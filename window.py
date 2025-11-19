@@ -1,4 +1,4 @@
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtGui import QColor, QBrush, QPixmap
 from pyvistaqt import BackgroundPlotter
 import numpy as np
@@ -95,6 +95,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
         self.setWindowTitle("SFM View Analysis")
+        
+        # [ICON] Set Window Icon
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "forward_PNG.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QtGui.QIcon(icon_path))
 
         if isinstance(reservoir_facies, (int, np.integer)):
             initial_reservoir = {int(reservoir_facies)}
@@ -118,87 +123,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1600, 900)
         self.setMinimumSize(800, 600)
 
+        # --- FLAGS DE OTIMIZAÇÃO (LAZY UPDATE) ---
+        self.comparison_dirty = False
+        self.main_2d_dirty = False
+        self.sync_enabled = False # Default OFF
+
+        # --- UI SETUP ---
+        self.create_menus()
+        self.create_nav_toolbar()
+        self.create_docks()
+
+        # --- CENTRAL WIDGET (TABS ONLY) ---
         central = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(central)
+        layout = QtWidgets.QVBoxLayout(central) 
         self.setCentralWidget(central)
 
-        # --- PAINEL LATERAL ---
-        self.panel = QtWidgets.QWidget()
-        panel_layout = QtWidgets.QVBoxLayout(self.panel)
-        self.panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        self.panel.setMaximumWidth(300) 
-
-        # Logo
-        logo_label = QtWidgets.QLabel()
-        pix = QPixmap("assets/forward_PNG.png")
-        if not pix.isNull():
-            pix = pix.scaledToWidth(140, QtCore.Qt.SmoothTransformation)
-            logo_label.setPixmap(pix)
-        logo_label.setAlignment(QtCore.Qt.AlignCenter)
-        panel_layout.addWidget(logo_label)
-        panel_layout.addSpacing(10)
-
-        # Botões
-        modes = {
-            "Fácies": "facies",
-            "Reservatório": "reservoir",
-            "Clusters": "clusters",
-            "Maior Cluster": "largest",
-            "Espessura local": "thickness_local",
-            "NTG local": "ntg_local",
-        }
-        group = QtWidgets.QGroupBox("Modo de Visualização")
-        group_layout = QtWidgets.QVBoxLayout(group)
-        for label, mode_code in modes.items():
-            btn = QtWidgets.QPushButton(label)
-            btn.clicked.connect(lambda _, mm=mode_code: self.change_mode(mm))
-            group_layout.addWidget(btn)
-        panel_layout.addWidget(group)
-
-        # Thickness
-        self.thick_combo = QtWidgets.QComboBox()
-        self.thick_combo.addItems([
-            "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
-            "Nº pacotes", "ICV", "Qv", "Qv absoluto",
-        ])
-        self.thick_combo.currentTextChanged.connect(self.change_thickness_mode)
-        sub_group = QtWidgets.QGroupBox("Thickness Local")
-        sub_layout = QtWidgets.QVBoxLayout(sub_group)
-        sub_layout.addWidget(self.thick_combo)
-        panel_layout.addWidget(sub_group)
-
-        # Lista Reservatório
-        self.res_group = QtWidgets.QGroupBox("Fácies do Reservatório")
-        res_layout = QtWidgets.QVBoxLayout(self.res_group)
-        self.reservoir_list = QtWidgets.QListWidget()
-        self.reservoir_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-        present = sorted(set(int(v) for v in np.unique(facies)))
-        for fac in present:
-            item = QtWidgets.QListWidgetItem(str(fac))
-            item.setCheckState(QtCore.Qt.Unchecked)
-            item.setData(QtCore.Qt.UserRole, fac)
-            self.reservoir_list.addItem(item)
-        self.reservoir_list.itemChanged.connect(self.change_reservoir_facies)
-        res_layout.addWidget(self.reservoir_list)
-        panel_layout.addWidget(self.res_group)
-
-        # Legenda Lateral
-        self.legend_group = QtWidgets.QGroupBox("Legenda de Fácies")
-        legend_layout = QtWidgets.QVBoxLayout(self.legend_group)
-        self.facies_legend_table = self._create_legend_table()
-        legend_layout.addWidget(self.facies_legend_table)
-        panel_layout.addWidget(self.legend_group)
-
-        panel_layout.addStretch()
-
-        # --- ÁREA DIREITA (TABs) ---
+        # --- ÁREA DIREITA (TABs) -> Agora ocupa tudo ---
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.tabBar().hide() # Esconde abas para usar navegação Ribbon
         
         # 1. Aba 3D Principal
         self.plotter = BackgroundPlotter(show=False)
         self.viz_tab = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(self.viz_tab)
         vl.setContentsMargins(0,0,0,0)
+        
+        # [NOVO] Toolbar Local
+        self.mode_actions = {} # Inicializa dict
+        self.viz_toolbar = self.create_local_toolbar(self.mode_actions, self.change_mode, is_compare=False)
+        vl.addWidget(self.viz_toolbar)
+        
         vl.addWidget(self.plotter.interactor)
         self.tabs.addTab(self.viz_tab, "Visualização 3D")
         
@@ -231,10 +185,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- 4. ABA COMPARAÇÃO ---
         self.compare_tab = QtWidgets.QWidget()
         comp_layout = QtWidgets.QVBoxLayout(self.compare_tab)
+        
+        # [NOVO] Toolbar Local de Comparação
+        self.compare_mode_actions = {}
+        self.comp_toolbar = self.create_local_toolbar(self.compare_mode_actions, self.change_compare_mode, is_compare=True)
+        comp_layout.addWidget(self.comp_toolbar)
+
         self.compare_tabs = QtWidgets.QTabWidget()
         comp_layout.addWidget(self.compare_tabs)
         
-        # 4.1 Sub-aba Métricas (MANTIDA IGUAL)
+        # 4.1 Sub-aba Métricas
         self.compare_metrics_widget = QtWidgets.QWidget()
         cmp_metrics_layout = QtWidgets.QVBoxLayout(self.compare_metrics_widget)
         
@@ -273,20 +233,16 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.compare_tabs.addTab(self.compare_metrics_widget, "Métricas")
 
-        # =====================================================================
-        # 4.2 Sub-aba MAPAS 2D (NOVA)
-        # =====================================================================
+        # 4.2 Sub-aba MAPAS 2D
         self.compare_2d_widget = QtWidgets.QWidget()
         c2d_layout = QtWidgets.QHBoxLayout(self.compare_2d_widget)
         
-        # Plotter Base 2D
         l_col_2d = QtWidgets.QVBoxLayout()
         self.comp_plotter_base_2d = BackgroundPlotter(show=False)
         l_col_2d.addWidget(QtWidgets.QLabel("Mapa Base"))
         l_col_2d.addWidget(self.comp_plotter_base_2d.interactor)
         c2d_layout.addLayout(l_col_2d)
 
-        # Plotter Comparado 2D
         r_col_2d = QtWidgets.QVBoxLayout()
         self.comp_plotter_comp_2d = BackgroundPlotter(show=False)
         r_col_2d.addWidget(QtWidgets.QLabel("Mapa Comparado"))
@@ -295,16 +251,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.compare_tabs.addTab(self.compare_2d_widget, "Mapas 2D")
 
-        # =====================================================================
-        # 4.3 Sub-aba Visualização 3D (MANTIDA IGUAL)
-        # =====================================================================
+        # 4.3 Sub-aba Visualização 3D
         self.compare_3d_widget = QtWidgets.QWidget()
         c3d_main_layout = QtWidgets.QVBoxLayout(self.compare_3d_widget)
         c3d_main_layout.setContentsMargins(0,0,0,0)
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         c3d_main_layout.addWidget(splitter)
 
-        # Topo 3D
         top_widget = QtWidgets.QWidget()
         top_layout = QtWidgets.QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0,0,0,0)
@@ -327,7 +280,6 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addWidget(r_container)
         splitter.addWidget(top_widget)
 
-        # Baixo Tabelas
         bottom_widget = QtWidgets.QWidget()
         bottom_widget.setMinimumHeight(200) 
         bottom_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -362,10 +314,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compare_tabs.addTab(self.compare_3d_widget, "Visualização 3D")
         self.tabs.addTab(self.compare_tab, "Comparação")
 
-        layout.addWidget(self.panel, 1)
-        layout.addWidget(self.tabs, 5)
+        layout.addWidget(self.tabs)
 
-        # ... (Restante do __init__ continua igual)
+        # --- INITIALIZATION ---
         self.populate_facies_legend()
         self.state = dict()
         self.state["reservoir_facies"] = initial_reservoir
@@ -384,20 +335,273 @@ class MainWindow(QtWidgets.QMainWindow):
             external_state=self.state,
         )
         
-        self.reservoir_list.blockSignals(True)
-        for i in range(self.reservoir_list.count()):
-            item = self.reservoir_list.item(i)
-            fac = item.data(QtCore.Qt.UserRole)
-            if fac in initial_reservoir:
-                item.setCheckState(QtCore.Qt.Checked)
-        self.reservoir_list.blockSignals(False)
-
+        
         self.change_reservoir_facies(None) 
         self.update_2d_map()
         self.update_comparison_tables()
         self.init_compare_3d()
         # [NOVO]: Chama atualização inicial dos mapas 2D
         self.update_compare_2d_maps()
+
+        # Conecta sinal de mudança de aba APÓS inicialização do state
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def create_menus(self):
+        menubar = self.menuBar()
+        menubar.clear() # [FIX] Evita duplicação
+
+        # --- File Menu ---
+        file_menu = menubar.addMenu("&Arquivo")
+        
+        load_action = QtWidgets.QAction("&Carregar Modelo para Comparação...", self)
+        load_action.triggered.connect(self.open_compare_dialog)
+        file_menu.addAction(load_action)
+        
+        exit_action = QtWidgets.QAction("&Sair", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # --- View Menu ---
+        view_menu = menubar.addMenu("&Visualização")
+        
+        # Modes
+        modes_menu = view_menu.addMenu("Modo de Visualização")
+        self.mode_actions = {}
+        modes = {
+            "Fácies": "facies",
+            "Reservatório": "reservoir",
+            "Clusters": "clusters",
+            "Maior Cluster": "largest",
+            "Espessura local": "thickness_local",
+            "NTG local": "ntg_local",
+        }
+        group = QtWidgets.QActionGroup(self)
+        for label, mode_code in modes.items():
+            action = QtWidgets.QAction(label, self, checkable=True)
+            if mode_code == "facies": action.setChecked(True)
+            action.triggered.connect(lambda checked, m=mode_code: self.change_mode(m))
+            modes_menu.addAction(action)
+            group.addAction(action)
+            self.mode_actions[mode_code] = action
+
+        # Docks visibility
+        view_menu.addSeparator()
+        self.view_docks_menu = view_menu.addMenu("Janelas")
+
+    def create_nav_toolbar(self):
+        """Cria a barra de navegação principal (Abas)."""
+        nav_toolbar = QtWidgets.QToolBar("Navegação")
+        nav_toolbar.setMovable(False)
+        nav_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        nav_toolbar.setIconSize(QtCore.QSize(32, 32))
+        self.addToolBar(QtCore.Qt.TopToolBarArea, nav_toolbar)
+
+        def add_nav_btn(label, icon_type, index):
+            icon = self.style().standardIcon(icon_type)
+            action = QtWidgets.QAction(icon, label, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda: self.tabs.setCurrentIndex(index))
+            nav_toolbar.addAction(action)
+            return action
+
+        self.nav_actions = []
+        self.nav_actions.append(add_nav_btn("Visualização 3D", QtWidgets.QStyle.SP_DesktopIcon, 0))
+        self.nav_actions.append(add_nav_btn("Mapa 2D", QtWidgets.QStyle.SP_FileDialogDetailedView, 1))
+        self.nav_actions.append(add_nav_btn("Métricas", QtWidgets.QStyle.SP_FileDialogInfoView, 2))
+        self.nav_actions.append(add_nav_btn("Comparação", QtWidgets.QStyle.SP_FileDialogContentsView, 3))
+        
+        # Default selection
+        self.nav_actions[0].setChecked(True)
+
+    def create_local_toolbar(self, target_dict, callback, is_compare=False):
+        """Cria uma toolbar local (QWidget) para ser inserida dentro da aba."""
+        toolbar = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(toolbar)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)
+        
+        # Helper button
+        def add_btn(label, icon_type, mode_code):
+            btn = QtWidgets.QToolButton()
+            btn.setText(label)
+            
+            if isinstance(icon_type, str):
+                if os.path.exists(icon_type):
+                    btn.setIcon(QtGui.QIcon(icon_type))
+                else:
+                    btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning))
+            else:
+                btn.setIcon(self.style().standardIcon(icon_type))
+                
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True) # Comportamento de rádio
+            btn.setIconSize(QtCore.QSize(32, 32)) # Aumentei um pouco para ver melhor a imagem
+            btn.clicked.connect(lambda: callback(mode_code))
+            layout.addWidget(btn)
+            target_dict[mode_code] = btn
+            return btn
+
+        # Modos
+        # [CUSTOM ICON] Fácies
+        facies_icon_path = os.path.join(os.path.dirname(__file__), "assets", "facies_icon.png")
+        b1 = add_btn("Fácies", facies_icon_path, "facies")
+        b1.setChecked(True)
+        add_btn("Reservatório", QtWidgets.QStyle.SP_DirHomeIcon, "reservoir")
+        add_btn("Clusters", QtWidgets.QStyle.SP_FileIcon, "clusters")
+        
+        if not is_compare:
+            add_btn("Maior Cluster", QtWidgets.QStyle.SP_TitleBarMaxButton, "largest")
+            
+        # [NOVO] Botões solicitados
+        add_btn("Espessura Local", QtWidgets.QStyle.SP_FileDialogDetailedView, "thickness_local")
+        add_btn("NTG Local", QtWidgets.QStyle.SP_FileDialogInfoView, "ntg_local")
+
+        # Separador
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.VLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        layout.addWidget(line)
+
+        # Sync (Só Comparação)
+        if is_compare:
+            self.sync_btn = QtWidgets.QToolButton()
+            self.sync_btn.setText("Sincronizar")
+            self.sync_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+            self.sync_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            self.sync_btn.setCheckable(True)
+            self.sync_btn.setChecked(False)
+            self.sync_btn.setIconSize(QtCore.QSize(24, 24))
+            self.sync_btn.toggled.connect(self.toggle_sync)
+            layout.addWidget(self.sync_btn)
+            
+            line2 = QtWidgets.QFrame()
+            line2.setFrameShape(QtWidgets.QFrame.VLine)
+            line2.setFrameShadow(QtWidgets.QFrame.Sunken)
+            layout.addWidget(line2)
+
+        # Combo Métrica
+        container = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lbl = QtWidgets.QLabel("Métrica Local")
+        lbl.setAlignment(QtCore.Qt.AlignCenter)
+        lbl.setStyleSheet("font-size: 10px; color: #555;")
+        
+        combo = QtWidgets.QComboBox()
+        combo.setMinimumWidth(120)
+        combo.addItems([
+            "Espessura", "NTG coluna", "NTG envelope", "Maior pacote",
+            "Nº pacotes", "ICV", "Qv", "Qv absoluto",
+        ])
+        combo.currentTextChanged.connect(self.change_thickness_mode)
+        
+        # Guarda referência do combo correto dependendo do contexto
+        if is_compare:
+            self.thick_combo_compare = combo
+        else:
+            self.thick_combo = combo
+
+        lay.addWidget(combo)
+        lay.addWidget(lbl)
+        layout.addWidget(container)
+        
+        layout.addStretch()
+        return toolbar
+
+    def update_options_toolbar(self):
+        pass # Deprecated
+
+    def create_options_toolbar(self):
+        pass # Deprecated
+
+    def create_docks(self):
+        # --- Left Dock: Reservoir Filter ---
+        self.res_dock = QtWidgets.QDockWidget("Filtro de Reservatório", self)
+        self.res_dock.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        
+        res_widget = QtWidgets.QWidget()
+        res_layout = QtWidgets.QVBoxLayout(res_widget)
+        
+        self.reservoir_list = QtWidgets.QListWidget()
+        self.reservoir_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        
+        # Populate List
+        present = sorted(set(int(v) for v in np.unique(facies)))
+        for fac in present:
+            item = QtWidgets.QListWidgetItem(str(fac))
+            item.setCheckState(QtCore.Qt.Unchecked)
+            item.setData(QtCore.Qt.UserRole, fac)
+            self.reservoir_list.addItem(item)
+            
+        self.reservoir_list.itemChanged.connect(self.change_reservoir_facies)
+        
+        res_layout.addWidget(self.reservoir_list)
+        self.res_dock.setWidget(res_widget)
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.res_dock)
+        
+        # --- Right Dock: Legend (MOVED TO LEFT BOTTOM) ---
+        self.legend_dock = QtWidgets.QDockWidget("Legenda", self)
+        self.legend_dock.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        
+        legend_widget = QtWidgets.QWidget()
+        legend_layout = QtWidgets.QVBoxLayout(legend_widget)
+        
+        self.facies_legend_table = self._create_legend_table()
+        legend_layout.addWidget(self.facies_legend_table)
+        
+        self.legend_dock.setWidget(legend_widget)
+        
+        # Adiciona na esquerda, abaixo do filtro
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.legend_dock)
+        # Força tabulação vertical se necessário, ou split
+        # self.splitDockWidget(self.res_dock, self.legend_dock, QtCore.Qt.Vertical) 
+        # Mas addDockWidget na mesma área geralmente empilha.
+
+        # Add toggle actions to View menu
+        self.view_docks_menu.addAction(self.res_dock.toggleViewAction())
+        self.view_docks_menu.addAction(self.legend_dock.toggleViewAction())
+
+    def on_tab_changed(self, index):
+        # Atualiza botões de navegação
+        for i, action in enumerate(self.nav_actions):
+            action.setChecked(i == index)
+            
+        # Atualiza barra de opções
+        # self.update_options_toolbar() -> REMOVIDO
+
+        tab_text = self.tabs.tabText(index)
+        
+        if tab_text == "Comparação":
+            if self.comparison_dirty:
+                print("Updating Comparison Tab (Lazy)...")
+                self.update_comparison_tables()
+                self.update_compare_2d_maps()
+                self.update_compare_3d_mode() 
+                self.comparison_dirty = False
+                
+        elif tab_text == "Mapa 2D":
+            if self.main_2d_dirty:
+                print("Updating Main 2D Map (Lazy)...")
+                self.update_2d_map()
+                self.main_2d_dirty = False
+
+    def _update_comparison_logic(self, selected_set):
+        # B) Métricas do Modelo Comparado
+        if self.compare_facies is not None:
+            c_metrics, c_perc = compute_global_metrics_for_array(self.compare_facies, selected_set)
+            c_res_stats, c_res_total = reservoir_facies_distribution_array(self.compare_facies, selected_set)
+            
+            self.compare_metrics = c_metrics
+            self.compare_perc = c_perc
+            self.comp_res_stats = c_res_stats
+            self.comp_res_total = c_res_total
+
+        # 4. Atualiza as Tabelas da Aba Comparação
+        self.update_comparison_tables()
+        self.update_compare_2d_maps()
+        self.update_compare_3d_mode()
 
     # Helper para criar tabela
     def _create_legend_table(self, headers=["Cor", "Fácies", "Células", "Sel."]):
@@ -606,61 +810,109 @@ class MainWindow(QtWidgets.QMainWindow):
             fill_one_table(self.clus_table_comp_cmp, self.compare_states["compare"])
 
     # ----------------------------------------------------------------------
+    def toggle_sync(self, checked):
+        self.sync_enabled = checked
+        print(f"Sincronização: {checked}")
+        if checked:
+            # Força sync imediato
+            self.sync_compare_cameras()
+            # Sync de corte
+            if "box_bounds" in self.state:
+                bounds = self.state["box_bounds"]
+                for key in ["base", "compare"]:
+                    st = self.compare_states.get(key)
+                    if st: st["box_bounds"] = bounds
+                    if st and "refresh" in st: st["refresh"]()
+                self.comp_plotter_base.render()
+                self.comp_plotter_comp.render()
+
     def change_mode(self, new_mode):
-        print("Modo:", new_mode)
+        """Muda modo APENAS da Visualização Principal."""
+        print("Modo Principal:", new_mode)
         self.state["mode"] = new_mode
 
-        # --- 1. Painel Principal (Sidebar) ---
+        # Atualiza botões (QToolButton)
+        if hasattr(self, "mode_actions"):
+            for code, btn in self.mode_actions.items():
+                btn.setChecked(code == new_mode)
+
+        # Atualiza Docks (Legenda)
         if new_mode == "clusters":
-            self.legend_group.setTitle("Legenda de Clusters")
+            self.legend_dock.setWindowTitle("Legenda de Clusters")
             self.populate_clusters_legend()
         else:
-            self.legend_group.setTitle("Legenda de Fácies")
+            self.legend_dock.setWindowTitle("Legenda de Fácies")
             self.populate_facies_legend()
 
-        # --- 2. Aba Comparação (Bottom Panel) ---
-        # Mostra tabelas de clusters APENAS se o modo for "clusters"
-        is_cluster = (new_mode == "clusters")
+        # Redesenha 3D Principal
+        self.state["refresh"]()
         
+    def change_compare_mode(self, new_mode):
+        """Muda modo APENAS da Comparação."""
+        print("Modo Comparação:", new_mode)
+        
+        for key in ["base", "compare"]:
+            st = self.compare_states.get(key)
+            if st:
+                st["mode"] = new_mode
+                # Lógica específica de clusters/reservatório
+                if new_mode in ["clusters", "reservoir", "largest"]:
+                    if "update_reservoir_fields" in st:
+                        rf = self.models[key]["reservoir_facies"]
+                        st["update_reservoir_fields"](rf)
+                if "refresh" in st: st["refresh"]()
+
+        # Atualiza botões
+        if hasattr(self, "compare_mode_actions"):
+            for code, btn in self.compare_mode_actions.items():
+                btn.setChecked(code == new_mode)
+                
+        # Atualiza visibilidade de tabelas
+        is_cluster = (new_mode == "clusters")
         self.clus_table_base_cmp.setVisible(is_cluster)
         self.clus_table_comp_cmp.setVisible(is_cluster)
-        
-        # Se não for cluster (ex: facies, reservoir), a tabela de Fácies (res_table)
-        # deve continuar visível e ocupar o espaço deixado pela tabela de clusters oculta.
-        self.res_table_base_cmp.setVisible(True) # Sempre visível
-        self.res_table_comp_cmp.setVisible(True) # Sempre visível
+        self.res_table_base_cmp.setVisible(True)
+        self.res_table_comp_cmp.setVisible(True)
 
         if is_cluster:
             self.populate_compare_clusters_tables()
 
-        # Redesenha 3D
-        self.state["refresh"]()
-        self.update_compare_3d_mode()
-
 
     def change_thickness_mode(self, label):
         print("Thickness:", label)
-        # Atualiza visualizador principal
         self.state["thickness_mode"] = label
+        
+        # Atualiza Combo se foi chamado programaticamente
+        if self.thick_combo.currentText() != label:
+            self.thick_combo.setCurrentText(label)
+
+        # Atualiza visualizador principal 3D
         if "update_thickness" in self.state:
             self.state["update_thickness"]()
         self.state["refresh"]()
 
-        # [CORREÇÃO 2]: Atualiza visualizadores de COMPARAÇÃO
-        for key in ["base", "compare"]:
-            st = self.compare_states.get(key)
-            if st:
-                st["thickness_mode"] = label
-                if "update_thickness" in st: 
-                    st["update_thickness"]()
-                if "refresh" in st: 
-                    st["refresh"]()
+        # Lazy Update Comparação
+        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        
+        if current_tab == "Comparação":
+            # Atualiza visualizadores de COMPARAÇÃO
+            for key in ["base", "compare"]:
+                st = self.compare_states.get(key)
+                if st:
+                    st["thickness_mode"] = label
+                    if "update_thickness" in st: st["update_thickness"]()
+                    if "refresh" in st: st["refresh"]()
+            self.update_compare_2d_maps()
+            self.comparison_dirty = False
+        else:
+            self.comparison_dirty = True
 
-        # Atualiza mapa 2D
-        self.update_2d_map()
-
-        # [NOVO] Atualiza mapas 2D da comparação
-        self.update_compare_2d_maps()
+        # Lazy Update Mapa 2D Principal
+        if current_tab == "Mapa 2D":
+            self.update_2d_map()
+            self.main_2d_dirty = False
+        else:
+            self.main_2d_dirty = True
 
     def set_metrics(self, metrics, perc):
         if metrics is None:
@@ -776,7 +1028,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Atualiza o Visualizador Principal e RECALCULA as Métricas (inclusive as de Comparação).
         NÃO afeta a visualização 3D da aba Comparação.
         """
-        # 1. Coleta a nova seleção do painel esquerdo
+        # 1. Coleta a nova seleção do Dock
         selected = []
         for i in range(self.reservoir_list.count()):
             it = self.reservoir_list.item(i)
@@ -795,9 +1047,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if "refresh" in self.state:
             self.state["refresh"]()
             
-        self.update_2d_map()
+        # 3. Lazy Update Mapa 2D Principal
+        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        if current_tab == "Mapa 2D":
+            self.update_2d_map()
+            self.main_2d_dirty = False
+        else:
+            self.main_2d_dirty = True
 
-        # 3. RECALCULO DE MÉTRICAS (Para as Tabelas)
+        # 4. RECALCULO DE MÉTRICAS (Base)
         # Isso afeta a aba "Métricas Globais" e a aba "Comparação > Métricas"
         
         # A) Métricas do Modelo Base
@@ -817,24 +1075,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Atualiza texto da aba "Métricas Globais"
         self.set_metrics(base_metrics, base_perc)
 
-        # B) Métricas do Modelo Comparado (Se houver um carregado)
-        # Quando mudamos a definição de "reservatório" na esquerda, 
-        # faz sentido atualizar as métricas do comparado para usar a mesma definição.
-        if self.compare_facies is not None:
-            # Recalcula globais do comparado com a nova seleção
-            c_metrics, c_perc = compute_global_metrics_for_array(self.compare_facies, selected_set)
-            
-            # Recalcula distribuição do reservatório do comparado
-            c_res_stats, c_res_total = reservoir_facies_distribution_array(self.compare_facies, selected_set)
-            
-            self.compare_metrics = c_metrics
-            self.compare_perc = c_perc
-            self.comp_res_stats = c_res_stats
-            self.comp_res_total = c_res_total
-
-        # 4. Atualiza as Tabelas da Aba Comparação
-        # (Isso preenche os números novos sem mexer no 3D)
-        self.update_comparison_tables()
+        # 5. Lazy Update Comparação
+        if current_tab == "Comparação":
+            self._update_comparison_logic(selected_set)
+            self.comparison_dirty = False
+        else:
+            self.comparison_dirty = True
 
     def update_2d_map(self):
         """
@@ -1169,6 +1415,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if not hasattr(self, "comp_plotter_base") or not hasattr(self, "comp_plotter_comp"):
             return
+            
+        # [NOVO] Verifica flag de sync
+        if not self.sync_enabled:
+            return
 
         plotter_base = self.comp_plotter_base
         plotter_comp = self.comp_plotter_comp
@@ -1199,6 +1449,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def on_base_modified(obj, event):
             if self._camera_syncing: return
+            if not self.sync_enabled: return # Double check
             
             # [CORREÇÃO CRÍTICA]: Só sincroniza se o mouse estiver ativo nesta janela
             # State 0 = Idle (parado). Se for != 0, usuário está interagindo.
@@ -1216,6 +1467,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def on_comp_modified(obj, event):
             if self._camera_syncing: return
+            if not self.sync_enabled: return # Double check
             
             # Mesmo teste para o lado direito
             is_active = iren_comp.get_interactor_style().GetState() != 0
@@ -1241,7 +1493,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_compare_3d_mode(self):
         """Atualiza o modo (Fácies, Clusters, Thickness) nos dois lados."""
-        mode = self.state.get("mode", "facies")
+        # [MODIFICADO]: Agora pega o modo do estado da BASE da comparação, não do global
+        # Se não tiver setado, usa 'facies'
+        mode = self.compare_states.get("base", {}).get("mode", "facies")
         
         for key in ["base", "compare"]:
             st = self.compare_states.get(key)
@@ -1265,7 +1519,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         rf = self.models["compare"]["reservoir_facies"]
                     st["update_reservoir_fields"](rf)
-
+ 
             if "refresh" in st:
                 st["refresh"]()
 
@@ -1276,23 +1530,37 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         # Coleta todos os estados ativos
         states = []
-        if self.state: states.append(self.state)
+        # [MODIFICADO]: Removemos self.state da lista de sync automático se quisermos desacoplar total
+        # Mas o usuário pediu sync entre base/compare. 
+        # Se quisermos sync entre Principal e Comparação, mantemos self.state.
+        # O pedido foi "mudo de visualização no principal ele muda na comparação... deixando pesado".
+        # Então vamos remover self.state da lista de sync da comparação.
+        
         if self.compare_states.get("base"): states.append(self.compare_states["base"])
         if self.compare_states.get("compare"): states.append(self.compare_states["compare"])
 
         # Coleta todos os plotters
-        plotters = [self.plotter, self.comp_plotter_base, self.comp_plotter_comp]
+        plotters = [self.comp_plotter_base, self.comp_plotter_comp]
 
         self._updating_cut = False
 
+        # Timer para Throttling
+        self._box_timer = QtCore.QTimer()
+        self._box_timer.setSingleShot(True)
+        self._box_timer.setInterval(100) # 100ms delay
+        self._pending_bounds = None
+
         def on_k_changed(new_k):
+            if not self.sync_enabled: return
             # Sincronia de Camadas (Z)
             for st in states:
                 st["k_min"] = int(new_k)
                 if "refresh" in st: st["refresh"]()
 
-        def on_box_changed(bounds):
-            # Sincronia de Corte (Box)
+        def apply_box_change():
+            if self._pending_bounds is None: return
+            
+            bounds = self._pending_bounds
             if self._updating_cut: return
             self._updating_cut = True
             
@@ -1300,21 +1568,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 # 1. Aplica o limite de corte (bounds) em TODOS os estados
                 for st in states:
                     st["box_bounds"] = bounds
-                    
-                    # Chama o refresh() que recorta o grid internamente
-                    if "refresh" in st: 
-                        st["refresh"]()
-                        
-                    # NOTA: Removemos o 'PlaceWidget' daqui propositalmente.
-                    # Isso faz com que o corte aconteça em todos, mas as 
-                    # 'bolinhas' só se movam na janela ativa, destravando o mouse.
+                    if "refresh" in st: st["refresh"]()
 
-                # 2. Renderiza todas as telas para mostrar o corte novo
+                # 2. Renderiza todas as telas
                 for p in plotters: 
                     p.render()
-
             finally:
                 self._updating_cut = False
+                self._pending_bounds = None
+
+        self._box_timer.timeout.connect(apply_box_change)
+
+        def on_box_changed(bounds):
+            if not self.sync_enabled: return
+            # Sincronia de Corte (Box) - Throttled
+            self._pending_bounds = bounds
+            if not self._box_timer.isActive():
+                self._box_timer.start()
 
         # Instala os callbacks
         for st in states:
