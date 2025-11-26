@@ -35,7 +35,7 @@ def make_facies_lut():
     max_fac = max(all_facies_keys) if all_facies_keys else 255
     lut = pv.LookupTable(n_values=max_fac + 1)
     for v in range(max_fac + 1):
-        lut.SetTableValue(v, 0.8, 0.8, 0.8, 1.0) # Default cinza
+        lut.SetTableValue(v, 0.8, 0.8, 0.8, 1.0) 
     for fac, rgba in FACIES_COLORS.items():
         if fac <= max_fac:
             lut.SetTableValue(fac, *rgba)
@@ -57,12 +57,32 @@ def make_clusters_lut(clusters_arr):
         lut.SetTableValue(idx, color.GetRed()/255.0, color.GetGreen()/255.0, color.GetBlue()/255.0, 1.0)
     return lut, (0, n + 1)
 
-def prepare_grid_k_index(target_grid, nz_dim):
+def prepare_grid_indices(target_grid):
+    """
+    Adiciona índices I, J, K (estruturais) como escalares no grid
+    para permitir filtros de threshold (cortes) rápidos.
+    """
+    # K index (Bottom -> Top)
     if "k_index" not in target_grid.cell_data:
-        k3d = np.zeros((nx, ny, nz_dim), dtype=int)
-        for k in range(nz_dim):
-            k3d[:, :, k] = nz_dim - 1 - k
+        k3d = np.zeros((nx, ny, nz), dtype=int)
+        for k in range(nz):
+            k3d[:, :, k] = nz - 1 - k # K=0 é base, K=nz-1 é topo
         target_grid.cell_data["k_index"] = k3d.reshape(-1, order="F")
+
+    # I index (X axis)
+    if "i_index" not in target_grid.cell_data:
+        i3d = np.zeros((nx, ny, nz), dtype=int)
+        for i in range(nx):
+            i3d[i, :, :] = i
+        target_grid.cell_data["i_index"] = i3d.reshape(-1, order="F")
+
+    # J index (Y axis)
+    if "j_index" not in target_grid.cell_data:
+        j3d = np.zeros((nx, ny, nz), dtype=int)
+        for j in range(ny):
+            j3d[:, j, :] = j
+        target_grid.cell_data["j_index"] = j3d.reshape(-1, order="F")
+
     return target_grid
 
 # =============================================================================
@@ -154,7 +174,8 @@ def run(
     use_grid = target_grid if target_grid is not None else global_grid
     use_facies = target_facies if target_facies is not None else global_facies
 
-    prepare_grid_k_index(use_grid, nz)
+    # Prepara índices I, J, K para cortes
+    prepare_grid_indices(use_grid)
 
     if external_plotter is not None:
         plotter = external_plotter
@@ -169,17 +190,27 @@ def run(
     state["current_facies"] = use_facies
     state.setdefault("last_mode", None) 
 
+    # Grid Base para visualização (Geometry Only)
     grid_base = use_grid.copy()
     grid_base.cell_data["Facies"] = use_facies
 
+    # Aplica exagero Z
     x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
     grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
     grid_base.points[:, 2] *= z_exag
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
+    
+    # --- NOVOS ESTADOS DE CORTE (Min e Max para cada eixo) ---
     state.setdefault("k_min", 0)
-    state.setdefault("box_bounds", grid_base.bounds)
+    state.setdefault("k_max", nz - 1)
+    
+    state.setdefault("i_min", 0)
+    state.setdefault("i_max", nx - 1)
+    
+    state.setdefault("j_min", 0)
+    state.setdefault("j_max", ny - 1)
     
     state["thickness_presets"] = {
         "Espessura": ("vert_Ttot_reservoir", "Espessura total reservatório (m)"),
@@ -207,7 +238,6 @@ def run(
         is_res = np.isin(current_f, rf_list).astype(np.int8)
         
         arr_xyz = is_res.reshape((nx, ny, nz), order="F")
-        from scipy.ndimage import label as nd_label, generate_binary_structure
         structure = generate_binary_structure(3, 1)
         is_res_3d = arr_xyz.transpose(2, 1, 0) 
         labeled_3d, _ = nd_label(is_res_3d, structure=structure)
@@ -222,15 +252,12 @@ def run(
         use_grid.cell_data["Clusters"] = clusters_1d
         use_grid.cell_data["LargestCluster"] = largest_mask_1d
         
-        _calc_vertical_metrics(use_grid, current_f, rf_list)
+        _calc_vertical_metrics(use_grid, current_f, rf_list) 
 
-        sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies"]
+        sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies", "i_index", "j_index", "k_index"]
         for key in use_grid.cell_data.keys():
-            if key.startswith("vert_"): sync_names.append(key)
-        
-        for name in sync_names:
-            if name in use_grid.cell_data:
-                grid_base.cell_data[name] = use_grid.cell_data[name].copy()
+            if key.startswith("vert_") or key in sync_names:
+                grid_base.cell_data[key] = use_grid.cell_data[key].copy()
 
         state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(clusters_1d)
         state["clusters_sizes"] = compute_cluster_sizes(clusters_1d)
@@ -254,56 +281,65 @@ def run(
     
     if "Reservoir" not in grid_base.cell_data:
         update_reservoir_fields([])
-    else:
-        if not any(k.startswith("vert_") for k in grid_base.cell_data.keys()):
-             update_reservoir_fields([])
 
-    # --- Filtros ---
-    def apply_k_filter(mesh):
-        kmin = state.get("k_min", 0)
-        if kmin <= 0: return mesh
-        if "k_index" in mesh.cell_data:
-            k_arr = mesh.cell_data["k_index"]
-        elif "vtkOriginalCellIds" in mesh.cell_data and "k_index" in grid_base.cell_data:
-            orig_ids = mesh.cell_data["vtkOriginalCellIds"]
-            k_arr = grid_base.cell_data["k_index"][orig_ids]
-        else: return mesh
-        idx = np.where(k_arr >= kmin)[0]
-        return mesh.extract_cells(idx) if idx.size > 0 else mesh.extract_cells([])
+    # --- FILTRO UNIFICADO (I, J, K - Min/Max) ---
+    def apply_slices_filter(mesh):
+        """Aplica cortes ortogonais bidirecionais (Range) com proteção."""
+        kmin, kmax = state.get("k_min", 0), state.get("k_max", nz-1)
+        imin, imax = state.get("i_min", 0), state.get("i_max", nx-1)
+        jmin, jmax = state.get("j_min", 0), state.get("j_max", ny-1)
+        
+        # --- SEGURANÇA CONTRA CRASH (Impede min > max) ---
+        if kmin > kmax: kmin = kmax
+        if imin > imax: imin = imax
+        if jmin > jmax: jmin = jmax
 
-    # --- UPDATER GENÉRICO ---
+        # Otimização: se estiver tudo completo, retorna o original sem filtrar
+        if (kmin == 0 and kmax == nz-1 and 
+            imin == 0 and imax == nx-1 and 
+            jmin == 0 and jmax == ny-1):
+            return mesh
+            
+        out = mesh
+        
+        # Filtro K (Range)
+        if kmin > 0 or kmax < nz-1:
+            out = out.threshold([kmin, kmax], scalars="k_index")
+            
+        # Filtro I (Range)
+        if imin > 0 or imax < nx-1:
+            out = out.threshold([imin, imax], scalars="i_index")
+            
+        # Filtro J (Range)
+        if jmin > 0 or jmax < ny-1:
+            out = out.threshold([jmin, jmax], scalars="j_index")
+            
+        return out
+
     def _update_mapper_generic(actor, mesh, scalar_name=None, cmap=None, clim=None, lut=None, show_scalar=True):
-        """Atualiza apenas o input, mantendo propriedades se não mudarem."""
         mapper = actor.mapper
         mapper.SetInputData(mesh)
-        
-        # Se pedir atualização de cor, aplica
         if scalar_name:
             mapper.SetScalarModeToUseCellFieldData()
             mapper.SelectColorArray(scalar_name)
             mapper.SetScalarVisibility(show_scalar)
-        
         if lut: mapper.lookup_table = lut
         if clim: mapper.scalar_range = clim
-        
         mapper.Update()
 
-    # --- CLEANER DE BARRAS ---
     def _clean_all_bars(plotter):
         if hasattr(plotter, "scalar_bars"):
             for title in list(plotter.scalar_bars.keys()):
                 plotter.remove_scalar_bar(title=title)
 
-    # --- Render Principal ---
     def show_mesh(mesh):
         mode = state["mode"]
         last_mode = state.get("last_mode")
         
+        # Anexa dados originais e APLICA CORTES
         mesh = attach_cell_data_from_original(mesh, grid_base)
-        mesh = apply_k_filter(mesh)
+        mesh = apply_slices_filter(mesh)
         
-        # [DECISÃO NUCLEAR]: Se mudou de modo, DESTRÓI os atores para garantir cor limpa.
-        # Se for o mesmo modo (apenas corte/scroll), atualiza o mapper.
         needs_full_reset = (mode != last_mode) or (state["main_actor"] is None)
 
         if needs_full_reset:
@@ -315,15 +351,9 @@ def run(
                 try: plotter.remove_actor(state["main_actor"])
                 except: pass
                 state["main_actor"] = None
-            
-            # Reativa box widget se tiver sumido
-            if state.get("box_widget"): state["box_widget"].On()
             state["last_mode"] = mode
 
         _clean_all_bars(plotter)
-        show_sb = state.get("show_scalar_bar", False)
-
-        # --- LÓGICA POR MODO ---
 
         if mode == "facies":
             lut, rng = make_facies_lut()
@@ -334,7 +364,7 @@ def run(
                 act.mapper.lookup_table = lut
                 act.mapper.scalar_range = rng
                 state["main_actor"] = act
-
+        
         elif mode == "reservoir":
             try:
                 bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
@@ -343,18 +373,12 @@ def run(
                 bg = mesh
                 main = mesh.extract_cells([])
 
-            # BG
             if bg.n_cells > 0:
                 if not needs_full_reset and state["bg_actor"]:
                     _update_mapper_generic(state["bg_actor"], bg)
                 else:
                     state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
-            else:
-                if state["bg_actor"]: 
-                    plotter.remove_actor(state["bg_actor"])
-                    state["bg_actor"] = None
-
-            # Main
+            
             if main.n_cells > 0:
                 lut, rng = make_facies_lut()
                 if not needs_full_reset and state["main_actor"]:
@@ -364,37 +388,28 @@ def run(
                     act.mapper.lookup_table = lut
                     act.mapper.scalar_range = rng
                     state["main_actor"] = act
-            else:
-                if state["main_actor"]: state["main_actor"].SetVisibility(False)
 
         elif mode == "clusters":
             try:
                 bg = mesh.threshold(0.5, invert=True, scalars="Clusters")
                 main = mesh.threshold(0.5, scalars="Clusters")
             except:
-                bg = mesh
-                main = mesh.extract_cells([])
+                bg, main = mesh, mesh.extract_cells([])
             
             if bg.n_cells > 0:
-                if not needs_full_reset and state["bg_actor"]:
-                    _update_mapper_generic(state["bg_actor"], bg)
-                else:
-                    state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
+                if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
+                else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
             
             if main.n_cells > 0:
                 lut = state.get("clusters_lut")
                 rng = state.get("clusters_rng")
                 if not lut: lut, rng = make_clusters_lut(grid_base.cell_data["Clusters"])
-
-                if not needs_full_reset and state["main_actor"]:
-                    _update_mapper_generic(state["main_actor"], main)
+                if not needs_full_reset and state["main_actor"]: _update_mapper_generic(state["main_actor"], main)
                 else:
                     act = plotter.add_mesh(main, scalars="Clusters", show_edges=True, show_scalar_bar=False)
                     act.mapper.lookup_table = lut
                     act.mapper.scalar_range = rng
                     state["main_actor"] = act
-            else:
-                if state["main_actor"]: state["main_actor"].SetVisibility(False)
 
         elif mode == "thickness_local":
             _update_thickness_from_state()
@@ -403,115 +418,109 @@ def run(
                 try:
                     bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
                     main = mesh.threshold(1e-6, scalars=s_name)
-                    
                     if bg.n_cells > 0:
-                         if not needs_full_reset and state["bg_actor"]:
-                             _update_mapper_generic(state["bg_actor"], bg)
-                         else:
-                             state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.01, show_edges=False)
-                    
+                         if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
+                         else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.01, show_edges=False)
                     if main.n_cells > 0:
                         clim = state.get("thickness_clim")
                         if not needs_full_reset and state["main_actor"]:
                             _update_mapper_generic(state["main_actor"], main, scalar_name=s_name, cmap="plasma", clim=clim, show_scalar=True)
                         else:
-                            # Cria ator novo
                             act = plotter.add_mesh(main, scalars=s_name, cmap="plasma", clim=clim, show_edges=True, show_scalar_bar=False)
                             state["main_actor"] = act
-                        
-                        # Adiciona legenda
                         plotter.add_scalar_bar(title=THICKNESS_SCALAR_TITLE)
-
-                    else:
-                        if state["main_actor"]: state["main_actor"].SetVisibility(False)
                 except: pass
 
-        elif mode == "ntg_local":
-            if "NTG_local" in mesh.cell_data:
-                if state["bg_actor"]: 
-                    try: plotter.remove_actor(state["bg_actor"])
-                    except: pass
-                    state["bg_actor"] = None
-
-                if not needs_full_reset and state["main_actor"]:
-                     _update_mapper_generic(state["main_actor"], mesh, scalar_name="NTG_local", cmap="plasma", clim=[0,1], show_scalar=True)
-                else:
-                    act = plotter.add_mesh(mesh, scalars="NTG_local", cmap="plasma", clim=[0,1], show_edges=True, show_scalar_bar=False)
-                    state["main_actor"] = act
-                
-                plotter.add_scalar_bar(title="NTG Local")
-        
         elif mode == "largest":
              try:
                  bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")
                  main = mesh.threshold(0.5, scalars="LargestCluster")
-             except:
-                 bg = mesh
-                 main = mesh.extract_cells([])
-             
+             except: bg, main = mesh, mesh.extract_cells([])
              if bg.n_cells > 0:
-                 if not needs_full_reset and state["bg_actor"]:
-                     _update_mapper_generic(state["bg_actor"], bg)
-                 else:
-                     state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
-             
+                 if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
+                 else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
              if main.n_cells > 0:
-                 if not needs_full_reset and state["main_actor"]:
-                     _update_mapper_generic(state["main_actor"], main)
-                 else:
-                     state["main_actor"] = plotter.add_mesh(main, color="lightcoral", opacity=1.0, show_edges=True)
-             else:
-                 if state["main_actor"]: state["main_actor"].SetVisibility(False)
-
-    # --- Callbacks ---
-    def change_k(delta):
-        kmin = state.get("k_min", 0)
-        new = int(np.clip(kmin + delta, 0, nz - 1))
-        state["k_min"] = new
-        _refresh()
-        if state.get("on_k_changed"): state["on_k_changed"](new)
+                 if not needs_full_reset and state["main_actor"]: _update_mapper_generic(state["main_actor"], main)
+                 else: state["main_actor"] = plotter.add_mesh(main, color="lightcoral", opacity=1.0, show_edges=True)
 
     def _refresh():
-        box = state.get("box_bounds", grid_base.bounds)
-        base = grid_base.clip_box(box, invert=False, crinkle=True)
-        show_mesh(base)
+        show_mesh(grid_base)
 
-    def box_callback(box):
-        state["box_bounds"] = box
+    # --- FUNC PARA SETAR SLICE DO EXTERNO (UI) ---
+    def set_slice(axis, mode, value):
+        key = f"{axis}_{mode}"
+        limit = 0
+        if axis == "k": limit = nz-1
+        elif axis == "i": limit = nx-1
+        elif axis == "j": limit = ny-1
+        
+        val = int(np.clip(value, 0, limit))
+        state[key] = val
         _refresh()
-        if state.get("on_box_changed"): state["on_box_changed"](box)
+        
+        # Notifica UI se necessário (opcional, evita loop infinito se controlado)
+        if state.get("on_slice_changed"):
+            state["on_slice_changed"](axis, mode, val)
+
+    state["set_slice"] = set_slice
+
+    # --- CONTROLE DE TECLADO ---
+    def key_change_slice(axis, mode, delta):
+        key = f"{axis}_{mode}"
+        curr = state.get(key, 0)
+        
+        limit = 0
+        if axis == "k": limit = nz-1
+        elif axis == "i": limit = nx-1
+        elif axis == "j": limit = ny-1
+        
+        new_val = int(np.clip(curr + delta, 0, limit))
+        
+        # Validação cruzada: min não pode passar max
+        if mode == "min":
+            max_val = state.get(f"{axis}_max", limit)
+            if new_val > max_val: new_val = max_val
+        else:
+            min_val = state.get(f"{axis}_min", 0)
+            if new_val < min_val: new_val = min_val
+            
+        state[key] = new_val
+        _refresh()
+        
+        # Notifica a UI para atualizar os sliders
+        if state.get("on_slice_changed"):
+            state["on_slice_changed"](axis, mode, new_val)
 
     # --- Setup Final ---
-    
-    # Limpeza inicial
     plotter.clear_actors()
     _clean_all_bars(plotter)
     state["bg_actor"] = None
     state["main_actor"] = None
     state["last_mode"] = None
 
-    plotter.add_key_event("z", lambda: change_k(-1))
-    plotter.add_key_event("x", lambda: change_k(+1))
+    # --- BINDINGS SEGUROS (Evitando Q e W padrões) ---
     
-    bw = plotter.add_box_widget(
-        callback=box_callback, 
-        bounds=grid_base.bounds, 
-        rotation_enabled=False, 
-        interaction_event="always"
-    )
-    prop = bw.GetHandleProperty()
-    prop.SetOpacity(1.0)
-    prop.SetColor(0.9, 0.9, 0.9)
-    prop.SetAmbient(0.2)
-    prop.SetDiffuse(0.8)
-    prop.SetSpecular(0.5)
+    # Z (Camadas - K) -> Mantido
+    plotter.add_key_event("t", lambda: key_change_slice("k", "min", -1))
+    plotter.add_key_event("y", lambda: key_change_slice("k", "min", +1))
+    plotter.add_key_event("g", lambda: key_change_slice("k", "max", -1))
+    plotter.add_key_event("h", lambda: key_change_slice("k", "max", +1))
     
-    bw.GetSelectedHandleProperty().SetOpacity(1.0)
-    bw.GetSelectedHandleProperty().SetColor(1.0, 0.6, 0.6)
-    bw.GetOutlineProperty().SetOpacity(0.2)
-    state["box_widget"] = bw
+    # X (Frente/Trás - I) -> Usando Números 1-4
+    plotter.add_key_event("1", lambda: key_change_slice("i", "min", -1))
+    plotter.add_key_event("2", lambda: key_change_slice("i", "min", +1))
+    plotter.add_key_event("3", lambda: key_change_slice("i", "max", -1))
+    plotter.add_key_event("4", lambda: key_change_slice("i", "max", +1))
 
-    plotter.set_background("white", top="lightgray")
+    # Y (Esq/Dir - J) -> Usando Números 5-8
+    plotter.add_key_event("5", lambda: key_change_slice("j", "min", -1))
+    plotter.add_key_event("6", lambda: key_change_slice("j", "min", +1))
+    plotter.add_key_event("7", lambda: key_change_slice("j", "max", -1))
+    plotter.add_key_event("8", lambda: key_change_slice("j", "max", +1))
+
+    if "box_widget" in state: del state["box_widget"]
+
+    # plotter.set_background("white", top="lightgray")
     plotter.enable_lightkit()
     plotter.add_axes()
     
@@ -521,24 +530,9 @@ def run(
     state["refresh"] = _refresh
     return plotter, state
 
-
-# =============================================================================
-# FUNÇÕES AUXILIARES
-# =============================================================================
-
 def show_thickness_2d(surf, scalar_name, title=None):
     p = pv.Plotter(window_size=(1000, 800))
-    p.add_mesh(
-        surf,
-        scalars=scalar_name,
-        cmap="plasma",
-        show_edges=True,
-        edge_color="black",
-        line_width=0.5,
-        show_scalar_bar=False,
-        nan_color="white",
-        preference="cell",
-    )
+    p.add_mesh(surf, scalars=scalar_name, cmap="plasma", show_edges=True, edge_color="black", line_width=0.5, show_scalar_bar=False, nan_color="white", preference="cell")
     p.view_xy()
     p.enable_parallel_projection()
     p.enable_image_style()
@@ -552,7 +546,6 @@ def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
     arr = surf.cell_data[scalar_name_2d]
     arr = np.where(arr < 0, np.nan, arr)
     surf.cell_data[scalar_name_2d] = arr
-    
     plotter.clear()
     plotter.add_mesh(surf, scalars=scalar_name_2d, cmap="plasma", show_edges=True, edge_color="black", line_width=0.5, nan_color="white", show_scalar_bar=False)
     plotter.view_xy()
