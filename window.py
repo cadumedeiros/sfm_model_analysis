@@ -4,7 +4,7 @@ from pyvistaqt import BackgroundPlotter
 import numpy as np
 import os
 
-from visualize import run, update_2d_plot
+from visualize import run, update_2d_plot, get_2d_clim
 from load_data import facies, nx, ny, nz, load_facies_from_grdecl
 from config import load_facies_colors
 from analysis import (
@@ -1016,26 +1016,49 @@ class MainWindow(QtWidgets.QMainWindow):
         from load_data import nx, ny, nz
         import pyvista as pv
         import numpy as np
+
         if scalar_name_3d not in grid_source.cell_data:
             plotter.clear()
             return
+
+        # 3D -> projeção 2D (máximo na coluna)
         arr3d = grid_source.cell_data[scalar_name_3d].reshape((nx, ny, nz), order="F")
         thickness_2d = np.full((nx, ny), np.nan, dtype=float)
         for ix in range(nx):
             for iy in range(ny):
                 col_vals = arr3d[ix, iy, :]
                 col_vals = col_vals[col_vals > 0]
-                if col_vals.size > 0: thickness_2d[ix, iy] = col_vals.max()
+                if col_vals.size > 0:
+                    thickness_2d[ix, iy] = col_vals.max()
+
         x_min, x_max, y_min, y_max, _, z_max = grid_source.bounds
         xs = np.linspace(x_min, x_max, nx)
         ys = np.linspace(y_min, y_max, ny)
         xs, ys = np.meshgrid(xs, ys, indexing="ij")
         zs = np.full_like(xs, z_max)
+
         surf = pv.StructuredGrid(xs, ys, zs)
         scalar_2d_name = scalar_name_3d + "_2d"
         surf.cell_data[scalar_2d_name] = thickness_2d[:nx-1, :ny-1].ravel(order="F")
+
+        # limpa negativos e aplica faixa de cores fixa
+        arr = surf.cell_data[scalar_2d_name]
+        arr = np.where(arr < 0, np.nan, arr)
+        surf.cell_data[scalar_2d_name] = arr
+        clim = get_2d_clim(scalar_name_3d, arr)
+
         plotter.clear()
-        plotter.add_mesh(surf, scalars=scalar_2d_name, cmap="plasma", show_edges=True, edge_color="black", line_width=0.5, nan_color="white", show_scalar_bar=False)
+        plotter.add_mesh(
+            surf,
+            scalars=scalar_2d_name,
+            cmap="plasma",
+            show_edges=True,
+            edge_color="black",
+            line_width=0.5,
+            nan_color="white",
+            show_scalar_bar=False,
+            clim=clim,
+        )
         plotter.view_xy()
         plotter.enable_parallel_projection()
         plotter.set_background("white")

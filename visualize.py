@@ -15,9 +15,48 @@ FACIES_COLORS = load_facies_colors()
 # Variáveis Globais de Controle
 THICKNESS_SCALAR_NAME = "thickness_local"
 THICKNESS_SCALAR_TITLE = "Thickness local"
+# Faixas padrão para mapas 2D 
+THICKNESS_2D_CLIM = {
+    # métricas normalizadas (0–1)
+    "vert_NTG_col_reservoir": (0.0, 1.0),
+    "vert_NTG_env_reservoir": (0.0, 1.0),
+    "vert_ICV_reservoir": (0.0, 1.0),
+    "vert_Qv_reservoir": (0.0, 1.0),
+    "vert_Qv_abs_reservoir": (0.0, 1.0),
+
+    # espessuras em metros
+    "vert_Ttot_reservoir": (0.0, 200.0),
+    "vert_Tpack_max_reservoir": (0.0, 200.0),
+}
+
 MODE = "facies"
 Z_EXAG = 15.0
 SHOW_SCALAR_BAR = False
+
+def get_2d_clim(base_scalar_name, arr=None):
+    """
+    Retorna (vmin, vmax) para mapas 2D.
+    Se houver preset para o campo, usa o preset.
+    Caso contrário, usa os próprios dados como fallback.
+    """
+    preset = THICKNESS_2D_CLIM.get(base_scalar_name)
+    if preset is not None:
+        return preset
+
+    if arr is None:
+        return None
+
+    arr = np.asarray(arr)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None
+
+    vmin = float(finite.min())
+    vmax = float(finite.max())
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return (vmin, vmax)
+
 
 def set_thickness_scalar(name, title=None):
     global THICKNESS_SCALAR_NAME, THICKNESS_SCALAR_TITLE
@@ -531,8 +570,29 @@ def run(
     return plotter, state
 
 def show_thickness_2d(surf, scalar_name, title=None):
+    # 1) limpa valores negativos (viram NaN)
+    arr = surf.cell_data[scalar_name]
+    arr = np.where(arr < 0, np.nan, arr)
+    surf.cell_data[scalar_name] = arr
+
+    # 2) descobre o nome base (sem _2d) para buscar a faixa padrão
+    base_name = scalar_name[:-4] if scalar_name.endswith("_2d") else scalar_name
+    clim = get_2d_clim(base_name, arr)
+
+    # 3) plota usando clim fixo (se houver)
     p = pv.Plotter(window_size=(1000, 800))
-    p.add_mesh(surf, scalars=scalar_name, cmap="plasma", show_edges=True, edge_color="black", line_width=0.5, show_scalar_bar=False, nan_color="white", preference="cell")
+    p.add_mesh(
+        surf,
+        scalars=scalar_name,
+        cmap="plasma",
+        show_edges=True,
+        edge_color="black",
+        line_width=0.5,
+        show_scalar_bar=False,
+        nan_color="white",
+        preference="cell",
+        clim=clim,  # << chave para padronizar cores
+    )
     p.view_xy()
     p.enable_parallel_projection()
     p.enable_image_style()
@@ -540,14 +600,32 @@ def show_thickness_2d(surf, scalar_name, title=None):
     p.add_scalar_bar(title=title if title else scalar_name)
     p.show()
 
+
 def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
     surf = make_thickness_2d_from_grid(array_name_3d, array_name_3d + "_2d")
     scalar_name_2d = array_name_3d + "_2d"
+
+    # limpa negativos
     arr = surf.cell_data[scalar_name_2d]
     arr = np.where(arr < 0, np.nan, arr)
     surf.cell_data[scalar_name_2d] = arr
+
+    # usa a mesma lógica de faixa fixa
+    clim = get_2d_clim(array_name_3d, arr)
+
     plotter.clear()
-    plotter.add_mesh(surf, scalars=scalar_name_2d, cmap="plasma", show_edges=True, edge_color="black", line_width=0.5, nan_color="white", show_scalar_bar=False)
+    plotter.add_mesh(
+        surf,
+        scalars=scalar_name_2d,
+        cmap="plasma",
+        show_edges=True,
+        edge_color="black",
+        line_width=0.5,
+        nan_color="white",
+        show_scalar_bar=False,
+        preference="cell",
+        clim=clim,
+    )
     plotter.view_xy()
     plotter.enable_parallel_projection()
     plotter.set_background("white")
