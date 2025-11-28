@@ -1848,3 +1848,22 @@ class MainWindow(QtWidgets.QMainWindow):
             })
             
         return pd.DataFrame(data_list)
+
+# --- LÓGICA DE FECHAMENTO (LIMPEZA) ---
+    def closeEvent(self, event):
+        """Garante que os processos do VTK sejam encerrados antes de matar a janela."""
+        
+        # Fecha os plotters principais para parar o loop de renderização
+        if hasattr(self, 'plotter'): 
+            self.plotter.close()
+        if hasattr(self, 'plotter_2d'): 
+            self.plotter_2d.close()
+        
+        # Fecha os plotters da aba de comparação (se existirem)
+        if hasattr(self, 'comp_plotter_base'): self.comp_plotter_base.close()
+        if hasattr(self, 'comp_plotter_comp'): self.comp_plotter_comp.close()
+        if hasattr(self, 'comp_plotter_base_2d'): self.comp_plotter_base_2d.close()
+        if hasattr(self, 'comp_plotter_comp_2d'): self.comp_plotter_comp_2d.close()
+        
+        # Aceita o evento de fechamento
+        event.accept()
