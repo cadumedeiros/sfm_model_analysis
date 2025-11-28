@@ -481,8 +481,29 @@ def run(
              if main.n_cells > 0:
                  if not needs_full_reset and state["main_actor"]: _update_mapper_generic(state["main_actor"], main)
                  else: state["main_actor"] = plotter.add_mesh(main, color="lightcoral", opacity=1.0, show_edges=True)
+        
+        z_scale = state.get("z_exag", 1.0)
+        
+        if state["main_actor"]:
+            state["main_actor"].SetScale(1.0, 1.0, z_scale)
+            
+        if state["bg_actor"]:
+            state["bg_actor"].SetScale(1.0, 1.0, z_scale)
 
     def _refresh():
+        # --- CORREÇÃO CRÍTICA DE VÍNCULO ---
+        
+        # 1. Verifica se o window.py mandou um novo grid (uma cópia modificada)
+        new_source = state.get("current_grid_source")
+        
+        # 2. Acessa a variável 'grid_base' que pertence à função 'run' (escopo pai)
+        nonlocal grid_base
+        
+        # 3. Se houver um novo grid, trocamos o ponteiro.
+        # Agora o visualize.py vai desenhar a cópia correta (Base ou Compare)
+        if new_source is not None:
+            grid_base = new_source
+            
         show_mesh(grid_base)
 
     # --- FUNC PARA SETAR SLICE DO EXTERNO (UI) ---
