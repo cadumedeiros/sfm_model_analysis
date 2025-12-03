@@ -27,61 +27,40 @@ class GridSlicerWidget(QtWidgets.QGroupBox):
         
         layout = QtWidgets.QVBoxLayout(self)
         
-        # Eixo I
         layout.addWidget(QtWidgets.QLabel(f"Inline (I): 0 - {nx-1}"))
         self.i_widgets = self._create_axis_control("i", nx)
         layout.addLayout(self.i_widgets['layout'])
         
-        # Eixo J
         layout.addWidget(QtWidgets.QLabel(f"Crossline (J): 0 - {ny-1}"))
         self.j_widgets = self._create_axis_control("j", ny)
         layout.addLayout(self.j_widgets['layout'])
         
-        # Eixo K
         layout.addWidget(QtWidgets.QLabel(f"Layer (K): 0 - {nz-1}"))
         self.k_widgets = self._create_axis_control("k", nz)
         layout.addLayout(self.k_widgets['layout'])
         
         layout.addSpacing(10)
         
-        # --- NOVO: EXAGERO VERTICAL (Z) ---
+        # Exagero Z
         layout.addWidget(QtWidgets.QLabel("Exagero Vertical (Z):"))
         h_z = QtWidgets.QHBoxLayout()
+        self.spin_z = QtWidgets.QDoubleSpinBox(); self.spin_z.setRange(1.0, 100.0); self.spin_z.setSingleStep(1.0); self.spin_z.setValue(initial_z); self.spin_z.setFixedWidth(60)
+        self.slider_z = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.slider_z.setRange(1, 100); self.slider_z.setValue(int(initial_z))
         
-        self.spin_z = QtWidgets.QDoubleSpinBox()
-        self.spin_z.setRange(1.0, 100.0)
-        self.spin_z.setSingleStep(1.0)
-        self.spin_z.setValue(initial_z)
-        self.spin_z.setFixedWidth(60)
-        
-        self.slider_z = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.slider_z.setRange(1, 100)
-        self.slider_z.setValue(int(initial_z))
-        
-        # Conexões Z
         self.spin_z.valueChanged.connect(self._on_z_spin_change)
         self.slider_z.valueChanged.connect(self._on_z_slider_change)
-        
-        h_z.addWidget(self.spin_z)
-        h_z.addWidget(self.slider_z)
+        h_z.addWidget(self.spin_z); h_z.addWidget(self.slider_z)
         layout.addLayout(h_z)
 
     def _on_z_spin_change(self, val):
         if self.is_updating: return
-        self.is_updating = True
-        self.slider_z.setValue(int(val))
-        self.callback("z", "scale", val)
-        self.is_updating = False
+        self.is_updating = True; self.slider_z.setValue(int(val)); self.callback("z", "scale", val); self.is_updating = False
 
     def _on_z_slider_change(self, val):
         if self.is_updating: return
-        self.is_updating = True
-        self.spin_z.setValue(float(val))
-        self.callback("z", "scale", float(val))
-        self.is_updating = False
+        self.is_updating = True; self.spin_z.setValue(float(val)); self.callback("z", "scale", float(val)); self.is_updating = False
 
     def _create_axis_control(self, axis, limit):
-        # (Este método continua idêntico ao anterior)
         h_layout = QtWidgets.QHBoxLayout()
         spin_min = QtWidgets.QSpinBox(); spin_min.setRange(0, limit-1); spin_min.setValue(0); spin_min.setFixedWidth(50)
         slider_min = QtWidgets.QSlider(QtCore.Qt.Horizontal); slider_min.setRange(0, limit-1); slider_min.setValue(0)
@@ -93,7 +72,7 @@ class GridSlicerWidget(QtWidgets.QGroupBox):
             self.is_updating = True
             if val > spin_max.value(): val = spin_max.value()
             spin_min.setValue(val); slider_min.setValue(val)
-            self.callback(axis, "min", val)
+            self.callback(axis, "min", val) # Chamada DIRETA (Sem Timer)
             self.is_updating = False
 
         def update_max(val):
@@ -101,7 +80,7 @@ class GridSlicerWidget(QtWidgets.QGroupBox):
             self.is_updating = True
             if val < spin_min.value(): val = spin_min.value()
             spin_max.setValue(val); slider_max.setValue(val)
-            self.callback(axis, "max", val)
+            self.callback(axis, "max", val) # Chamada DIRETA
             self.is_updating = False
 
         spin_min.valueChanged.connect(update_min); slider_min.valueChanged.connect(update_min)
@@ -113,160 +92,13 @@ class GridSlicerWidget(QtWidgets.QGroupBox):
     def external_update(self, axis, mode, value):
         if self.is_updating: return
         self.is_updating = True
-        
         if axis == "z" and mode == "scale":
-            self.spin_z.setValue(float(value))
-            self.slider_z.setValue(int(value))
+            self.spin_z.setValue(float(value)); self.slider_z.setValue(int(value))
         else:
             widgets = getattr(self, f"{axis}_widgets")
             val = int(value)
             if mode == "min": widgets['spin_min'].setValue(val); widgets['slider_min'].setValue(val)
             else: widgets['spin_max'].setValue(val); widgets['slider_max'].setValue(val)
-            
-        self.is_updating = False
-
-    def _create_axis_control(self, axis, limit):
-        h_layout = QtWidgets.QHBoxLayout()
-        
-        spin_min = QtWidgets.QSpinBox()
-        spin_min.setRange(0, limit-1)
-        spin_min.setValue(0)
-        spin_min.setFixedWidth(50)
-        
-        slider_min = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider_min.setRange(0, limit-1)
-        slider_min.setValue(0)
-        
-        spin_max = QtWidgets.QSpinBox()
-        spin_max.setRange(0, limit-1)
-        spin_max.setValue(limit-1)
-        spin_max.setFixedWidth(50)
-        
-        slider_max = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider_max.setRange(0, limit-1)
-        slider_max.setValue(limit-1)
-        slider_max.setInvertedAppearance(True)
-
-        def update_min(val):
-            if self.is_updating: return
-            self.is_updating = True
-            current_max = spin_max.value()
-            if val > current_max: val = current_max
-            spin_min.setValue(val)
-            slider_min.setValue(val)
-            self.callback(axis, "min", val)
-            self.is_updating = False
-
-        def update_max(val):
-            if self.is_updating: return
-            self.is_updating = True
-            current_min = spin_min.value()
-            if val < current_min: val = current_min
-            spin_max.setValue(val)
-            slider_max.setValue(val)
-            self.callback(axis, "max", val)
-            self.is_updating = False
-
-        spin_min.valueChanged.connect(update_min)
-        slider_min.valueChanged.connect(update_min)
-        spin_max.valueChanged.connect(update_max)
-        slider_max.valueChanged.connect(update_max)
-        
-        h_layout.addWidget(spin_min)
-        h_layout.addWidget(slider_min)
-        h_layout.addSpacing(5)
-        h_layout.addWidget(slider_max)
-        h_layout.addWidget(spin_max)
-        
-        return {
-            'layout': h_layout,
-            'spin_min': spin_min, 'slider_min': slider_min,
-            'spin_max': spin_max, 'slider_max': slider_max
-        }
-
-    def external_update(self, axis, mode, value):
-        if self.is_updating: return
-        self.is_updating = True
-        widgets = getattr(self, f"{axis}_widgets")
-        val = int(value)
-        if mode == "min":
-            widgets['spin_min'].setValue(val)
-            widgets['slider_min'].setValue(val)
-        else:
-            widgets['spin_max'].setValue(val)
-            widgets['slider_max'].setValue(val)
-        self.is_updating = False
-
-    def _create_axis_control(self, axis, limit):
-        h_layout = QtWidgets.QHBoxLayout()
-        
-        spin_min = QtWidgets.QSpinBox()
-        spin_min.setRange(0, limit-1)
-        spin_min.setValue(0)
-        spin_min.setFixedWidth(50)
-        
-        slider_min = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider_min.setRange(0, limit-1)
-        slider_min.setValue(0)
-        
-        spin_max = QtWidgets.QSpinBox()
-        spin_max.setRange(0, limit-1)
-        spin_max.setValue(limit-1)
-        spin_max.setFixedWidth(50)
-        
-        slider_max = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider_max.setRange(0, limit-1)
-        slider_max.setValue(limit-1)
-        slider_max.setInvertedAppearance(True)
-
-        def update_min(val):
-            if self.is_updating: return
-            self.is_updating = True
-            current_max = spin_max.value()
-            if val > current_max: val = current_max
-            spin_min.setValue(val)
-            slider_min.setValue(val)
-            self.callback(axis, "min", val)
-            self.is_updating = False
-
-        def update_max(val):
-            if self.is_updating: return
-            self.is_updating = True
-            current_min = spin_min.value()
-            if val < current_min: val = current_min
-            spin_max.setValue(val)
-            slider_max.setValue(val)
-            self.callback(axis, "max", val)
-            self.is_updating = False
-
-        spin_min.valueChanged.connect(update_min)
-        slider_min.valueChanged.connect(update_min)
-        spin_max.valueChanged.connect(update_max)
-        slider_max.valueChanged.connect(update_max)
-        
-        h_layout.addWidget(spin_min)
-        h_layout.addWidget(slider_min)
-        h_layout.addSpacing(5)
-        h_layout.addWidget(slider_max)
-        h_layout.addWidget(spin_max)
-        
-        return {
-            'layout': h_layout,
-            'spin_min': spin_min, 'slider_min': slider_min,
-            'spin_max': spin_max, 'slider_max': slider_max
-        }
-
-    def external_update(self, axis, mode, value):
-        if self.is_updating: return
-        self.is_updating = True
-        widgets = getattr(self, f"{axis}_widgets")
-        val = int(value)
-        if mode == "min":
-            widgets['spin_min'].setValue(val)
-            widgets['slider_min'].setValue(val)
-        else:
-            widgets['spin_max'].setValue(val)
-            widgets['slider_max'].setValue(val)
         self.is_updating = False
 
 # --- HELPER FUNCTIONS ---
@@ -306,7 +138,7 @@ def fill_facies_table(table, facies_array, reservoir_set):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
-        self.setWindowTitle("SFM View Analysis - Professional Edition")
+        self.setWindowTitle("Grid View Analysis")
         
         # --- 1. DADOS E ESTADO INICIAL ---
         if isinstance(reservoir_facies, (int, np.integer)):
@@ -363,7 +195,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
         
-        # Menu Bar
+        # 1. Menu Bar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("Arquivo")
         action_load = QtWidgets.QAction("Carregar Modelo Adicional...", self)
@@ -382,52 +214,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_persp_comp.triggered.connect(lambda: self.switch_perspective("comparison"))
         menubar.addAction(self.act_persp_comp)
 
-        # Toolbar
+        # 2. Toolbar
         self.setup_toolbar_controls()
 
-        # Docks
+        # 3. Docks
         self.setup_docks(nx, ny, nz)
         
-        # Central
+        # 4. Central Stack
         self.central_stack = QtWidgets.QStackedWidget()
         self.setCentralWidget(self.central_stack)
         
-        # Vis Container
+        # --- PERSPECTIVA 1: VISUALIZAÇÃO (Individual) ---
         self.viz_container = QtWidgets.QStackedWidget() 
         self.tabs = self.viz_container 
         
-        # 0: 3D
         self.plotter = BackgroundPlotter(show=False)
         self.viz_tab = QtWidgets.QWidget(); vl = QtWidgets.QVBoxLayout(self.viz_tab); vl.setContentsMargins(0,0,0,0)
         vl.addWidget(self.plotter.interactor); self.viz_container.addWidget(self.viz_tab)
         
-        # 1: 2D
         self.plotter_2d = BackgroundPlotter(show=False)
         self.map2d_tab = QtWidgets.QWidget(); ml = QtWidgets.QVBoxLayout(self.map2d_tab); ml.setContentsMargins(0,0,0,0)
         ml.addWidget(self.plotter_2d.interactor); self.viz_container.addWidget(self.map2d_tab)
         
-        # 2: Detalhes Central (CORRIGIDO NOME DA VARIÁVEL)
         self.details_tab = QtWidgets.QWidget(); l_det = QtWidgets.QVBoxLayout(self.details_tab)
-        
-        # Parte superior: Texto Global Central
-        self.central_metrics_text = QtWidgets.QTextEdit() # <--- NOME ÚNICO
-        self.central_metrics_text.setReadOnly(True)
-        self.central_metrics_text.setMaximumHeight(150)
-        l_det.addWidget(QtWidgets.QLabel("Resumo Global"))
-        l_det.addWidget(self.central_metrics_text)
-        
-        # Parte inferior: Tabela
-        self.facies_table = QtWidgets.QTableWidget()
-        l_det.addWidget(QtWidgets.QLabel("Detalhamento por Fácies"))
-        l_det.addWidget(self.facies_table)
-        
+        self.central_metrics_text = QtWidgets.QTextEdit(); self.central_metrics_text.setReadOnly(True); self.central_metrics_text.setMaximumHeight(150)
+        l_det.addWidget(QtWidgets.QLabel("Resumo Global")); l_det.addWidget(self.central_metrics_text)
+        self.facies_table = QtWidgets.QTableWidget(); l_det.addWidget(QtWidgets.QLabel("Detalhamento por Fácies")); l_det.addWidget(self.facies_table)
         self.viz_container.addWidget(self.details_tab)
+        
         self.central_stack.addWidget(self.viz_container)
         
-        # Comparação
-        self.compare_3d_container = QtWidgets.QWidget()
-        self.setup_comparison_3d_view(self.compare_3d_container)
-        self.central_stack.addWidget(self.compare_3d_container)
+        # --- PERSPECTIVA 2: COMPARAÇÃO (Multi-Grid) ---
+        # Agora é um TabWidget também!
+        self.compare_tabs_container = QtWidgets.QTabWidget()
+        self.compare_tabs_container.setTabPosition(QtWidgets.QTabWidget.South)
+        
+        # Aba 1: 3D
+        self.comp_tab_3d = QtWidgets.QWidget()
+        # Layout vazio inicial (será preenchido dinamicamente)
+        self.comp_tab_3d.setLayout(QtWidgets.QVBoxLayout())
+        self.compare_tabs_container.addTab(self.comp_tab_3d, "Visualização 3D Comparada")
+        
+        # Aba 2: 2D
+        self.comp_tab_2d = QtWidgets.QWidget()
+        # Layout vazio inicial
+        self.comp_tab_2d.setLayout(QtWidgets.QVBoxLayout())
+        self.compare_tabs_container.addTab(self.comp_tab_2d, "Mapas 2D Comparados")
+        
+        self.central_stack.addWidget(self.compare_tabs_container)
 
         self.resizeDocks([self.dock_explorer, self.dock_props], [280, 280], QtCore.Qt.Horizontal)
         self.resizeDocks([self.dock_explorer, self.dock_props], [400, 400], QtCore.Qt.Vertical)
@@ -464,55 +298,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_compare_2d_maps()
 
     def setup_comparison_3d_view(self, container):
-        """Configura a área central: 3D em cima, 2D embaixo (opcional), divididos por Splitters."""
-        # Layout principal do container
+        """Prepara o container para receber o grid dinâmico."""
+        # Apenas define um layout base. O conteúdo será injetado por update_dynamic_comparison_view
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Splitter Vertical Principal (Separa 3D do 2D)
-        self.main_split_compare = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        
-        # --- PARTE SUPERIOR (3D) ---
-        self.split_3d = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        
-        if not hasattr(self, 'comp_plotter_base'): self.comp_plotter_base = BackgroundPlotter(show=False)
-        if not hasattr(self, 'comp_plotter_comp'): self.comp_plotter_comp = BackgroundPlotter(show=False)
-        
-        self.split_3d.addWidget(self.comp_plotter_base.interactor)
-        self.split_3d.addWidget(self.comp_plotter_comp.interactor)
-        self.main_split_compare.addWidget(self.split_3d)
-        
-        # --- PARTE INFERIOR (2D) ---
-        # Container para os mapas 2D (inicialmente oculto)
-        self.maps_2d_container = QtWidgets.QWidget()
-        l_2d = QtWidgets.QHBoxLayout(self.maps_2d_container)
-        l_2d.setContentsMargins(0, 0, 0, 0)
-        
-        self.split_2d = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        
-        if not hasattr(self, 'comp_plotter_base_2d'): self.comp_plotter_base_2d = BackgroundPlotter(show=False)
-        if not hasattr(self, 'comp_plotter_comp_2d'): self.comp_plotter_comp_2d = BackgroundPlotter(show=False)
-        
-        self.split_2d.addWidget(self.comp_plotter_base_2d.interactor)
-        self.split_2d.addWidget(self.comp_plotter_comp_2d.interactor)
-        
-        l_2d.addWidget(self.split_2d)
-        self.main_split_compare.addWidget(self.maps_2d_container)
-        
-        # Oculta o 2D por padrão
-        self.maps_2d_container.setVisible(False)
-        
-        layout.addWidget(self.main_split_compare)
+        # Placeholder inicial (opcional)
+        label = QtWidgets.QLabel("Selecione os modelos na árvore para comparar.")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(label)
 
     def setup_toolbar_controls(self):
         toolbar = self.addToolBar("Controles")
         toolbar.setMovable(False)
-        toolbar.clear() # <--- CORREÇÃO: Limpa tudo antes de adicionar para não duplicar
+        toolbar.clear()
         
         toolbar.setIconSize(QtCore.QSize(16, 16))
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         
-        # --- 1. MODO VISUALIZAÇÃO (ÚNICO PARA TUDO) ---
+        # Botão Modo
         self.btn_mode = QtWidgets.QToolButton(self)
         self.btn_mode.setText("Modo: Fácies") 
         self.btn_mode.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
@@ -521,25 +325,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mode.setAutoRaise(True)
         
         menu_mode = QtWidgets.QMenu(self.btn_mode)
-        modes = [
-            ("Fácies", "facies"), 
-            ("Reservatório", "reservoir"), 
-            ("Clusters", "clusters"), 
-            ("Maior Cluster", "largest"), 
-            ("Espessura Local", "thickness_local")
-        ]
-        
+        modes = [("Fácies", "facies"), ("Reservatório", "reservoir"), ("Clusters", "clusters"), ("Maior Cluster", "largest"), ("Espessura Local", "thickness_local")]
         for text, data in modes:
             action = menu_mode.addAction(text)
-            # Usa lambda para capturar o valor correto
             action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
-            
         self.btn_mode.setMenu(menu_mode)
         toolbar.addWidget(self.btn_mode)
         
         toolbar.addSeparator()
         
-        # --- 2. ESPESSURA (ÚNICO PARA TUDO) ---
+        # Botão Espessura
         self.btn_thick = QtWidgets.QToolButton(self)
         self.btn_thick.setText("Espessura: Espessura")
         self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
@@ -549,27 +344,15 @@ class MainWindow(QtWidgets.QMainWindow):
         
         menu_thick = QtWidgets.QMenu(self.btn_thick)
         thickness_opts = ["Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]
-        
         for label in thickness_opts:
             action = menu_thick.addAction(label)
             action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
-            
         self.btn_thick.setMenu(menu_thick)
         toolbar.addWidget(self.btn_thick)
         
         toolbar.addSeparator()
         
-        # --- 3. MAPAS 2D (Apenas visível na Comparação) ---
-        self.act_toggle_2d = QtWidgets.QAction("Mapas 2D", self)
-        self.act_toggle_2d.setCheckable(True)
-        self.act_toggle_2d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
-        self.act_toggle_2d.triggered.connect(self.toggle_compare_2d_view)
-        self.act_toggle_2d.setVisible(False) 
-        toolbar.addAction(self.act_toggle_2d)
-        
-        toolbar.addSeparator()
-        
-        # --- 4. SNAPSHOT ---
+        # Snapshot
         btn_ss = QtWidgets.QAction("Snapshot", self)
         btn_ss.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         btn_ss.triggered.connect(self.take_snapshot)
@@ -596,120 +379,118 @@ class MainWindow(QtWidgets.QMainWindow):
         self.change_thickness_mode(label)
 
     def setup_docks(self, nx, ny, nz):
-        # --- 1. DOCK EXPLORER (Topo Esquerda) ---
+        # --- COLUNA 1: DOCK EXPLORER (Hierarquia) ---
         self.dock_explorer = QtWidgets.QDockWidget("Project Explorer", self)
         self.dock_explorer.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        # Impede que feche o dock acidentalmente
+        self.dock_explorer.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetFloatable)
         
-        self.dock_left_container = QtWidgets.QStackedWidget()
-        # O segredo: Dizer ao container que ele pode ser esmagado verticalmente (Ignored)
-        self.dock_left_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Ignored)
-        
-        # Widget 0: Árvore
         self.project_tree = QtWidgets.QTreeWidget()
-        self.project_tree.setHeaderLabel("Hierarquia do Projeto")
+        self.project_tree.setHeaderLabel("Hierarquia")
         self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
         self.project_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
+        self.project_tree.itemChanged.connect(self.on_tree_item_changed) # Checkboxes
         
-        # DESTRAVA TOTAL: Altura mínima zero e política Ignored (encolha o quanto quiser)
-        self.project_tree.setMinimumHeight(0)
-        self.project_tree.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Ignored)
-        
-        self.dock_left_container.addWidget(self.project_tree)
-        
-        # Widget 1: Painel Comparação
-        self.compare_panel = self.setup_comparison_dock_content()
-        self.dock_left_container.addWidget(self.compare_panel)
-        
-        self.dock_explorer.setWidget(self.dock_left_container)
+        self.dock_explorer.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_explorer)
         
         self.add_model_to_tree("base", "Modelo Base")
 
-        # --- 2. DOCK PROPRIEDADES (Baixo Esquerda) ---
-        self.dock_props = QtWidgets.QDockWidget("Propriedades & Filtros", self)
+        # --- COLUNA 2: DOCK PROPRIEDADES (Contextual) ---
+        self.dock_props = QtWidgets.QDockWidget("Propriedades", self)
         self.dock_props.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        self.dock_props.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetFloatable)
         
+        # O Stack gerencia o conteúdo desta segunda coluna
         self.props_stack = QtWidgets.QStackedWidget()
-        # Política Expanding aqui para "empurrar" para cima contra o Explorer
-        self.props_stack.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.props_stack.addWidget(QtWidgets.QLabel("Selecione um item."))
         
-        # Pág 1: Grid Slicing
-        self.page_grid = QtWidgets.QWidget()
-        pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
+        # Pág 0: Vazio
+        self.props_stack.addWidget(QtWidgets.QLabel("Selecione um item na árvore.")) 
+        
+        # Pág 1: Geometria (Sliders)
+        self.page_grid = QtWidgets.QWidget(); pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
         self.slicer_widget = GridSlicerWidget(nx, ny, nz, self.on_ui_slice_changed)
-        pg_layout.addWidget(self.slicer_widget)
-        pg_layout.addStretch()
+        pg_layout.addWidget(self.slicer_widget); pg_layout.addStretch()
         self.props_stack.addWidget(self.page_grid)
         
-        # --- PÁG PROPRIEDADES (COM SPLITTER) ---
+        # Pág 2: Propriedades Visualização (Legenda + Métricas Texto)
         self.page_props = QtWidgets.QWidget()
-        layout_props = QtWidgets.QVBoxLayout(self.page_props)
-        layout_props.setContentsMargins(0, 0, 0, 0)
+        pp_layout = QtWidgets.QVBoxLayout(self.page_props); pp_layout.setContentsMargins(2,2,2,2)
         
         self.props_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         
-        # Parte de Cima: Legenda
+        # Grupo Legenda
         self.legend_group = QtWidgets.QGroupBox("Legenda & Filtro")
-        lgl = QtWidgets.QVBoxLayout(self.legend_group)
-        lgl.setContentsMargins(2, 5, 2, 2)
-        
-        self.facies_legend_table = QtWidgets.QTableWidget()
-        self.facies_legend_table.setColumnCount(4)
+        lgl = QtWidgets.QVBoxLayout(self.legend_group); lgl.setContentsMargins(2,5,2,2)
+        self.facies_legend_table = QtWidgets.QTableWidget(); self.facies_legend_table.setColumnCount(4)
         self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "N", "Res"])
         self.facies_legend_table.verticalHeader().setVisible(False)
         self.facies_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.facies_legend_table.itemChanged.connect(self.on_legend_item_changed)
         lgl.addWidget(self.facies_legend_table)
-        
         self.props_splitter.addWidget(self.legend_group)
         
-        # Parte de Baixo: Métricas Laterais
+        # Grupo Texto Métricas
         self.metrics_group = QtWidgets.QGroupBox("Métricas (Resumo)")
-        mgl = QtWidgets.QVBoxLayout(self.metrics_group)
-        mgl.setContentsMargins(2, 5, 2, 2)
-        
-        self.sidebar_metrics_text = QtWidgets.QTextEdit()
-        self.sidebar_metrics_text.setReadOnly(True)
-        # O texto precisa querer crescer para ocupar o espaço liberado
-        self.sidebar_metrics_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        mgl = QtWidgets.QVBoxLayout(self.metrics_group); mgl.setContentsMargins(2,5,2,2)
+        self.sidebar_metrics_text = QtWidgets.QTextEdit(); self.sidebar_metrics_text.setReadOnly(True)
         mgl.addWidget(self.sidebar_metrics_text)
-        
         self.props_splitter.addWidget(self.metrics_group)
         
-        layout_props.addWidget(self.props_splitter)
-        
+        pp_layout.addWidget(self.props_splitter)
         self.props_stack.addWidget(self.page_props)
+        
+        # Pág 3: PAINEL DE COMPARAÇÃO (Para o Modo Comparação)
+        self.page_compare = self.setup_comparison_dock_content()
+        self.props_stack.addWidget(self.page_compare)
+        
         self.dock_props.setWidget(self.props_stack)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_props)
+        
+        # --- O SEGREDO DO LAYOUT DUPLO ---
+        # Força os dois docks a ficarem lado a lado (Horizontal) na área esquerda
+        self.splitDockWidget(self.dock_explorer, self.dock_props, QtCore.Qt.Horizontal)
+        
+        # Define larguras iniciais (Explorer mais fino, Props mais largo)
+        self.resizeDocks([self.dock_explorer, self.dock_props], [250, 400], QtCore.Qt.Horizontal)
 
     def add_model_to_tree(self, model_key, model_name):
-        """Adiciona a estrutura de pastas do modelo na árvore."""
         root_item = QtWidgets.QTreeWidgetItem(self.project_tree, [model_name])
         root_item.setData(0, QtCore.Qt.UserRole, "model_root")
         root_item.setData(0, QtCore.Qt.UserRole + 1, model_key)
         root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
+        
+        # Verifica se estamos no modo Comparação
+        is_comparison = False
+        if hasattr(self, 'central_stack'):
+            if self.central_stack.currentIndex() == 1:
+                is_comparison = True
+        
+        # Usa a função auxiliar para configurar o checkbox corretamente
+        self._set_item_checkbox_visible(root_item, is_comparison)
+        
+        # Se estamos criando no modo comparação, já marcamos ele como Checked por conveniência
+        if is_comparison:
+            root_item.setCheckState(0, QtCore.Qt.Checked)
+
         root_item.setExpanded(True)
         
-        # 1. Geometria
+        # --- Sub-itens (Mantidos iguais) ---
         item_grid = QtWidgets.QTreeWidgetItem(root_item, ["Geometria (Grid)"])
         item_grid.setData(0, QtCore.Qt.UserRole, "grid_settings")
         item_grid.setData(0, QtCore.Qt.UserRole + 1, model_key)
         item_grid.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
         
-        # 2. Propriedades
         item_props = QtWidgets.QTreeWidgetItem(root_item, ["Propriedades & Filtros"])
         item_props.setData(0, QtCore.Qt.UserRole, "prop_settings")
         item_props.setData(0, QtCore.Qt.UserRole + 1, model_key)
         item_props.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
 
-        # 3. Métricas (NOVO ITEM)
         item_metrics = QtWidgets.QTreeWidgetItem(root_item, ["Métricas & Estatísticas"])
         item_metrics.setData(0, QtCore.Qt.UserRole, "metrics_view")
         item_metrics.setData(0, QtCore.Qt.UserRole + 1, model_key)
         item_metrics.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView))
 
-        # 4. Mapas 2D (NOVO ITEM)
         item_2d = QtWidgets.QTreeWidgetItem(root_item, ["Mapas 2D"])
         item_2d.setData(0, QtCore.Qt.UserRole, "map2d_view")
         item_2d.setData(0, QtCore.Qt.UserRole + 1, model_key)
@@ -728,70 +509,66 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def switch_main_view_to_model(self, model_key):
         """Carrega grid, restaura filtros e modo de visualização específicos do modelo."""
+        # Proteção se o modelo não existir
+        if model_key not in self.models: return
+        
         target_facies = self.models[model_key]["facies"]
         if target_facies is None: return
 
         from load_data import grid as global_grid
         from scipy.ndimage import label, generate_binary_structure
         
-        # 1. Recupera Estado Específico do Modelo
-        # Se não tiver modo salvo, usa 'facies' como padrão
+        # 1. Configurações
         saved_mode = self.models[model_key].get("view_mode", "facies")
         current_res_set = self.models[model_key]["reservoir_facies"]
         
-        # Atualiza o estado global com os dados deste modelo
         self.state["current_facies"] = target_facies
         self.state["reservoir_facies"] = current_res_set
         self.state["mode"] = saved_mode 
 
-        # 2. Atualiza o Botão da Barra Superior para refletir o modo do modelo
         if hasattr(self, "btn_mode"):
-            # Mapeia código para texto bonito
             labels = {"facies": "Fácies", "reservoir": "Reservatório", "clusters": "Clusters", 
                       "largest": "Maior Cluster", "thickness_local": "Espessura Local"}
             self.btn_mode.setText(f"Modo: {labels.get(saved_mode, saved_mode)}")
 
-        # 3. Prepara o Grid Físico
-        if model_key == "compare":
+        # 2. Prepara Grid
+        # SE NÃO FOR BASE, É COMPARAÇÃO (Cópia)
+        if model_key != "base":
             active_grid = global_grid.copy(deep=True)
             active_grid.cell_data["Facies"] = target_facies
         else:
             active_grid = global_grid
-            active_grid.cell_data["Facies"] = facies # Garante original
+            active_grid.cell_data["Facies"] = facies # Original
             
-        # 4. CÁLCULO CRÍTICO: Recalcula a Máscara 'Reservoir' e Clusters
-        # Isso garante que o que você vê no 3D bate com os checkboxes laterais
+        # 3. Recalcula Propriedades
         is_res = np.isin(target_facies, list(current_res_set)).astype(np.uint8)
         active_grid.cell_data["Reservoir"] = is_res
         
-        # Recalcula Clusters (necessário para modo Clusters e Maior Cluster)
         arr_3d = is_res.reshape((nx, ny, nz), order="F")
         structure = generate_binary_structure(3, 1)
         labeled, _ = label(arr_3d.transpose(2, 1, 0), structure=structure)
         clusters_1d = labeled.transpose(2, 1, 0).reshape(-1, order="F").astype(np.int32)
         active_grid.cell_data["Clusters"] = clusters_1d
         
-        # Recalcula Maior Cluster
         counts = np.bincount(clusters_1d.ravel())
         if counts.size > 0: counts[0] = 0
         largest_lbl = counts.argmax() if counts.size > 0 else 0
         active_grid.cell_data["LargestCluster"] = (clusters_1d == largest_lbl).astype(np.uint8)
 
-        # 5. Atualiza Metadados de Cores (LUT) para Clusters
+        # 4. Recalcula Espessura
+        self.recalc_vertical_metrics(active_grid, target_facies, current_res_set)
+
+        # 5. Atualiza Cores e Estado
         lut, rng = make_clusters_lut(clusters_1d)
         self.state["clusters_lut"] = lut
         self.state["clusters_rng"] = rng
         self.state["clusters_sizes"] = compute_cluster_sizes(clusters_1d)
 
-        # 6. Finaliza a Troca
         self.state["current_grid_source"] = active_grid
-        self.state["refresh"]() # Redesenha o 3D
+        self.state["refresh"]()
         
-        # Atualiza painéis laterais
-        if saved_mode == "clusters":
-            self.populate_clusters_legend()
-        else:
-            self.populate_facies_legend()
+        if saved_mode == "clusters": self.populate_clusters_legend()
+        else: self.populate_facies_legend()
             
         self.update_sidebar_metrics_text(model_key)
         self.update_2d_map()
@@ -799,36 +576,64 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
         if not items:
-            self.props_stack.setCurrentIndex(0)
+            # Se não tiver nada selecionado e não for comparação, mostra vazio
+            if self.central_stack.currentIndex() == 0:
+                self.props_stack.setCurrentIndex(0)
             return
             
         item = items[0]
         role = item.data(0, QtCore.Qt.UserRole)
         model_key = item.data(0, QtCore.Qt.UserRole + 1)
         
-        # 1. Configura Dock
-        if role == "grid_settings":
-            self.props_stack.setCurrentWidget(self.page_grid)
+        # Verifica se estamos no modo Comparação
+        is_comparison_mode = (self.central_stack.currentIndex() == 1)
+        
+        # --- LÓGICA DO PAINEL LATERAL (COLUNA 2) ---
+        if is_comparison_mode:
+            # No modo comparação, a coluna 2 é SEMPRE o Painel de Comparação
+            # independente do que você clica (a menos que queira ver geometria, mas Dionisos geralmente fixa)
+            self.props_stack.setCurrentWidget(self.page_compare)
+            self.dock_props.setWindowTitle("Painel de Comparação")
         else:
-            self.props_stack.setCurrentWidget(self.page_props)
+            # Modo Visualização: A coluna 2 reage ao clique
+            if role == "grid_settings":
+                self.props_stack.setCurrentWidget(self.page_grid)
+                self.dock_props.setWindowTitle("Geometria")
+            else:
+                self.props_stack.setCurrentWidget(self.page_props)
+                self.dock_props.setWindowTitle("Propriedades")
             
-        # 2. Ações de Troca
+        # --- LÓGICA DA ÁREA CENTRAL ---
         if model_key:
-            # Sempre atualiza o texto lateral com as métricas do modelo clicado
             self.update_sidebar_metrics_text(model_key)
+
+            if not is_comparison_mode:
+                if role == "metrics_view":
+                    self.viz_container.setCurrentIndex(2)
+                    self.update_metrics_view_content(model_key)
+                elif role == "map2d_view":
+                    self.switch_main_view_to_model(model_key)
+                    self.viz_container.setCurrentIndex(1)
+                    self.update_2d_map()
+                elif role in ["grid_settings", "prop_settings", "model_root"]:
+                    self.switch_main_view_to_model(model_key)
+                    self.viz_container.setCurrentIndex(0)
+
+    def _set_item_checkbox_visible(self, item, visible):
+        """Define se um item da árvore tem checkbox visível ou não."""
+        if visible:
+            # Adiciona a permissão de ter checkbox
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             
-            if role == "metrics_view":
-                self.viz_container.setCurrentIndex(2)
-                self.update_metrics_view_content(model_key)
-                
-            elif role == "map2d_view":
-                self.switch_main_view_to_model(model_key)
-                self.viz_container.setCurrentIndex(1)
-                
-            elif role in ["grid_settings", "prop_settings", "model_root"]:
-                # Aqui a mágica acontece: troca o grid e atualiza as cores
-                self.switch_main_view_to_model(model_key)
-                self.viz_container.setCurrentIndex(0)
+            # CRÍTICO: Se o item não tiver um estado definido (None), o Qt não desenha o quadrado.
+            # Forçamos um estado inicial (Desmarcado) se ele estiver 'vazio'.
+            if item.data(0, QtCore.Qt.CheckStateRole) is None:
+                item.setCheckState(0, QtCore.Qt.Unchecked)
+        else:
+            # Remove a permissão
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsUserCheckable)
+            # Remove o dado visual para o quadrado sumir completamente
+            item.setData(0, QtCore.Qt.CheckStateRole, None)
     
     def update_sidebar_metrics_text(self, model_key):
         """Preenche a caixa de texto lateral com o resumo do modelo."""
@@ -951,37 +756,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def change_reservoir_facies(self, reservoir_set):
         if not isinstance(reservoir_set, set): return
         
-        # 1. Identifica modelo ativo
+        # Identifica modelo ativo
         current_model_key = "base"
         sel = self.project_tree.selectedItems()
         if sel:
             key = sel[0].data(0, QtCore.Qt.UserRole + 1)
-            if key in ["base", "compare"]:
+            if key in self.models:
                 current_model_key = key
 
-        # 2. Atualiza Dados
+        # Salva
         self.models[current_model_key]["reservoir_facies"] = reservoir_set
         self.state["reservoir_facies"] = reservoir_set
         
-        # 3. Atualiza Visualização 3D (Recálculo pesado)
+        # Recalcula Visualização
         self.switch_main_view_to_model(current_model_key)
         
-        # 4. Recalcula Métricas (Cache)
+        # Recalcula Métricas
         target_facies = self.models[current_model_key]["facies"]
         m, p = compute_global_metrics_for_array(target_facies, reservoir_set)
         self.cached_metrics[current_model_key]["metrics"] = m
         self.cached_metrics[current_model_key]["perc"] = p
         
-        # 5. ATUALIZAÇÃO DA INTERFACE (CORRIGIDO)
-        
-        # Atualiza a Lateral (Métricas Resumo)
+        # Atualiza Texto Lateral
         self.update_sidebar_metrics_text(current_model_key)
         
-        # Atualiza a Central (Resumo Global + Tabela)
-        # Removemos o "if tab == 2" para garantir que o texto esteja sempre atualizado
-        self.update_metrics_view_content(current_model_key)
-        
-        # 6. Sincroniza Comparação (se houver)
+        # Sincroniza Comparação se for o caso
         if self.compare_facies is not None:
             self.update_comparison_tables()
             if hasattr(self, 'update_compare_3d_mode_single'):
@@ -996,32 +795,53 @@ class MainWindow(QtWidgets.QMainWindow):
         if fac_compare.size != nx * ny * nz:
              QtWidgets.QMessageBox.warning(self, "Erro", "Grid incompatível"); return
         
-        # 1. Configura Dados
-        self.models["compare"]["name"] = os.path.basename(grdecl_path)
-        self.models["compare"]["facies"] = fac_compare
-        # Herda o filtro do base inicialmente
-        rf = self.models["base"]["reservoir_facies"]
-        self.models["compare"]["reservoir_facies"] = set(rf)
-        self.compare_facies = fac_compare
+        # --- GERA ID ÚNICO ---
+        # Usa o tempo atual para garantir que a chave nunca se repita
+        import time
+        model_id = f"compare_{int(time.time() * 1000)}"
+        model_name = os.path.basename(grdecl_path)
         
-        # 2. Calcula Métricas Globais (para o texto lateral e tabela comparativa)
-        self.compare_facies_stats, _ = facies_distribution_array(fac_compare)
+        # Herda filtros do base
+        rf = set(self.models["base"]["reservoir_facies"])
+        
+        # Cria entrada INDEPENDENTE no dicionário
+        self.models[model_id] = {
+            "name": model_name,
+            "facies": fac_compare,
+            "reservoir_facies": rf,
+            "view_mode": "facies" # Cada um começa no modo fácies
+        }
+        
+        # --- CÁLCULOS ESPECÍFICOS DESTE MODELO ---
+        # 1. Estatísticas Globais
+        stats, _ = facies_distribution_array(fac_compare)
+        # 2. Métricas
         cm, cp = compute_global_metrics_for_array(fac_compare, rf)
-        self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
-        
-        # 3. Calcula Tabela Detalhada (NOVO - Resolve o problema da tabela vazia)
+        # 3. Tabela Detalhada
         df_detail = self.generate_detailed_metrics_df(fac_compare)
         
-        # Salva tudo no cache
-        self.cached_metrics["compare"] = {"metrics": cm, "perc": cp, "df": df_detail}
+        # Salva no cache com o ID ÚNICO
+        self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
         
-        # 4. Atualiza Interface
-        self.add_model_to_tree("compare", f"Comparado: {self.models['compare']['name']}")
+        # --- ATUALIZA A COMPARAÇÃO ATIVA ---
+        # O último carregado vira o "Comparado" da aba de comparação
+        self.compare_facies = fac_compare
+        self.compare_facies_stats = stats
+        self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
+        
+        # Salva qual é o ID que está na aba de comparação agora
+        self.active_compare_id = model_id 
+        
+        # Adiciona na árvore com o ID ÚNICO
+        self.add_model_to_tree(model_id, f"Comparado: {model_name}")
+        
         self.fill_unified_facies_table()
-        
         self.update_comparison_tables()
-        self.init_compare_3d()
-        self.update_compare_2d_maps()
+        
+        # Se os plotters de comparação existirem, atualiza
+        if hasattr(self, "comp_plotter_comp"):
+            self.init_compare_3d()
+            self.update_compare_2d_maps()
 
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
 
@@ -1508,32 +1328,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.facies_legend_table.blockSignals(False)
 
     def change_mode(self, new_mode):
-        # 1. Identifica qual modelo está ativo na visualização principal
+        # 1. Identifica modelo ativo
         current_model_key = "base"
         sel = self.project_tree.selectedItems()
         if sel:
             key = sel[0].data(0, QtCore.Qt.UserRole + 1)
-            if key in ["base", "compare"]:
+            if key in self.models:
                 current_model_key = key
 
-        # 2. Salva a preferência NESTE modelo
+        # 2. Salva preferência no modelo ativo
         self.models[current_model_key]["view_mode"] = new_mode
         
-        # 3. Atualiza estado global e redesenha
+        # 3. Atualiza visualização principal
         self.state["mode"] = new_mode
         self.state["refresh"]()
         
-        # 4. Atualiza também a comparação (se aberta)
-        for k in ["base", "compare"]:
-            st = self.compare_states.get(k)
-            if st:
-                st["mode"] = new_mode
-                if new_mode == "clusters":
-                    rf = self.models[k]["reservoir_facies"]
-                    if "update_reservoir_fields" in st: st["update_reservoir_fields"](rf)
-                if "refresh" in st: st["refresh"]()
+        # 4. Atualiza estado de TODOS os modelos carregados (Para manter consistência se quiser)
+        # Ou apenas atualiza a aba de comparação (Base e o Comparado Ativo)
         
-        # 5. Atualiza Interface Lateral
+        # Atualiza Base
+        if self.compare_states.get("base"):
+            self.compare_states["base"]["mode"] = new_mode
+            if new_mode == "clusters":
+                rf = self.models["base"]["reservoir_facies"]
+                if "update_reservoir_fields" in self.compare_states["base"]:
+                    self.compare_states["base"]["update_reservoir_fields"](rf)
+            self.compare_states["base"]["refresh"]()
+
+        # Atualiza Comparado Ativo (se houver)
+        if self.compare_states.get("compare") and hasattr(self, "active_compare_id"):
+            # Aqui precisamos garantir que o estado 'compare' use as fácies do modelo ativo na comparação
+            self.compare_states["compare"]["mode"] = new_mode
+            if new_mode == "clusters":
+                rf = self.models[self.active_compare_id]["reservoir_facies"]
+                if "update_reservoir_fields" in self.compare_states["compare"]:
+                    self.compare_states["compare"]["update_reservoir_fields"](rf)
+            self.compare_states["compare"]["refresh"]()
+        
+        # 5. Interface Lateral
         self.legend_group.setTitle("Legenda & Filtro" if new_mode != "clusters" else "Legenda Clusters")
         if new_mode == "clusters": 
             self.populate_clusters_legend()
@@ -1550,6 +1382,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["refresh"]()
         self.update_2d_map()
         self.update_compare_2d_maps()
+
+    def toggle_tree_checkboxes(self, show):
+        """Habilita ou desabilita checkboxes em todos os modelos raiz."""
+        root = self.project_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            item = root.child(i)
+            # Verifica se é um item de modelo (segurança extra)
+            if item.data(0, QtCore.Qt.UserRole) == "model_root":
+                self._set_item_checkbox_visible(item, show)
 
     def setup_comparison_dock_content(self):
         """Painel esquerdo de Comparação: Métricas e Filtros Unificados."""
@@ -1750,29 +1591,195 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_compare_2d_maps()
     
     def switch_perspective(self, mode):
-        # Alterna visual (Menus e Docks)
         if mode == "visualization":
             self.act_persp_viz.setChecked(True); self.act_persp_comp.setChecked(False)
-            self.dock_left_container.setCurrentIndex(0) # Arvore
-            self.dock_explorer.setWindowTitle("Project Explorer")
-            self.dock_props.setVisible(True)
-            self.central_stack.setCurrentIndex(0) # Abas normais
             
-            # Esconde botão 2D Compare
-            self.act_toggle_2d.setVisible(False)
+            # 1. Central: Visualização Padrão (Abas 3D/2D/Métricas)
+            self.central_stack.setCurrentIndex(0) 
+            
+            # 2. Árvore: Sem Checkboxes
+            self.toggle_tree_checkboxes(False)
+            self.dock_explorer.setWindowTitle("Project Explorer")
+            
+            # 3. Coluna 2: Volta para Propriedades Normais
+            self.dock_props.setWindowTitle("Propriedades")
+            # Força seleção do item atual para restaurar a página correta (Grid ou Props)
+            self.on_tree_selection_changed()
             
         elif mode == "comparison":
             self.act_persp_viz.setChecked(False); self.act_persp_comp.setChecked(True)
-            self.dock_left_container.setCurrentIndex(1) # Painel Compare
-            self.dock_explorer.setWindowTitle("Painel de Comparação")
-            self.dock_props.setVisible(False)
-            self.central_stack.setCurrentIndex(1) # 3D/2D Compare
             
-            # Mostra botão 2D Compare
-            self.act_toggle_2d.setVisible(True)
+            # 1. Central: Abas de Comparação (3D Multi / 2D Multi)
+            self.central_stack.setCurrentIndex(1)
             
+            # 2. Árvore: Com Checkboxes (Multiseleção)
+            self.toggle_tree_checkboxes(True)
+            self.dock_explorer.setWindowTitle("Seletor de Modelos")
+            
+            # 3. Coluna 2: Mostra o Painel de Comparação (Página 3 do Stack)
+            # CORREÇÃO: Usamos props_stack, não dock_left_container
+            if hasattr(self, 'page_compare'):
+                self.props_stack.setCurrentWidget(self.page_compare)
+            
+            self.dock_props.setWindowTitle("Painel de Comparação")
+            
+            # 4. Atualiza Dados
+            self.update_dynamic_comparison_view()
             self.update_comparison_tables()
-            self.update_compare_2d_maps()
+            # Mapas 2D são atualizados via update_dynamic_comparison_view agora
+
+    def update_dynamic_comparison_view(self):
+        """Reconstrói a visualização de comparação (3D e 2D) baseada nos itens marcados."""
+        # 1. Identifica modelos marcados
+        checked_models = []
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
+        while iterator.value():
+            item = iterator.value()
+            if item.data(0, QtCore.Qt.UserRole) == "model_root":
+                if item.checkState(0) == QtCore.Qt.Checked:
+                    checked_models.append(item.data(0, QtCore.Qt.UserRole + 1))
+            iterator += 1
+            
+        n_models = len(checked_models)
+        
+        # --- PREPARA LAYOUTS ---
+        # Limpa layout 3D
+        l3d = self.comp_tab_3d.layout()
+        while l3d.count(): 
+            child = l3d.takeAt(0)
+            if child.widget(): child.widget().deleteLater()
+            
+        # Limpa layout 2D
+        l2d = self.comp_tab_2d.layout()
+        while l2d.count():
+            child = l2d.takeAt(0)
+            if child.widget(): child.widget().deleteLater()
+
+        if n_models == 0:
+            l3d.addWidget(QtWidgets.QLabel("Nenhum modelo selecionado."))
+            l2d.addWidget(QtWidgets.QLabel("Nenhum modelo selecionado."))
+            return
+
+        # Configura Grid Layout (Colunas dinâmicas)
+        cols = 2 if n_models > 1 else 1
+        grid_3d = QtWidgets.QGridLayout()
+        grid_2d = QtWidgets.QGridLayout()
+        
+        # Containers para adicionar ao layout principal
+        w3d = QtWidgets.QWidget(); w3d.setLayout(grid_3d); l3d.addWidget(w3d)
+        w2d = QtWidgets.QWidget(); w2d.setLayout(grid_2d); l2d.addWidget(w2d)
+        
+        self.active_plotters = [] 
+        
+        from visualize import run
+        from load_data import grid as global_grid
+        
+        # --- LOOP DE CRIAÇÃO ---
+        for idx, model_key in enumerate(checked_models):
+            row = idx // cols
+            col = idx % cols
+            model_data = self.models[model_key]
+            
+            # --- CRIAÇÃO 3D ---
+            p3d = BackgroundPlotter(show=False)
+            self.active_plotters.append(p3d)
+            
+            # Prepara Grid 3D
+            mode = self.state.get("mode", "facies")
+            temp_grid = global_grid.copy(deep=True)
+            temp_grid.cell_data["Facies"] = model_data["facies"]
+            
+            # Aplica Filtro Reservatório
+            is_res = np.isin(model_data["facies"], list(model_data["reservoir_facies"])).astype(np.uint8)
+            temp_grid.cell_data["Reservoir"] = is_res
+            
+            # Recalcula Clusters se necessário (para visualização correta)
+            if mode in ["clusters", "largest"]:
+                from scipy.ndimage import label, generate_binary_structure
+                arr = is_res.reshape((nx, ny, nz), order="F")
+                lbl, _ = label(arr.transpose(2,1,0), generate_binary_structure(3,1))
+                clus = lbl.transpose(2,1,0).reshape(-1, order="F").astype(np.int32)
+                temp_grid.cell_data["Clusters"] = clus
+                if mode == "largest":
+                    cnt = np.bincount(clus.ravel()); cnt[0]=0
+                    lg = cnt.argmax() if cnt.size>0 else 0
+                    temp_grid.cell_data["LargestCluster"] = (clus==lg).astype(np.uint8)
+
+            # Injeta estado
+            local_state = {}
+            local_state["mode"] = mode
+            local_state["reservoir_facies"] = model_data["reservoir_facies"]
+            
+            # Roda visualização
+            run(mode=mode, external_plotter=p3d, external_state=local_state, 
+                target_grid=temp_grid, target_facies=model_data["facies"])
+            
+            # Widget 3D
+            c3d = QtWidgets.QWidget(); v3 = QtWidgets.QVBoxLayout(c3d); v3.setContentsMargins(0,0,0,0)
+            v3.addWidget(QtWidgets.QLabel(f"{model_data['name']} (3D)"))
+            v3.addWidget(p3d.interactor)
+            grid_3d.addWidget(c3d, row, col)
+            
+            # --- CRIAÇÃO 2D ---
+            p2d = BackgroundPlotter(show=False)
+            
+            # Configura dados 2D
+            presets = self.state.get("thickness_presets") or {}
+            thick_mode = self.state.get("thickness_mode", "Espessura")
+            if thick_mode not in presets: thick_mode = "Espessura"
+            scalar, title = presets[thick_mode]
+            
+            # Desenha Mapa (Assumindo que o grid já tem os dados calculados ou calculamos agora)
+            # Para garantir, recalcula a métrica vertical neste grid temporário
+            self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
+            self._draw_2d_map_local(p2d, temp_grid, scalar, title)
+            
+            # Widget 2D
+            c2d = QtWidgets.QWidget(); v2 = QtWidgets.QVBoxLayout(c2d); v2.setContentsMargins(0,0,0,0)
+            v2.addWidget(QtWidgets.QLabel(f"{model_data['name']} (2D)"))
+            v2.addWidget(p2d.interactor)
+            grid_2d.addWidget(c2d, row, col)
+
+        # Sincronia Câmera 3D
+        if len(self.active_plotters) > 1:
+            self.sync_multi_cameras(self.active_plotters)
+            
+        # Atualiza ponteiro para tabela lateral (Base vs 2º selecionado)
+        if len(checked_models) >= 2:
+            self.active_compare_id = checked_models[1]
+
+    def on_tree_item_changed(self, item, column):
+        """Chamado quando um checkbox da árvore é alterado."""
+        # Proteção: Se a interface ainda não terminou de carregar, ignora
+        if not hasattr(self, 'central_stack'): return
+        
+        if item.data(0, QtCore.Qt.UserRole) == "model_root":
+            # Se estamos no modo Comparação, reconstrói o grid
+            if self.central_stack.currentIndex() == 1:
+                self.update_dynamic_comparison_view()
+
+    def sync_multi_cameras(self, plotters):
+        """Sincroniza N plotters."""
+        self._is_syncing = False
+        
+        def sync(src, others):
+            if self._is_syncing: return
+            self._is_syncing = True
+            try:
+                for dst in others:
+                    dst.camera.position = src.camera.position
+                    dst.camera.focal_point = src.camera.focal_point
+                    dst.camera.view_angle = src.camera.view_angle
+                    dst.camera.up = src.camera.up
+                    dst.camera.clipping_range = src.camera.clipping_range
+                    dst.render()
+            finally:
+                self._is_syncing = False
+        
+        for i, p in enumerate(plotters):
+            others = plotters[:i] + plotters[i+1:]
+            # Lambda com default value para capturar o p correto no loop
+            p.camera.AddObserver("ModifiedEvent", lambda *args, src=p, dsts=others: sync(src, dsts))
 
     def toggle_compare_2d_view(self):
         """Mostra/Esconde os mapas 2D na aba de comparação."""
@@ -1867,3 +1874,43 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Aceita o evento de fechamento
         event.accept()
+
+    def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
+        """Recalcula métricas verticais (Espessura, NTG) para o grid ativo."""
+        # Prepara dados
+        fac_3d = facies_array.reshape((nx, ny, nz), order="F")
+        
+        # Recupera Z (Assume geometria constante para simplificar)
+        from load_data import grid as global_grid
+        centers = global_grid.cell_centers().points
+        z_vals = centers[:, 2].reshape((nx, ny, nz), order="F")
+        
+        # Arrays de Saída
+        t_tot = np.zeros((nx, ny, nz), dtype=float)
+        # (Você pode adicionar outros arrays aqui se precisar: NTG, etc.)
+        
+        res_list = list(reservoir_set)
+        
+        # Loop Coluna a Coluna (Pode ser lento em grids gigantes, mas é preciso)
+        for ix in range(nx):
+            for iy in range(ny):
+                col_fac = fac_3d[ix, iy, :]
+                mask = np.isin(col_fac, res_list)
+                
+                if not np.any(mask): continue
+                
+                col_z = z_vals[ix, iy, :]
+                z_min, z_max = np.nanmin(col_z), np.nanmax(col_z)
+                T_col = abs(z_max - z_min)
+                if T_col == 0: continue
+                
+                dz = T_col / nz
+                n_res = mask.sum()
+                val_thickness = n_res * dz
+                
+                # Preenche apenas onde é reservatório para visualização correta
+                t_tot[ix, iy, mask] = val_thickness
+
+        # Salva no grid
+        target_grid.cell_data["vert_Ttot_reservoir"] = t_tot.reshape(-1, order="F")
+        # Se tiver outras métricas (NTG, etc), calcule e salve aqui também

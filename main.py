@@ -17,7 +17,7 @@ from PyQt5 import QtWidgets
 
 def main():
     
-    RESERVOIR_FACIES = {13}
+    RESERVOIR_FACIES = {0}
     
     MODE = "facies"  # "facies", "reservoir", "clusters", "largest", "ntg_local", "thickness_local"
 

@@ -323,35 +323,48 @@ def run(
 
     # --- FILTRO UNIFICADO (I, J, K - Min/Max) ---
     def apply_slices_filter(mesh):
-        """Aplica cortes ortogonais bidirecionais (Range) com proteção."""
+        """Aplica cortes I, J, K de forma otimizada."""
         kmin, kmax = state.get("k_min", 0), state.get("k_max", nz-1)
         imin, imax = state.get("i_min", 0), state.get("i_max", nx-1)
         jmin, jmax = state.get("j_min", 0), state.get("j_max", ny-1)
         
-        # --- SEGURANÇA CONTRA CRASH (Impede min > max) ---
+        # Validação simples
         if kmin > kmax: kmin = kmax
         if imin > imax: imin = imax
         if jmin > jmax: jmin = jmax
 
-        # Otimização: se estiver tudo completo, retorna o original sem filtrar
+        # Se não houver corte, retorna original (Zero custo)
         if (kmin == 0 and kmax == nz-1 and 
             imin == 0 and imax == nx-1 and 
             jmin == 0 and jmax == ny-1):
             return mesh
-            
+
+        # --- TENTATIVA DE OTIMIZAÇÃO (FAST SLICING) ---
+        # Funciona se tivermos os arrays de índices pré-calculados
+        # É muito mais rápido que threshold sequencial
+        if "i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data:
+            try:
+                i = mesh.cell_data["i_index"]
+                j = mesh.cell_data["j_index"]
+                k = mesh.cell_data["k_index"]
+                
+                # Cria máscara booleana usando NumPy (Super Rápido)
+                mask = (i >= imin) & (i <= imax) & \
+                       (j >= jmin) & (j <= jmax) & \
+                       (k >= kmin) & (k <= kmax)
+                
+                # Extrai apenas as células que atendem à máscara
+                # extract_cells é muito mais eficiente que 3 thresholds encadeados
+                return mesh.extract_cells(mask)
+            except:
+                pass # Se der erro, cai para o método lento abaixo
+
+        # --- MÉTODO LENTO (FALLBACK) ---
+        # Usa threshold sequencial (caro geometricamente)
         out = mesh
-        
-        # Filtro K (Range)
-        if kmin > 0 or kmax < nz-1:
-            out = out.threshold([kmin, kmax], scalars="k_index")
-            
-        # Filtro I (Range)
-        if imin > 0 or imax < nx-1:
-            out = out.threshold([imin, imax], scalars="i_index")
-            
-        # Filtro J (Range)
-        if jmin > 0 or jmax < ny-1:
-            out = out.threshold([jmin, jmax], scalars="j_index")
+        if kmin > 0 or kmax < nz-1: out = out.threshold([kmin, kmax], scalars="k_index")
+        if imin > 0 or imax < nx-1: out = out.threshold([imin, imax], scalars="i_index")
+        if jmin > 0 or jmax < ny-1: out = out.threshold([jmin, jmax], scalars="j_index")
             
         return out
 
@@ -367,128 +380,153 @@ def run(
         mapper.Update()
 
     def _clean_all_bars(plotter):
-        if hasattr(plotter, "scalar_bars"):
-            for title in list(plotter.scalar_bars.keys()):
-                plotter.remove_scalar_bar(title=title)
+        """Remove todas as barras de cores (Scalar Bars) existentes."""
+        try:
+            # Tenta remover usando a lista de scalar_bars gerenciada pelo plotter
+            if hasattr(plotter, 'scalar_bars'):
+                # Cria uma lista das chaves para evitar erro de iteração
+                keys = list(plotter.scalar_bars.keys())
+                for k in keys:
+                    plotter.remove_scalar_bar(k)
+        except Exception:
+            pass
 
     def show_mesh(mesh):
         mode = state["mode"]
-        last_mode = state.get("last_mode")
         
-        # Anexa dados originais e APLICA CORTES
+        # 1. Prepara Geometria
         mesh = attach_cell_data_from_original(mesh, grid_base)
         mesh = apply_slices_filter(mesh)
         
-        needs_full_reset = (mode != last_mode) or (state["main_actor"] is None)
-
-        if needs_full_reset:
-            if state["bg_actor"]: 
-                try: plotter.remove_actor(state["bg_actor"])
-                except: pass
-                state["bg_actor"] = None
-            if state["main_actor"]:
-                try: plotter.remove_actor(state["main_actor"])
-                except: pass
-                state["main_actor"] = None
-            state["last_mode"] = mode
-
         _clean_all_bars(plotter)
 
-        if mode == "facies":
-            lut, rng = make_facies_lut()
-            if not needs_full_reset and state["main_actor"]:
-                _update_mapper_generic(state["main_actor"], mesh)
-            else:
-                act = plotter.add_mesh(mesh, scalars="Facies", show_edges=True, reset_camera=False, show_scalar_bar=False)
-                act.mapper.lookup_table = lut
-                act.mapper.scalar_range = rng
-                state["main_actor"] = act
+        mesh_main = None
+        mesh_bg = None
+        scalar_name = None
+        lut = None
+        clim = None
+        cmap = None
+        show_scalar = True
+        color_main = None
+        opacity_main = 1.0
+        bar_title = ""
         
+        # 2. Configura Dados
+        if mode == "facies":
+            mesh_main = mesh
+            scalar_name = "Facies"
+            lut, clim = make_facies_lut()
+            
         elif mode == "reservoir":
             try:
-                bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
-                main = mesh.threshold(0.5, scalars="Reservoir")
-            except:
-                bg = mesh
-                main = mesh.extract_cells([])
-
-            if bg.n_cells > 0:
-                if not needs_full_reset and state["bg_actor"]:
-                    _update_mapper_generic(state["bg_actor"], bg)
-                else:
-                    state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
+                mesh_bg = mesh.threshold(0.5, invert=True, scalars="Reservoir")
+                mesh_main = mesh.threshold(0.5, scalars="Reservoir")
+            except: mesh_bg, mesh_main = mesh, None
+            scalar_name = "Facies"
+            lut, clim = make_facies_lut()
             
-            if main.n_cells > 0:
-                lut, rng = make_facies_lut()
-                if not needs_full_reset and state["main_actor"]:
-                    _update_mapper_generic(state["main_actor"], main)
-                else:
-                    act = plotter.add_mesh(main, scalars="Facies", opacity=1.0, show_edges=True, show_scalar_bar=False)
-                    act.mapper.lookup_table = lut
-                    act.mapper.scalar_range = rng
-                    state["main_actor"] = act
-
         elif mode == "clusters":
             try:
-                bg = mesh.threshold(0.5, invert=True, scalars="Clusters")
-                main = mesh.threshold(0.5, scalars="Clusters")
-            except:
-                bg, main = mesh, mesh.extract_cells([])
-            
-            if bg.n_cells > 0:
-                if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
-                else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
-            
-            if main.n_cells > 0:
-                lut = state.get("clusters_lut")
-                rng = state.get("clusters_rng")
-                if not lut: lut, rng = make_clusters_lut(grid_base.cell_data["Clusters"])
-                if not needs_full_reset and state["main_actor"]: _update_mapper_generic(state["main_actor"], main)
-                else:
-                    act = plotter.add_mesh(main, scalars="Clusters", show_edges=True, show_scalar_bar=False)
-                    act.mapper.lookup_table = lut
-                    act.mapper.scalar_range = rng
-                    state["main_actor"] = act
+                mesh_bg = mesh.threshold(0.5, invert=True, scalars="Clusters")
+                mesh_main = mesh.threshold(0.5, scalars="Clusters")
+            except: mesh_bg, mesh_main = mesh, None
+            scalar_name = "Clusters"
+            lut = state.get("clusters_lut")
+            clim = state.get("clusters_rng")
+            if not lut: lut, clim = make_clusters_lut(grid_base.cell_data["Clusters"])
+
+        elif mode == "largest":
+            try:
+                mesh_bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")
+                mesh_main = mesh.threshold(0.5, scalars="LargestCluster")
+            except: mesh_bg, mesh_main = mesh, None
+            show_scalar = False
+            color_main = "lightcoral"
 
         elif mode == "thickness_local":
             _update_thickness_from_state()
             s_name = THICKNESS_SCALAR_NAME
+            
             if s_name in mesh.cell_data:
                 try:
-                    bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
-                    main = mesh.threshold(1e-6, scalars=s_name)
-                    if bg.n_cells > 0:
-                         if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
-                         else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.01, show_edges=False)
-                    if main.n_cells > 0:
-                        clim = state.get("thickness_clim")
-                        if not needs_full_reset and state["main_actor"]:
-                            _update_mapper_generic(state["main_actor"], main, scalar_name=s_name, cmap="plasma", clim=clim, show_scalar=True)
-                        else:
-                            act = plotter.add_mesh(main, scalars=s_name, cmap="plasma", clim=clim, show_edges=True, show_scalar_bar=False)
-                            state["main_actor"] = act
-                        plotter.add_scalar_bar(title=THICKNESS_SCALAR_TITLE)
-                except: pass
+                    mesh_bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
+                    mesh_main = mesh.threshold(1e-6, scalars=s_name)
+                except: mesh_bg, mesh_main = mesh, None
+                
+                scalar_name = s_name
+                cmap = "plasma" 
+                bar_title = THICKNESS_SCALAR_TITLE
+                
+                # Calcula CLIM real para o Ator
+                if mesh_main and mesh_main.n_cells > 0:
+                    arr = mesh_main.cell_data[s_name]
+                    vmin, vmax = np.nanmin(arr), np.nanmax(arr)
+                    if vmax <= vmin: vmax = vmin + 1e-6
+                    clim = (vmin, vmax)
+                else:
+                    clim = (0.0, 1.0)
 
-        elif mode == "largest":
-             try:
-                 bg = mesh.threshold(0.5, invert=True, scalars="LargestCluster")
-                 main = mesh.threshold(0.5, scalars="LargestCluster")
-             except: bg, main = mesh, mesh.extract_cells([])
-             if bg.n_cells > 0:
-                 if not needs_full_reset and state["bg_actor"]: _update_mapper_generic(state["bg_actor"], bg)
-                 else: state["bg_actor"] = plotter.add_mesh(bg, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False)
-             if main.n_cells > 0:
-                 if not needs_full_reset and state["main_actor"]: _update_mapper_generic(state["main_actor"], main)
-                 else: state["main_actor"] = plotter.add_mesh(main, color="lightcoral", opacity=1.0, show_edges=True)
-        
-        z_scale = state.get("z_exag", 1.0)
-        
-        if state["main_actor"]:
-            state["main_actor"].SetScale(1.0, 1.0, z_scale)
+        # 3. Sincronia de Atores
+        def sync_actor(actor_key, mesh_data, is_bg=False):
+            actor = state.get(actor_key)
+            if mesh_data is None or mesh_data.n_cells == 0:
+                if actor: actor.SetVisibility(False)
+                return actor
+
+            if show_scalar and scalar_name:
+                if scalar_name in mesh_data.cell_data:
+                    mesh_data.set_active_scalars(scalar_name, preference="cell")
             
-        if state["bg_actor"]:
+            if actor is None:
+                if is_bg:
+                    actor = plotter.add_mesh(mesh_data, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False, reset_camera=False)
+                else:
+                    actor = plotter.add_mesh(mesh_data, show_edges=True, reset_camera=False, show_scalar_bar=False)
+                state[actor_key] = actor
+            
+            actor.SetVisibility(True)
+            actor.mapper.SetInputData(mesh_data)
+            
+            if is_bg: return actor
+
+            # Aplica Cores
+            if show_scalar and scalar_name and scalar_name in mesh_data.cell_data:
+                actor.mapper.SetScalarVisibility(True)
+                actor.mapper.SetScalarModeToUseCellFieldData()
+                actor.mapper.SelectColorArray(scalar_name)
+                
+                if lut:
+                    actor.mapper.SetLookupTable(lut)
+                    if clim: actor.mapper.SetScalarRange(clim)
+                elif cmap:
+                    # Limpa LUT antiga
+                    actor.mapper.SetLookupTable(None)
+                    new_lut = pv.LookupTable(cmap, n_values=256)
+                    if clim: new_lut.SetRange(clim)
+                    actor.mapper.SetLookupTable(new_lut)
+                    if clim: actor.mapper.SetScalarRange(clim)
+            else:
+                actor.mapper.SetScalarVisibility(False)
+                if color_main: actor.prop.color = color_main
+            
+            actor.prop.opacity = opacity_main
+            return actor
+
+        sync_actor("bg_actor", mesh_bg, is_bg=True)
+        main_actor = sync_actor("main_actor", mesh_main, is_bg=False)
+
+        # 4. Escala Z e Barra de Cores (NO FINAL)
+        z_scale = state.get("z_exag", 15.0)
+        
+        if state.get("bg_actor"): 
             state["bg_actor"].SetScale(1.0, 1.0, z_scale)
+            
+        if main_actor: 
+            main_actor.SetScale(1.0, 1.0, z_scale)
+            
+            # Adiciona a barra agora que o ator está configurado
+            if mode == "thickness_local" and bar_title:
+                plotter.add_scalar_bar(title=bar_title, mapper=main_actor.mapper, n_labels=5, fmt="%.1f")
 
     def _refresh():
         # --- CORREÇÃO CRÍTICA DE VÍNCULO ---
@@ -561,20 +599,20 @@ def run(
     # --- BINDINGS SEGUROS (Evitando Q e W padrões) ---
     
     # Z (Camadas - K) -> Mantido
-    plotter.add_key_event("t", lambda: key_change_slice("k", "min", -1))
-    plotter.add_key_event("y", lambda: key_change_slice("k", "min", +1))
-    plotter.add_key_event("g", lambda: key_change_slice("k", "max", -1))
-    plotter.add_key_event("h", lambda: key_change_slice("k", "max", +1))
+    plotter.add_key_event("z", lambda: key_change_slice("k", "min", -1))
+    plotter.add_key_event("x", lambda: key_change_slice("k", "min", +1))
+    plotter.add_key_event("1", lambda: key_change_slice("k", "max", -1))
+    plotter.add_key_event("2", lambda: key_change_slice("k", "max", +1))
     
     # X (Frente/Trás - I) -> Usando Números 1-4
-    plotter.add_key_event("1", lambda: key_change_slice("i", "min", -1))
-    plotter.add_key_event("2", lambda: key_change_slice("i", "min", +1))
-    plotter.add_key_event("3", lambda: key_change_slice("i", "max", -1))
-    plotter.add_key_event("4", lambda: key_change_slice("i", "max", +1))
+    plotter.add_key_event("c", lambda: key_change_slice("i", "min", -1))
+    plotter.add_key_event("b", lambda: key_change_slice("i", "min", +1))
+    plotter.add_key_event("4", lambda: key_change_slice("i", "max", -1))
+    plotter.add_key_event("5", lambda: key_change_slice("i", "max", +1))
 
     # Y (Esq/Dir - J) -> Usando Números 5-8
-    plotter.add_key_event("5", lambda: key_change_slice("j", "min", -1))
-    plotter.add_key_event("6", lambda: key_change_slice("j", "min", +1))
+    plotter.add_key_event("n", lambda: key_change_slice("j", "min", -1))
+    plotter.add_key_event("m", lambda: key_change_slice("j", "min", +1))
     plotter.add_key_event("7", lambda: key_change_slice("j", "max", -1))
     plotter.add_key_event("8", lambda: key_change_slice("j", "max", +1))
 

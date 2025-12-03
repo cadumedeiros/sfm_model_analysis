@@ -6,6 +6,8 @@ grdecl_path = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_Sim261_.grdec
 
 grid = pv.read_grdecl(grdecl_path)
 
+print("TIPO DO GRID:", type(grid))
+
 def read_keyword_array(path, keyword="Facies"):
     vals = []
     inside = False
