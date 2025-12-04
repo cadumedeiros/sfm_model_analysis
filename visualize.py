@@ -270,7 +270,6 @@ def run(
             clipped.cell_data[name] = arr[orig_ids]
         return clipped
 
-    # --- Update Fields ---
     def update_reservoir_fields(reservoir_facies):
         current_f = state["current_facies"]
         rf_list = list(reservoir_facies) if reservoir_facies else []
@@ -293,6 +292,7 @@ def run(
         
         _calc_vertical_metrics(use_grid, current_f, rf_list) 
 
+        # Sincroniza campos calculados com o grid base de visualização
         sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies", "i_index", "j_index", "k_index"]
         for key in use_grid.cell_data.keys():
             if key.startswith("vert_") or key in sync_names:
@@ -307,13 +307,19 @@ def run(
     def _update_thickness_from_state():
         presets = state.get("thickness_presets") or {}
         mode_label = state.get("thickness_mode", "Espessura")
+        
         if mode_label in presets:
             s_name, s_title = presets[mode_label]
-            set_thickness_scalar(s_name, s_title)
+            
+            # --- CORREÇÃO: Salva no STATE, não na global ---
+            state["current_thickness_scalar"] = s_name
+            state["current_thickness_title"] = s_title
+            
             if s_name in grid_base.cell_data:
                 arr = grid_base.cell_data[s_name]
                 vmin = 1e-6
-                vmax = float(arr.max())
+                vmax = float(np.nanmax(arr)) # Usa nanmax para segurança
+                if np.isnan(vmax): vmax = 1.0
                 state["thickness_clim"] = (vmin, vmax if vmax > vmin else vmin + 1)
 
     state["update_thickness"] = _update_thickness_from_state
@@ -323,49 +329,34 @@ def run(
 
     # --- FILTRO UNIFICADO (I, J, K - Min/Max) ---
     def apply_slices_filter(mesh):
-        """Aplica cortes I, J, K de forma otimizada."""
         kmin, kmax = state.get("k_min", 0), state.get("k_max", nz-1)
         imin, imax = state.get("i_min", 0), state.get("i_max", nx-1)
         jmin, jmax = state.get("j_min", 0), state.get("j_max", ny-1)
         
-        # Validação simples
         if kmin > kmax: kmin = kmax
         if imin > imax: imin = imax
         if jmin > jmax: jmin = jmax
 
-        # Se não houver corte, retorna original (Zero custo)
         if (kmin == 0 and kmax == nz-1 and 
             imin == 0 and imax == nx-1 and 
             jmin == 0 and jmax == ny-1):
             return mesh
 
-        # --- TENTATIVA DE OTIMIZAÇÃO (FAST SLICING) ---
-        # Funciona se tivermos os arrays de índices pré-calculados
-        # É muito mais rápido que threshold sequencial
         if "i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data:
             try:
                 i = mesh.cell_data["i_index"]
                 j = mesh.cell_data["j_index"]
                 k = mesh.cell_data["k_index"]
-                
-                # Cria máscara booleana usando NumPy (Super Rápido)
                 mask = (i >= imin) & (i <= imax) & \
                        (j >= jmin) & (j <= jmax) & \
                        (k >= kmin) & (k <= kmax)
-                
-                # Extrai apenas as células que atendem à máscara
-                # extract_cells é muito mais eficiente que 3 thresholds encadeados
                 return mesh.extract_cells(mask)
-            except:
-                pass # Se der erro, cai para o método lento abaixo
+            except: pass
 
-        # --- MÉTODO LENTO (FALLBACK) ---
-        # Usa threshold sequencial (caro geometricamente)
         out = mesh
         if kmin > 0 or kmax < nz-1: out = out.threshold([kmin, kmax], scalars="k_index")
         if imin > 0 or imax < nx-1: out = out.threshold([imin, imax], scalars="i_index")
         if jmin > 0 or jmax < ny-1: out = out.threshold([jmin, jmax], scalars="j_index")
-            
         return out
 
     def _update_mapper_generic(actor, mesh, scalar_name=None, cmap=None, clim=None, lut=None, show_scalar=True):
@@ -380,21 +371,16 @@ def run(
         mapper.Update()
 
     def _clean_all_bars(plotter):
-        """Remove todas as barras de cores (Scalar Bars) existentes."""
         try:
-            # Tenta remover usando a lista de scalar_bars gerenciada pelo plotter
             if hasattr(plotter, 'scalar_bars'):
-                # Cria uma lista das chaves para evitar erro de iteração
                 keys = list(plotter.scalar_bars.keys())
                 for k in keys:
                     plotter.remove_scalar_bar(k)
-        except Exception:
-            pass
+        except Exception: pass
 
     def show_mesh(mesh):
         mode = state["mode"]
         
-        # 1. Prepara Geometria
         mesh = attach_cell_data_from_original(mesh, grid_base)
         mesh = apply_slices_filter(mesh)
         
@@ -411,7 +397,6 @@ def run(
         opacity_main = 1.0
         bar_title = ""
         
-        # 2. Configura Dados
         if mode == "facies":
             mesh_main = mesh
             scalar_name = "Facies"
@@ -445,19 +430,20 @@ def run(
 
         elif mode == "thickness_local":
             _update_thickness_from_state()
-            s_name = THICKNESS_SCALAR_NAME
+            # --- CORREÇÃO: Lê do STATE local, com fallback global seguro ---
+            s_name = state.get("current_thickness_scalar", THICKNESS_SCALAR_NAME)
+            bar_title = state.get("current_thickness_title", THICKNESS_SCALAR_TITLE)
             
             if s_name in mesh.cell_data:
                 try:
+                    # Tenta filtrar valores zero para limpar visualização
                     mesh_bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
                     mesh_main = mesh.threshold(1e-6, scalars=s_name)
                 except: mesh_bg, mesh_main = mesh, None
                 
                 scalar_name = s_name
                 cmap = "plasma" 
-                bar_title = THICKNESS_SCALAR_TITLE
                 
-                # Calcula CLIM real para o Ator
                 if mesh_main and mesh_main.n_cells > 0:
                     arr = mesh_main.cell_data[s_name]
                     vmin, vmax = np.nanmin(arr), np.nanmax(arr)
@@ -466,17 +452,21 @@ def run(
                 else:
                     clim = (0.0, 1.0)
 
-        # 3. Sincronia de Atores
+        # Sincronia de Atores
         def sync_actor(actor_key, mesh_data, is_bg=False):
             actor = state.get(actor_key)
+            
+            # Se não tem malha, esconde o ator
             if mesh_data is None or mesh_data.n_cells == 0:
                 if actor: actor.SetVisibility(False)
                 return actor
 
+            # Define qual escalar está ativo na malha antes de passar pro mapper
             if show_scalar and scalar_name:
                 if scalar_name in mesh_data.cell_data:
                     mesh_data.set_active_scalars(scalar_name, preference="cell")
             
+            # Cria o ator se ainda não existir
             if actor is None:
                 if is_bg:
                     actor = plotter.add_mesh(mesh_data, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False, reset_camera=False)
@@ -484,27 +474,32 @@ def run(
                     actor = plotter.add_mesh(mesh_data, show_edges=True, reset_camera=False, show_scalar_bar=False)
                 state[actor_key] = actor
             
+            # Atualiza dados e visibilidade
             actor.SetVisibility(True)
             actor.mapper.SetInputData(mesh_data)
             
             if is_bg: return actor
 
-            # Aplica Cores
+            # Lógica de Cores
             if show_scalar and scalar_name and scalar_name in mesh_data.cell_data:
                 actor.mapper.SetScalarVisibility(True)
                 actor.mapper.SetScalarModeToUseCellFieldData()
                 actor.mapper.SelectColorArray(scalar_name)
                 
                 if lut:
+                    # Modo Fácies/Clusters (LUT Discreta)
                     actor.mapper.SetLookupTable(lut)
                     if clim: actor.mapper.SetScalarRange(clim)
                 elif cmap:
-                    # Limpa LUT antiga
-                    actor.mapper.SetLookupTable(None)
+                    # --- CORREÇÃO AQUI ---
+                    # Modo Espessura (Colormap Contínuo)
+                    # Cria a LookupTable explicitamente usando o helper do PyVista
                     new_lut = pv.LookupTable(cmap, n_values=256)
-                    if clim: new_lut.SetRange(clim)
+                    if clim: 
+                        new_lut.SetRange(clim)
                     actor.mapper.SetLookupTable(new_lut)
-                    if clim: actor.mapper.SetScalarRange(clim)
+                    if clim: 
+                        actor.mapper.SetScalarRange(clim)
             else:
                 actor.mapper.SetScalarVisibility(False)
                 if color_main: actor.prop.color = color_main
@@ -515,7 +510,6 @@ def run(
         sync_actor("bg_actor", mesh_bg, is_bg=True)
         main_actor = sync_actor("main_actor", mesh_main, is_bg=False)
 
-        # 4. Escala Z e Barra de Cores (NO FINAL)
         z_scale = state.get("z_exag", 15.0)
         
         if state.get("bg_actor"): 
@@ -523,50 +517,34 @@ def run(
             
         if main_actor: 
             main_actor.SetScale(1.0, 1.0, z_scale)
-            
-            # Adiciona a barra agora que o ator está configurado
             if mode == "thickness_local" and bar_title:
                 plotter.add_scalar_bar(title=bar_title, mapper=main_actor.mapper, n_labels=5, fmt="%.1f")
 
     def _refresh():
-        # --- CORREÇÃO CRÍTICA DE VÍNCULO ---
-        
-        # 1. Verifica se o window.py mandou um novo grid (uma cópia modificada)
         new_source = state.get("current_grid_source")
-        
-        # 2. Acessa a variável 'grid_base' que pertence à função 'run' (escopo pai)
         nonlocal grid_base
-        
-        # 3. Se houver um novo grid, trocamos o ponteiro.
-        # Agora o visualize.py vai desenhar a cópia correta (Base ou Compare)
         if new_source is not None:
             grid_base = new_source
-            
         show_mesh(grid_base)
 
-    # --- FUNC PARA SETAR SLICE DO EXTERNO (UI) ---
     def set_slice(axis, mode, value):
         key = f"{axis}_{mode}"
         limit = 0
         if axis == "k": limit = nz-1
         elif axis == "i": limit = nx-1
         elif axis == "j": limit = ny-1
-        
         val = int(np.clip(value, 0, limit))
         state[key] = val
         _refresh()
-        
-        # Notifica UI se necessário (opcional, evita loop infinito se controlado)
         if state.get("on_slice_changed"):
             state["on_slice_changed"](axis, mode, val)
 
     state["set_slice"] = set_slice
 
-    # --- CONTROLE DE TECLADO ---
+    # CONTROLE DE TECLADO
     def key_change_slice(axis, mode, delta):
         key = f"{axis}_{mode}"
         curr = state.get(key, 0)
-        
         limit = 0
         if axis == "k": limit = nz-1
         elif axis == "i": limit = nx-1
@@ -574,7 +552,6 @@ def run(
         
         new_val = int(np.clip(curr + delta, 0, limit))
         
-        # Validação cruzada: min não pode passar max
         if mode == "min":
             max_val = state.get(f"{axis}_max", limit)
             if new_val > max_val: new_val = max_val
@@ -584,33 +561,26 @@ def run(
             
         state[key] = new_val
         _refresh()
-        
-        # Notifica a UI para atualizar os sliders
         if state.get("on_slice_changed"):
             state["on_slice_changed"](axis, mode, new_val)
 
-    # --- Setup Final ---
     plotter.clear_actors()
     _clean_all_bars(plotter)
     state["bg_actor"] = None
     state["main_actor"] = None
     state["last_mode"] = None
-
-    # --- BINDINGS SEGUROS (Evitando Q e W padrões) ---
     
-    # Z (Camadas - K) -> Mantido
+    # Bindings
     plotter.add_key_event("z", lambda: key_change_slice("k", "min", -1))
     plotter.add_key_event("x", lambda: key_change_slice("k", "min", +1))
     plotter.add_key_event("1", lambda: key_change_slice("k", "max", -1))
     plotter.add_key_event("2", lambda: key_change_slice("k", "max", +1))
     
-    # X (Frente/Trás - I) -> Usando Números 1-4
     plotter.add_key_event("c", lambda: key_change_slice("i", "min", -1))
     plotter.add_key_event("b", lambda: key_change_slice("i", "min", +1))
     plotter.add_key_event("4", lambda: key_change_slice("i", "max", -1))
     plotter.add_key_event("5", lambda: key_change_slice("i", "max", +1))
 
-    # Y (Esq/Dir - J) -> Usando Números 5-8
     plotter.add_key_event("n", lambda: key_change_slice("j", "min", -1))
     plotter.add_key_event("m", lambda: key_change_slice("j", "min", +1))
     plotter.add_key_event("7", lambda: key_change_slice("j", "max", -1))
@@ -618,7 +588,6 @@ def run(
 
     if "box_widget" in state: del state["box_widget"]
 
-    # plotter.set_background("white", top="lightgray")
     plotter.enable_lightkit()
     plotter.add_axes()
     
