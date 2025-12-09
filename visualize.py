@@ -234,8 +234,8 @@ def run(
     grid_base.cell_data["Facies"] = use_facies
 
     # Aplica exagero Z
-    x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
-    grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
+    # x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
+    # grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
     grid_base.points[:, 2] *= z_exag
 
     state.setdefault("bg_actor", None)

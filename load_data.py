@@ -1,13 +1,31 @@
 # load_data.py
 import pyvista as pv
 import numpy as np
+from config import ANCHOR_Y, APPLY_REFLECTION
+
+# Z Settings (Originais - sem alteração)
+Z_FACTOR = 1.0     
+Z_SHIFT  = 0.0      
+# --------------------------------------
 
 grdecl_path = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
 
+print(f"Lendo Grid: {grdecl_path}...")
 grid = pv.read_grdecl(grdecl_path)
+print(f"Bounds Originais: {grid.bounds}")
 
-print("TIPO DO GRID:", type(grid))
+# --- APLICAÇÃO DA TRANSFORMAÇÃO ---
+if APPLY_REFLECTION:
+    grid.points[:, 1] = (2 * ANCHOR_Y) - grid.points[:, 1]
+    print(f">>> Grid Refletido Y (Pivô {ANCHOR_Y})")
 
+# Ajuste de Z (apenas se precisar no futuro, por padrão fator=1 não faz nada)
+if Z_FACTOR != 1.0 or Z_SHIFT != 0.0:
+    grid.points[:, 2] = (grid.points[:, 2] * Z_FACTOR) + Z_SHIFT
+
+print(f"Bounds Finais:    {grid.bounds}")
+
+# --- FUNÇÕES DE LEITURA DE PROPRIEDADES (Mantidas Iguais) ---
 def read_keyword_array(path, keyword="Facies"):
     vals = []
     inside = False
@@ -20,61 +38,44 @@ def read_keyword_array(path, keyword="Facies"):
             if inside:
                 if "/" in line_strip:
                     before_slash = line_strip.split("/")[0]
-                    if before_slash:
-                        vals.extend(before_slash.split())
+                    if before_slash: vals.extend(before_slash.split())
                     break
                 else:
-                    if line_strip:
-                        vals.extend(line_strip.split())
-    
-    vals_int = [int(float(v)) for v in vals]
-    return np.array(vals_int, dtype=int)
+                    if line_strip: vals.extend(line_strip.split())
+    return np.array([int(float(v)) for v in vals if v], dtype=int)
 
 def read_specgrid(path):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            ls = line.strip()
-            if ls.upper().startswith("SPECGRID"):
-                # linha tipo: SPECGRID
-                #              50 40 10  1  F /
+            if line.strip().upper().startswith("SPECGRID"):
                 nums = []
                 while True:
                     l2 = next(f).strip()
-                    if "/" in l2:
-                        l2 = l2.split("/")[0]
-                        nums.extend(l2.split())
+                    if "/" in l2: 
+                        nums.extend(l2.split("/")[0].split())
                         break
-                    else:
-                        nums.extend(l2.split())
-                nx, ny, nz = map(int, nums[:3])
-                return nx, ny, nz
-    raise RuntimeError("SPECGRID não encontrado no GRDECL")
+                    nums.extend(l2.split())
+                return map(int, nums[:3])
+    return 1,1,1
 
 facies = read_keyword_array(grdecl_path, "Facies")
-# facies = np.array([int(float(f)) for f in facies], dtype=int)
 nx, ny, nz = read_specgrid(grdecl_path)
 
-n_cells = grid.n_cells
-assert len(facies) == grid.n_cells
-
-facies_3d = facies.reshape((nx, ny, nz), order="F")   # (x, y, z) no empacotamento Eclipse
-facies_3d = facies_3d[:, :, ::-1]                     # inverte só o eixo z
-facies = facies_3d.reshape(-1, order="F")             # volta pra 1D
+# Se o espelhamento geométrico inverteu o Y físico, 
+# o array de dados (facies) também precisa acompanhar a inversão no eixo J?
+# Geralmente o PyVista mapeia célula a célula pela ordem dos pontos.
+# Vamos manter o padrão. Se as fácies ficarem "espelhadas" visualmente (argila onde devia ter areia),
+# precisaremos inverter o eixo 1 aqui: facies_3d[:, ::-1, ::-1]
+facies_3d = facies.reshape((nx, ny, nz), order="F")   
+facies_3d = facies_3d[:, :, ::-1] # Inverte Z (K)
+facies = facies_3d.reshape(-1, order="F")             
 
 grid.cell_data["Facies"] = facies
 
 def load_facies_from_grdecl(path):
-    """
-    Lê um GRDECL externo e devolve o array 1D de fácies já
-    com a mesma inversão em Z usada no modelo base.
-    """
     fac = read_keyword_array(path, "Facies")
     nx2, ny2, nz2 = read_specgrid(path)
-
     fac_3d = fac.reshape((nx2, ny2, nz2), order="F")
     fac_3d = fac_3d[:, :, ::-1]
     fac_1d = fac_3d.reshape(-1, order="F")
-
     return fac_1d
-
-

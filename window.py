@@ -6,17 +6,21 @@ import numpy as np
 import os
 import pandas as pd
 from scipy.ndimage import label, generate_binary_structure
+from matplotlib.colors import ListedColormap
 
 from visualize import run, get_2d_clim, make_clusters_lut, compute_cluster_sizes
 from load_data import facies, nx, ny, nz, load_facies_from_grdecl
-from config import load_facies_colors
+from config import load_facies_colors, load_markers
 from analysis import (
     facies_distribution_array,
     reservoir_facies_distribution_array,
     compute_global_metrics_for_array,
-    _get_cell_volumes,   # <--- Adicionado
-    _get_cell_z_coords   # <--- Adicionado
+    _get_cell_volumes,
+    _get_cell_z_coords,
+    sample_well_from_grid, 
+    calculate_well_accuracy
 )
+from wells import Well
 
 # --- WIDGET CUSTOMIZADO PARA OS SLIDERS (Grid Explorer) ---
 class GridSlicerWidget(QtWidgets.QGroupBox):
@@ -157,6 +161,25 @@ class MainWindow(QtWidgets.QMainWindow):
             "compare": {"metrics": None, "perc": None, "df": None}
         }
 
+        self.wells = {}
+        
+        self.facies_colors = load_facies_colors() # Sua função
+        self.markers_db = load_markers("assets/wellMarkers.txt")
+        
+        # Criação do Colormap
+        self.pv_cmap = None
+        self.clim = None
+        if self.facies_colors:
+            # Ordena IDs: 11, 12, 13...
+            ids = sorted(self.facies_colors.keys())
+            colors = [self.facies_colors[i] for i in ids]
+            
+            # Colormap DISCRETO
+            self.pv_cmap = ListedColormap(colors)
+            # Limites exatos para forçar o PyVista a não interpolar errado
+            # Ex: se vai de 11 a 22, clim=[11, 22]
+            self.clim = [ids[0], ids[-1]]
+
         self.state = {"reservoir_facies": initial_reservoir}
         self.compare_states = {"base": {}, "compare": {}}
         self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
@@ -202,6 +225,9 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu = menubar.addMenu("Arquivo")
         action_load = QtWidgets.QAction("Carregar Modelo Adicional...", self)
         action_load.triggered.connect(self.open_compare_dialog)
+        action_load_well = QtWidgets.QAction("Carregar Poço (.las + .dev)...", self)
+        action_load_well.triggered.connect(self.load_well_dialog)
+        file_menu.addAction(action_load_well)
         file_menu.addAction(action_load)
         file_menu.addSeparator()
         action_exit = QtWidgets.QAction("Sair", self)
@@ -288,6 +314,198 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_2d_layout = QtWidgets.QVBoxLayout(self.comp_page_2d)
         self.comp_2d_layout.setContentsMargins(0,0,0,0)
         self.compare_stack.addWidget(self.comp_page_2d)
+
+    def load_well_dialog(self):
+        """Dialogo para selecionar par de arquivos"""
+        # 1. Seleciona LAS
+        las_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecione o arquivo .LAS", "", "LAS Files (*.las)")
+        if not las_path: return
+        
+        # 2. Tenta adivinhar o .dev (mesmo nome, extensão diferente?) ou pede
+        base_name = os.path.splitext(las_path)[0]
+        suggested_dev = base_name + "_dev" # ou .dev
+        
+        if os.path.exists(suggested_dev):
+            dev_path = suggested_dev
+        else:
+            dev_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecione o arquivo de Trajetória (_dev)", os.path.dirname(las_path), "All Files (*)")
+            if not dev_path: return
+
+        well_name = os.path.basename(base_name)
+        
+        try:
+            new_well = Well(well_name, dev_path, las_path)
+            if new_well.data is None or new_well.data.empty:
+                raise ValueError("Falha ao sincronizar LAS e DEV.")
+                
+            self.wells[well_name] = new_well
+            print(f"Poço {well_name} carregado com {len(new_well.data)} pontos.")
+            
+            # Atualiza árvore
+            self.add_well_to_tree(well_name)
+            
+            # Plota no 3D imediatamente se estiver na aba visualização
+            self.update_wells_3d()
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erro", f"Erro ao carregar poço:\n{str(e)}")
+
+    def add_well_to_tree(self, well_name):
+        # Cria nó "Poços" se não existir
+        root = self.project_tree.invisibleRootItem()
+        well_root = None
+        for i in range(root.childCount()):
+            if root.child(i).text(0) == "Poços":
+                well_root = root.child(i)
+                break
+        
+        if not well_root:
+            well_root = QtWidgets.QTreeWidgetItem(root, ["Poços"])
+            well_root.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        
+        # Adiciona o poço
+        item = QtWidgets.QTreeWidgetItem(well_root, [well_name])
+        item.setData(0, QtCore.Qt.UserRole, "well_item")
+        item.setData(0, QtCore.Qt.UserRole + 1, well_name)
+        item.setCheckState(0, QtCore.Qt.Checked) # Visível por padrão
+
+    def update_z_exaggeration(self):
+        val = self.slider_z.value()
+        new_z = val / 10.0
+        self.lbl_z_val.setText(f"{new_z:.1f}x")
+        
+        old_z = self.state.get("z_exag", 1.0)
+        self.state["z_exag"] = new_z
+        
+        # 1. Atualiza Grid (escala)
+        if self.state["current_grid_source"]:
+            self.state["current_grid_source"].points[:, 2] /= old_z
+            self.state["current_grid_source"].points[:, 2] *= new_z
+            
+        # 2. Atualiza Poços (Redesenha)
+        self.update_wells_3d()
+
+    def update_wells_3d(self):
+        if not hasattr(self, 'plotter'): return
+        
+        # Limpa poços antigos
+        for name in self.wells.keys():
+            self.plotter.remove_actor(f"well_{name}")
+            self.plotter.remove_actor(f"marker_{name}")
+        self.plotter.remove_actor("well_labels")
+        
+        z_exag = self.state.get("z_exag", 1.0)
+        lbl_pos = []
+        lbl_txt = []
+        
+        for name, well in self.wells.items():
+            # Tubo com Z corrigido
+            tube = well.get_vtk_polydata(z_exag=z_exag)
+            
+            if tube:
+                # Plota tubo
+                self.plotter.add_mesh(
+                    tube,
+                    scalars="Facies_Real",
+                    cmap=self.pv_cmap,  # Suas cores exatas
+                    clim=self.clim,     # Seus limites exatos
+                    name=f"well_{name}",
+                    smooth_shading=False, # False para ver os pixels/cores reais
+                    show_scalar_bar=False,
+                    interpolate_before_map=False # IMPORTANTE: Não deixa misturar cores
+                )
+                
+                # Prepara etiqueta
+                min_md_idx = np.argmin(well.data["DEPT"].values)
+                top = well.data.iloc[min_md_idx][["X", "Y", "Z"]].values.copy()
+                top[2] *= z_exag
+                top[2] -= (50 * z_exag)
+                lbl_pos.append(top)
+                lbl_txt.append(name)
+            
+            # Plota Marcadores
+            if name in self.markers_db:
+                glyphs, _ = well.get_markers_mesh(self.markers_db[name], z_exag=z_exag)
+                if glyphs:
+                    self.plotter.add_mesh(glyphs, color="red", name=f"marker_{name}")
+
+        # Plota todas as etiquetas de uma vez
+        if lbl_pos:
+            self.plotter.add_point_labels(
+                lbl_pos, lbl_txt, 
+                font_size=16, text_color="black", 
+                point_size=0, always_visible=True,
+                name="well_labels"
+            )
+
+    def show_well_comparison_report(self, well_name):
+        """
+        Gera a janela de 'Barcode' comparando Real vs Simulado.
+        Isso deve ser chamado ao clicar num poço na árvore.
+        """
+        well = self.wells.get(well_name)
+        if not well: return
+        
+        # 1. Obter Grid Ativo (Simulado)
+        grid_source = self.state["current_grid_source"]
+        
+        # 2. Extrair dados simulados
+        sim_facies = sample_well_from_grid(well.data, grid_source)
+        real_facies = well.data["lito_upscaled"].values # Usa lito_upscaled como verdade
+        
+        # 3. Calcular Métricas
+        acc, total = calculate_well_accuracy(real_facies, sim_facies)
+        
+        # 4. Criar Janela de Relatório (Matplotlib embutido ou Widgets Qt Puros)
+        # Vamos usar Widgets Qt Puros (QGraphicsView ou Pintura) para ficar leve
+        # Ou simplesmente abrir um Dialog com Matplotlib
+        
+        self._open_matplotlib_report(well_name, well.data["DEPT"], real_facies, sim_facies, acc)
+
+    def _open_matplotlib_report(self, well_name, depth, real, sim, accuracy):
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Relatório Poço: {well_name} (Acc: {accuracy*100:.1f}%)")
+        dialog.resize(600, 800)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        fig, ax = plt.subplots(nrows=1, ncols=3, sharey=True, figsize=(8, 10))
+        
+        # Cores (Dicionário simplificado, ideal usar o seu config.py)
+        # cmap = plt.get_cmap("tab20", 20)
+        
+        # Track 1: Real
+        # Usamos pcolormesh ou imshow expandido
+        # Truque: criar uma matriz (N, 1) para plotar como imagem
+        real_img = real.reshape(-1, 1)
+        sim_img = sim.reshape(-1, 1)
+        # Diferença (0 = Igual, 1 = Diferente)
+        diff_img = (real != sim).astype(int).reshape(-1, 1)
+        
+        # Extensão Vertical
+        min_d, max_d = depth.min(), depth.max()
+        extent = [0, 1, max_d, min_d] # Invertido para profundidade crescer para baixo
+        
+        ax[0].imshow(real_img, aspect='auto', extent=extent, cmap='tab20', interpolation='nearest')
+        ax[0].set_title("Real (Log)")
+        ax[0].set_ylabel("Profundidade (m)")
+        
+        ax[1].imshow(sim_img, aspect='auto', extent=extent, cmap='tab20', interpolation='nearest')
+        ax[1].set_title("Simulado (Grid)")
+        
+        # Track 3: Erro (Branco=Acerto, Vermelho=Erro)
+        from matplotlib.colors import ListedColormap
+        cmap_err = ListedColormap(['white', 'red'])
+        ax[2].imshow(diff_img, aspect='auto', extent=extent, cmap=cmap_err, interpolation='nearest')
+        ax[2].set_title("Erro")
+        
+        plt.tight_layout()
+        
+        canvas = FigureCanvas(fig)
+        layout.addWidget(canvas)
+        dialog.exec_()
 
     def switch_perspective(self, mode):
         if mode == "visualization":
@@ -642,6 +860,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """Duplo clique em Geometria força a troca para aba 3D."""
         role = item.data(0, QtCore.Qt.UserRole)
         model_key = item.data(0, QtCore.Qt.UserRole + 1)
+        data = item.data(0, QtCore.Qt.UserRole + 1)
+
+        if role == "well_item":
+            self.show_well_comparison_report(data)
         
         if role == "grid_settings" and model_key:
             self.switch_main_view_to_model(model_key)

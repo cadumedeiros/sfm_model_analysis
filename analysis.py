@@ -445,3 +445,73 @@ def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
     }
     for k, v in name_map.items():
         grid.cell_data[prefix + k] = v.reshape(-1, order="F")
+
+# =============================================================================
+# ANÁLISE DE POÇOS
+# =============================================================================
+
+def sample_grid_along_well(grid, well_df, scalar_name="Facies"):
+    """
+    Extrai valores do grid ao longo da trajetória do poço.
+    grid: objeto PyVista (unstructured ou structured)
+    well_df: DataFrame com colunas X, Y, Z
+    """
+    points = well_df[["X", "Y", "Z"]].values
+    
+    # PyVista tem uma função rápida para isso: sample_over_line ou probe
+    # Mas como temos pontos discretos arbitrários, usamos probe filter
+    import pyvista as pv
+    
+    # Cria um PolyData apenas com os pontos do poço
+    well_poly = pv.PolyData(points)
+    
+    # O filtro 'probe' projeta os dados do grid nestes pontos
+    sampled = well_poly.sample(grid, tolerance=1.0) # tolerance depende da escala
+    
+    # Retorna os valores amostrados
+    return sampled.point_data[scalar_name]
+
+def sample_well_from_grid(well_df, grid_source, scalar_name="Facies"):
+    """
+    Recebe o DataFrame do poço (com X, Y, Z) e o Grid PyVista.
+    Retorna array de fácies SIMULADAS para cada ponto do poço.
+    """
+    if well_df is None or well_df.empty:
+        return None
+        
+    points = well_df[["X", "Y", "Z"]].values
+    
+    # Cria nuvem de pontos temporária
+    import pyvista as pv
+    cloud = pv.PolyData(points)
+    
+    # Sample/Probe: Projeta os valores do grid nestes pontos
+    # tolerance: margem de erro caso o ponto caia exatamente na borda
+    sampled = cloud.sample(grid_source, tolerance=1.0)
+    
+    # Retorna o array amostrado. Se cair fora do grid, vem 0 ou NaN.
+    return sampled.point_data.get(scalar_name, np.zeros(len(points)))
+
+def calculate_well_accuracy(real_arr, sim_arr):
+    """
+    Calcula % de acerto ponto a ponto.
+    Ignora NaNs (onde não tem log real).
+    """
+    # Garante arrays numpy
+    r = np.asarray(real_arr)
+    s = np.asarray(sim_arr)
+    
+    # Máscara válida (onde real não é NaN e simulado > 0)
+    valid = (~np.isnan(r)) & (r != -999.25)
+    
+    if not np.any(valid):
+        return 0.0, 0
+        
+    r_valid = r[valid]
+    s_valid = s[valid]
+    
+    matches = (r_valid == s_valid).sum()
+    total = len(r_valid)
+    
+    accuracy = matches / total if total > 0 else 0.0
+    return accuracy, total
