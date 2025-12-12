@@ -342,6 +342,22 @@ def run(
             jmin == 0 and jmax == ny-1):
             return mesh
 
+        # Se o mesh está vazio, não tenta cortar
+        try:
+            if mesh is None or mesh.n_cells == 0:
+                return mesh
+        except Exception:
+            return mesh
+
+        # --- GARANTIR QUE EXISTEM ÍNDICES ---
+        # (isso resolve exatamente o seu erro ao carregar modelos novos)
+        if not ("i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data):
+            try:
+                prepare_grid_indices(mesh)
+            except Exception:
+                pass
+
+        # Preferir corte por máscara (mais rápido e não depende do threshold)
         if "i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data:
             try:
                 i = mesh.cell_data["i_index"]
@@ -350,14 +366,28 @@ def run(
                 mask = (i >= imin) & (i <= imax) & \
                        (j >= jmin) & (j <= jmax) & \
                        (k >= kmin) & (k <= kmax)
-                return mesh.extract_cells(mask)
-            except: pass
+                out = mesh.extract_cells(mask)
+                return out
+            except Exception:
+                # cai pro fallback abaixo
+                pass
 
+        # --- FALLBACK: threshold (só se os arrays existirem) ---
         out = mesh
-        if kmin > 0 or kmax < nz-1: out = out.threshold([kmin, kmax], scalars="k_index")
-        if imin > 0 or imax < nx-1: out = out.threshold([imin, imax], scalars="i_index")
-        if jmin > 0 or jmax < ny-1: out = out.threshold([jmin, jmax], scalars="j_index")
+
+        # Se não tiver arrays, não tenta threshold (evita ValueError)
+        if (len(getattr(out, "cell_data", {})) == 0) and (len(getattr(out, "point_data", {})) == 0):
+            return out
+
+        if (kmin > 0 or kmax < nz-1) and ("k_index" in out.cell_data or "k_index" in out.point_data):
+            out = out.threshold([kmin, kmax], scalars="k_index")
+        if (imin > 0 or imax < nx-1) and ("i_index" in out.cell_data or "i_index" in out.point_data):
+            out = out.threshold([imin, imax], scalars="i_index")
+        if (jmin > 0 or jmax < ny-1) and ("j_index" in out.cell_data or "j_index" in out.point_data):
+            out = out.threshold([jmin, jmax], scalars="j_index")
+
         return out
+
 
     def _update_mapper_generic(actor, mesh, scalar_name=None, cmap=None, clim=None, lut=None, show_scalar=True):
         mapper = actor.mapper
@@ -380,12 +410,20 @@ def run(
 
     def show_mesh(mesh):
         mode = state["mode"]
-        
-        mesh = attach_cell_data_from_original(mesh, grid_base)
-        mesh = apply_slices_filter(mesh)
-        
-        _clean_all_bars(plotter)
 
+        mesh = attach_cell_data_from_original(mesh, grid_base)
+
+        # GARANTE índices antes de qualquer corte (evita crash ao carregar modelos novos)
+        try:
+            if mesh is not None and mesh.n_cells > 0:
+                if not ("i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data):
+                    prepare_grid_indices(mesh)
+        except Exception:
+            pass
+
+        mesh = apply_slices_filter(mesh)
+
+        _clean_all_bars(plotter)
         mesh_main = None
         mesh_bg = None
         scalar_name = None

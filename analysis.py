@@ -515,3 +515,185 @@ def calculate_well_accuracy(real_arr, sim_arr):
     
     accuracy = matches / total if total > 0 else 0.0
     return accuracy, total
+
+def resample_to_normalized_depth(depth_arr, facies_arr, n_samples=200):
+    """
+    Normaliza um perfil de poço para um domínio 0.0 (topo) a 1.0 (base)
+    e reamostra as fácies usando vizinho mais próximo.
+    """
+    # Validações básicas
+    if len(depth_arr) < 2 or len(facies_arr) == 0:
+        return np.zeros(n_samples, dtype=int)
+    
+    # Garante arrays numpy e remove NaNs
+    facies_arr = np.asarray(facies_arr)
+    depth_arr = np.asarray(depth_arr)
+    valid = ~np.isnan(facies_arr)
+    
+    d = depth_arr[valid]
+    f = facies_arr[valid]
+    
+    if len(d) == 0: return np.zeros(n_samples, dtype=int)
+
+    # Cria eixo normalizado (0 a 1) baseado na profundidade original
+    d_min, d_max = d.min(), d.max()
+    if d_max == d_min: return np.full(n_samples, int(f[0]), dtype=int)
+    
+    d_norm = (d - d_min) / (d_max - d_min) # Vetor de 0 a 1 original
+    
+    # Eixo alvo uniforme (0 a 1)
+    target_axis = np.linspace(0, 1, n_samples)
+    
+    # Interpolação Nearest Neighbor (busca o índice mais próximo)
+    idx = np.searchsorted(d_norm, target_axis, side="left")
+    idx = np.clip(idx, 0, len(f) - 1)
+    
+    return f[idx].astype(int)
+
+def calculate_stratigraphic_accuracy(real_depth, real_facies, sim_depth, sim_facies):
+    """
+    Calcula acurácia comparando vetores normalizados (ignora espessura absoluta).
+    Retorna: acurácia (float), vetor_real_norm, vetor_sim_norm
+    """
+    # Se não houver dados simulados (poço fora do grid), acurácia é 0
+    if len(sim_facies) == 0: return 0.0, [], []
+
+    # 1. Reamostra ambos para 200 'pixels' estratigráficos
+    # Usamos 200 bins para ter resolução suficiente
+    r_norm = resample_to_normalized_depth(real_depth, real_facies, n_samples=200)
+    s_norm = resample_to_normalized_depth(sim_depth, sim_facies, n_samples=200)
+    
+    # 2. Compara ponto a ponto no domínio normalizado
+    matches = (r_norm == s_norm).sum()
+    accuracy = matches / len(r_norm)
+    
+    return accuracy, r_norm, s_norm
+
+def sample_well_from_grid_resampled(
+    well_df,
+    grid_source,
+    step=0.1,
+    scalar_name="Facies",
+    tolerance=5.0,
+):
+    import numpy as np
+    import pyvista as pv
+
+    if well_df is None or well_df.empty:
+        return None, None
+
+    if not all(c in well_df.columns for c in ("DEPT", "X", "Y", "Z")):
+        return None, None
+
+    df = well_df.sort_values("DEPT")
+    dept = df["DEPT"].to_numpy(dtype=float)
+    x = df["X"].to_numpy(dtype=float)
+    y = df["Y"].to_numpy(dtype=float)
+    z = df["Z"].to_numpy(dtype=float)
+
+    if len(dept) < 2:
+        return None, None
+
+    dmin, dmax = float(dept.min()), float(dept.max())
+    step = 0.1 if step <= 0 else float(step)
+    depth_res = np.arange(dmin, dmax + 0.5 * step, step, dtype=float)
+
+    x_res = np.interp(depth_res, dept, x)
+    y_res = np.interp(depth_res, dept, y)
+    z_res = np.interp(depth_res, dept, z)
+
+    cloud = pv.PolyData(np.column_stack([x_res, y_res, z_res]))
+    sampled = cloud.sample(grid_source, tolerance=float(tolerance))
+    fac = sampled.point_data.get(scalar_name, np.zeros(len(depth_res)))
+
+    return depth_res, fac
+
+
+
+def extract_facies_layers(depth, facies):
+    """
+    Retorna lista de camadas: [{"facies": int, "top": float, "base": float, "thick": float}, ...]
+    Assume depth crescente.
+    """
+    import numpy as np
+
+    if depth is None or facies is None:
+        return []
+
+    depth = np.asarray(depth, dtype=float)
+    facies = np.asarray(facies).astype(int)
+
+    if len(depth) < 2 or len(depth) != len(facies):
+        return []
+
+    layers = []
+    cur = int(facies[0])
+    top = float(depth[0])
+
+    for i in range(1, len(facies)):
+        if int(facies[i]) != cur:
+            base = float(depth[i])
+            thick = base - top
+            layers.append({"facies": cur, "top": top, "base": base, "thick": thick})
+            cur = int(facies[i])
+            top = float(depth[i])
+
+    base = float(depth[-1])
+    thick = base - top
+    layers.append({"facies": cur, "top": top, "base": base, "thick": thick})
+
+    return layers
+
+
+def print_layers(label, depth, facies, min_thick=0.05):
+    from analysis import extract_facies_layers
+    layers = extract_facies_layers(depth, facies)
+    print(f"\n--- {label} ---")
+    tot = 0.0
+    for L in layers:
+        if L["thick"] >= min_thick:
+            print(f"fac {L['facies']:>4} | {L['top']:.2f} -> {L['base']:.2f} | {L['thick']:.2f} m")
+            tot += L["thick"]
+    print(f"TOTAL (filtrado >= {min_thick} m): {tot:.2f} m")
+
+def estimate_probe_tolerance_from_grid(grid, factor=0.9):
+    """
+    Estima tolerance baseado no tamanho típico da célula do grid.
+    Não depende de nx/ny/nz no state: tenta extrair do próprio grid.
+    """
+    import numpy as np
+
+    # tenta pegar dimensões estruturadas
+    nx = ny = nz = None
+
+    # StructuredGrid / ImageData tem dimensions
+    if hasattr(grid, "dimensions") and grid.dimensions is not None:
+        dims = tuple(int(v) for v in grid.dimensions)
+        # em PyVista, StructuredGrid: (nx, ny, nz) em pontos.
+        # para células, seria -1, mas aqui só precisamos escala.
+        if len(dims) == 3:
+            nx, ny, nz = dims[0], dims[1], dims[2]
+
+    # fallback: tentar inferir a partir do array k_index (se existir)
+    if (nx is None or ny is None or nz is None):
+        if hasattr(grid, "cell_data") and "k_index" in grid.cell_data and "j_index" in grid.cell_data and "i_index" in grid.cell_data:
+            i = grid.cell_data["i_index"]
+            j = grid.cell_data["j_index"]
+            k = grid.cell_data["k_index"]
+            nx = int(np.max(i)) + 1
+            ny = int(np.max(j)) + 1
+            nz = int(np.max(k)) + 1
+
+    # última tentativa: usa bounds sem dividir (tolerance grande porém seguro)
+    b = grid.bounds  # (xmin, xmax, ymin, ymax, zmin, zmax)
+    dx = (b[1] - b[0]) / max(nx or 1, 1)
+    dy = (b[3] - b[2]) / max(ny or 1, 1)
+    dz = (b[5] - b[4]) / max(nz or 1, 1)
+
+    diag = float(np.sqrt(dx*dx + dy*dy + dz*dz))
+    # se nx/ny/nz não existiam, diag vira diagonal do bounds inteiro -> tolerance gigante.
+    # limita pra não explodir:
+    diag = min(diag, max(b[1]-b[0], b[3]-b[2], b[5]-b[4]) * 0.1)
+
+    return max(1e-6, factor * diag)
+

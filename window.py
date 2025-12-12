@@ -18,7 +18,8 @@ from analysis import (
     _get_cell_volumes,
     _get_cell_z_coords,
     sample_well_from_grid, 
-    calculate_well_accuracy
+    calculate_well_accuracy,
+    print_layers
 )
 from wells import Well
 
@@ -143,6 +144,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
+
+        self.open_reports = []
         
         # --- 1. DADOS E ESTADO INICIAL ---
         if isinstance(reservoir_facies, (int, np.integer)):
@@ -317,13 +320,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def load_well_dialog(self):
         """Dialogo para selecionar par de arquivos"""
-        # 1. Seleciona LAS
         las_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecione o arquivo .LAS", "", "LAS Files (*.las)")
         if not las_path: return
         
-        # 2. Tenta adivinhar o .dev (mesmo nome, extensão diferente?) ou pede
         base_name = os.path.splitext(las_path)[0]
-        suggested_dev = base_name + "_dev" # ou .dev
+        suggested_dev = base_name + "_dev"
         
         if os.path.exists(suggested_dev):
             dev_path = suggested_dev
@@ -339,12 +340,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Falha ao sincronizar LAS e DEV.")
                 
             self.wells[well_name] = new_well
-            print(f"Poço {well_name} carregado com {len(new_well.data)} pontos.")
+            print(f"Poço {well_name} carregado.")
             
-            # Atualiza árvore
-            self.add_well_to_tree(well_name)
-            
-            # Plota no 3D imediatamente se estiver na aba visualização
+            # --- ATUALIZAÇÃO DA ÁRVORE (Itera sobre todos os modelos) ---
+            root = self.project_tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                model_item = root.child(i)
+                # Verifica se é um modelo
+                if model_item.data(0, QtCore.Qt.UserRole) == "model_root":
+                    model_key = model_item.data(0, QtCore.Qt.UserRole + 1)
+                    
+                    # Procura a pasta "Poços" dentro deste modelo
+                    wells_folder = None
+                    for k in range(model_item.childCount()):
+                        child = model_item.child(k)
+                        if child.text(0) == "Poços":
+                            wells_folder = child
+                            break
+                    
+                    if wells_folder:
+                        # Adiciona o poço nesta pasta
+                        w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
+                        w_item.setData(0, QtCore.Qt.UserRole, "well_item")
+                        w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
+                        w_item.setData(0, QtCore.Qt.UserRole + 2, model_key) # Link ao modelo pai
+
+            # Plota no 3D
             self.update_wells_3d()
             
         except Exception as e:
@@ -438,29 +459,140 @@ class MainWindow(QtWidgets.QMainWindow):
                 name="well_labels"
             )
 
-    def show_well_comparison_report(self, well_name):
+    def show_well_comparison_report(self, well_name, model_key="base"):
         """
-        Gera a janela de 'Barcode' comparando Real vs Simulado.
-        Isso deve ser chamado ao clicar num poço na árvore.
+        Relatório BASE vs SIM vs REAL.
+        - Base e Sim amostrados no grid correspondente (com resampling fino).
+        - Real limitado por marcadores (se compatíveis com o DEPT do poço).
         """
+        import numpy as np
+        from PyQt5 import QtWidgets
+        from analysis import (
+            sample_well_from_grid,
+            sample_well_from_grid_resampled,
+            estimate_probe_tolerance_from_grid,
+        )
+
         well = self.wells.get(well_name)
-        if not well: return
+        if not well:
+            return
+
+        # ------------------------------------------------------------
+        # 1) Define grids (ANTES de usar qualquer variável)
+        # ------------------------------------------------------------
+        from load_data import grid as grid_base_source
+
+        base_grid = self.models.get("base", {}).get("grid", grid_base_source)
+
+        if model_key == "base":
+            grid_sim_source = base_grid
+        else:
+            grid_sim_source = self.models.get(model_key, {}).get("grid", None) or base_grid
+
+        # ------------------------------------------------------------
+        # 2) REAL + marcadores
+        # ------------------------------------------------------------
+        markers = self.markers_db.get(well_name, [])
+        full_depth = well.data["DEPT"].values
+
+        if "fac" in well.data.columns:
+            col_real = "fac"
+        elif "lito_upscaled" in well.data.columns:
+            col_real = "lito_upscaled"
+        else:
+            col_real = None
+
+        full_real = well.data[col_real].values if col_real is not None else np.zeros_like(full_depth)
+
+        # tenta aplicar marcadores SOMENTE se eles estiverem no mesmo range do DEPT
+        real_depth0 = full_depth
+        real_facies0 = full_real
+
+        if markers:
+            mds = sorted([m["md"] for m in markers if "md" in m])
+            if len(mds) >= 2:
+                top_md, base_md = mds[0], mds[-1]
+
+                # só aplica se "parecer" compatível com o DEPT do poço
+                dmin, dmax = float(full_depth.min()), float(full_depth.max())
+                if (top_md <= dmax + 1e-6) and (base_md >= dmin - 1e-6):
+                    mask_real0 = (full_depth >= top_md) & (full_depth <= base_md)
+                    real_depth0 = full_depth[mask_real0]
+                    real_facies0 = full_real[mask_real0]
+
+        # ------------------------------------------------------------
+        # 3) BASE e SIM com resampling fino (sem z_exag)
+        # ------------------------------------------------------------
+        step = 0.05
+
+        tol_base = estimate_probe_tolerance_from_grid(base_grid, factor=0.9)
+        tol_sim  = estimate_probe_tolerance_from_grid(grid_sim_source, factor=0.9)
+
+        base_depth_res, base_facies_res = sample_well_from_grid_resampled(
+            well.data, base_grid, step=step, tolerance=tol_base
+        )
+        sim_depth_res, sim_facies_res = sample_well_from_grid_resampled(
+            well.data, grid_sim_source, step=step, tolerance=tol_sim
+        )
+
+        # fallback antigo se algo falhar
+        if base_depth_res is None or base_facies_res is None:
+            full_base = sample_well_from_grid(well.data, base_grid)
+            if full_base is None:
+                full_base = np.zeros_like(full_depth)
+            mask_b = (~np.isnan(full_base)) & (full_base != 0)
+            base_depth = full_depth[mask_b]
+            base_facies = full_base[mask_b].astype(int)
+        else:
+            mask_b = (~np.isnan(base_facies_res)) & (base_facies_res != 0)
+            base_depth = base_depth_res[mask_b]
+            base_facies = base_facies_res[mask_b].astype(int)
+
+        if sim_depth_res is None or sim_facies_res is None:
+            full_sim = sample_well_from_grid(well.data, grid_sim_source)
+            if full_sim is None:
+                full_sim = np.zeros_like(full_depth)
+            mask_s = (~np.isnan(full_sim)) & (full_sim != 0)
+            sim_depth = full_depth[mask_s]
+            sim_facies = full_sim[mask_s].astype(int)
+        else:
+            mask_s = (~np.isnan(sim_facies_res)) & (sim_facies_res != 0)
+            sim_depth = sim_depth_res[mask_s]
+            sim_facies = sim_facies_res[mask_s].astype(int)
+
+        # REAL (não precisa resample aqui; seu report já lida)
+        mask_r = (~np.isnan(real_facies0)) & (real_facies0 != 0)
+        real_depth = real_depth0[mask_r]
+        real_facies = real_facies0[mask_r].astype(int) if hasattr(real_facies0, "astype") else real_facies0[mask_r]
+
+        if len(sim_facies) == 0 and len(base_facies) == 0:
+            QtWidgets.QMessageBox.warning(self, "Aviso", "Poço sem interseção válida no grid.")
+            return
         
-        # 1. Obter Grid Ativo (Simulado)
-        grid_source = self.state["current_grid_source"]
-        
-        # 2. Extrair dados simulados
-        sim_facies = sample_well_from_grid(well.data, grid_source)
-        real_facies = well.data["lito_upscaled"].values # Usa lito_upscaled como verdade
-        
-        # 3. Calcular Métricas
-        acc, total = calculate_well_accuracy(real_facies, sim_facies)
-        
-        # 4. Criar Janela de Relatório (Matplotlib embutido ou Widgets Qt Puros)
-        # Vamos usar Widgets Qt Puros (QGraphicsView ou Pintura) para ficar leve
-        # Ou simplesmente abrir um Dialog com Matplotlib
-        
-        self._open_matplotlib_report(well_name, well.data["DEPT"], real_facies, sim_facies, acc)
+        base_depth, base_facies = self._drop_last_block(base_depth, base_facies)
+        sim_depth,  sim_facies  = self._drop_last_block(sim_depth,  sim_facies)
+
+        print("BASE last fac before report:", base_facies[-1] if len(base_facies) else None)
+        print("SIM  last fac before report:", sim_facies[-1] if len(sim_facies) else None)
+
+
+        # ------------------------------------------------------------
+        # 4) Chama report com seu design
+        # ------------------------------------------------------------
+        report_dialog = self._open_matplotlib_report(
+            well_name=well_name,
+            sim_model_name=model_key,
+            real_depth=real_depth, real_fac=real_facies,
+            base_depth=base_depth, base_fac=base_facies,
+            sim_depth=sim_depth, sim_fac=sim_facies
+        )
+        report_dialog.exec_()
+
+
+
+
+
+
 
     def _open_matplotlib_report(self, well_name, depth, real, sim, accuracy):
         import matplotlib.pyplot as plt
@@ -622,88 +754,69 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_dynamic_comparison_2d(self, checked_models):
         """Reconstrói a visualização de Mapas 2D para os modelos selecionados."""
-        
-        # --- LIMPEZA DE PLOTTERS ANTIGOS ---
+
         if hasattr(self, 'active_comp_2d_plotters'):
-            for p in self.active_comp_2d_plotters: 
+            for p in self.active_comp_2d_plotters:
                 p.close()
         self.active_comp_2d_plotters = []
-        
-        # Limpa widgets do layout
+
         if self.comp_2d_layout.count() > 0:
             while self.comp_2d_layout.count():
                 item = self.comp_2d_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
-                elif item.layout():
-                    import sip
-                    sip.delete(item.layout())
+                if item.widget():
+                    item.widget().deleteLater()
 
-        if not checked_models:
-            self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos na árvore à esquerda."))
+        if len(checked_models) == 0:
+            self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
             return
 
-        # --- GRID LAYOUT ---
         n_models = len(checked_models)
         cols = 2 if n_models > 1 else 1
-        
-        # Container para isolar o grid visual
+
         grid_container = QtWidgets.QWidget()
         grid_layout = QtWidgets.QGridLayout(grid_container)
-        grid_layout.setContentsMargins(0,0,0,0)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
         grid_layout.setSpacing(2)
         self.comp_2d_layout.addWidget(grid_container)
-        
-        # Recupera configuração de espessura (Tipo de Mapa)
+
         presets = self.state.get("thickness_presets") or {}
         thick_mode = self.state.get("thickness_mode", "Espessura")
-        
-        # Fallback se o preset não existir
-        if thick_mode not in presets: thick_mode = "Espessura"
-        if thick_mode in presets:
-            scalar, title = presets[thick_mode]
-        else:
-            scalar, title = ("vert_Ttot_reservoir", "Espessura")
-        
+        if thick_mode not in presets:
+            thick_mode = "Espessura"
+        scalar, title = presets[thick_mode]
+
         from load_data import grid as global_grid
-        
+
         for idx, (model_key, model_name) in enumerate(checked_models):
             row, col = idx // cols, idx % cols
             model_data = self.models[model_key]
-            
-            # Cria Plotter 2D
+
             p2d = BackgroundPlotter(show=False)
             self.active_comp_2d_plotters.append(p2d)
-            
-            # Precisamos calcular as métricas no grid temporário
-            # pois cada modelo tem sua distribuição de fácies
-            temp_grid = global_grid.copy(deep=True)
+
+            # >>> CORREÇÃO: grid do modelo
+            source_grid = model_data.get("grid", global_grid)
+            temp_grid = source_grid.copy(deep=True)
             temp_grid.cell_data["Facies"] = model_data["facies"]
-            
-            # Recalcula métricas verticais para este modelo
+
             self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
-            
-            # Desenha o Mapa usando a função auxiliar existente
-            try:
-                self._draw_2d_map_local(p2d, temp_grid, scalar, title)
-            except Exception as e:
-                print(f"Erro ao desenhar mapa 2D para {model_name}: {e}")
-            
-            # Monta o Widget da célula
+
+            self._draw_2d_map_local(p2d, temp_grid, scalar, f"{model_name} - {title}")
+
             w = QtWidgets.QWidget()
             vl = QtWidgets.QVBoxLayout(w)
-            vl.setContentsMargins(0,0,0,0)
+            vl.setContentsMargins(0, 0, 0, 0)
             vl.setSpacing(0)
-            
+
             lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
-            lbl.setStyleSheet("background: #ddd; font-weight: bold; padding: 2px;")
-            
+            lbl.setStyleSheet("background: #ddd; font-weight: bold;")
             vl.addWidget(lbl)
             vl.addWidget(p2d.interactor)
-            
+
             grid_layout.addWidget(w, row, col)
 
-        # Atualiza a tabela lateral também (Filtros afetam o cálculo de espessura)
         self._build_multi_model_filter_table(checked_models)
+
 
     def toggle_comparison_view_type(self):
         """Alterna entre ver o Grid 3D e as Tabelas de Métricas na Comparação."""
@@ -818,22 +931,33 @@ class MainWindow(QtWidgets.QMainWindow):
         root_item.setData(0, QtCore.Qt.UserRole + 1, model_key)
         root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
         
-        # Verifica se estamos no modo Comparação
+        # Verifica se estamos no modo Comparação para configurar checkbox
         is_comparison = False
         if hasattr(self, 'central_stack'):
             if self.central_stack.currentIndex() == 1:
                 is_comparison = True
         
-        # Usa a função auxiliar para configurar o checkbox corretamente
         self._set_item_checkbox_visible(root_item, is_comparison)
-        
-        # Se estamos criando no modo comparação, já marcamos ele como Checked por conveniência
         if is_comparison:
             root_item.setCheckState(0, QtCore.Qt.Checked)
 
         root_item.setExpanded(True)
         
-        # --- Sub-itens (Mantidos iguais) ---
+        # --- PASTA DE POÇOS (NOVA LÓGICA) ---
+        # Cria uma pasta "Poços" específica para este modelo
+        wells_folder = QtWidgets.QTreeWidgetItem(root_item, ["Poços"])
+        wells_folder.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        wells_folder.setData(0, QtCore.Qt.UserRole, "wells_folder")
+        
+        # Popula com os poços que já existem no projeto
+        for well_name in self.wells.keys():
+            w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
+            w_item.setData(0, QtCore.Qt.UserRole, "well_item")
+            w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
+            # Guarda o ID do modelo pai no item do poço para sabermos quem plotar
+            w_item.setData(0, QtCore.Qt.UserRole + 2, model_key)
+
+        # --- Sub-itens Normais ---
         item_grid = QtWidgets.QTreeWidgetItem(root_item, ["Geometria (Grid)"])
         item_grid.setData(0, QtCore.Qt.UserRole, "grid_settings")
         item_grid.setData(0, QtCore.Qt.UserRole + 1, model_key)
@@ -857,70 +981,75 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- LÓGICA DE INTERAÇÃO TREE ---
 
     def on_tree_double_clicked(self, item, col):
-        """Duplo clique em Geometria força a troca para aba 3D."""
+        """Duplo clique em itens da árvore."""
         role = item.data(0, QtCore.Qt.UserRole)
-        model_key = item.data(0, QtCore.Qt.UserRole + 1)
-        data = item.data(0, QtCore.Qt.UserRole + 1)
+        data = item.data(0, QtCore.Qt.UserRole + 1) # Geralmente o ID ou Nome
 
         if role == "well_item":
-            self.show_well_comparison_report(data)
+            well_name = data
+            # Pega o ID do modelo pai que salvamos no UserRole + 2
+            parent_model_key = item.data(0, QtCore.Qt.UserRole + 2)
+            if parent_model_key:
+                self.show_well_comparison_report(well_name, parent_model_key)
         
-        if role == "grid_settings" and model_key:
-            self.switch_main_view_to_model(model_key)
-            self.tabs.setCurrentIndex(0) # Força ir para 3D
+        if role == "grid_settings" and data:
+            self.switch_main_view_to_model(data)
+            self.tabs.setCurrentIndex(0)
 
     def switch_main_view_to_model(self, model_key):
         """Carrega grid, restaura filtros e modo de visualização específicos do modelo."""
-        # Proteção se o modelo não existir
-        if model_key not in self.models: return
-        
+        if model_key not in self.models:
+            return
+
         target_facies = self.models[model_key]["facies"]
-        if target_facies is None: return
+        if target_facies is None:
+            return
 
         from load_data import grid as global_grid
         from scipy.ndimage import label, generate_binary_structure
-        
-        # 1. Configurações
+
         saved_mode = self.models[model_key].get("view_mode", "facies")
         current_res_set = self.models[model_key]["reservoir_facies"]
-        
+
         self.state["current_facies"] = target_facies
         self.state["reservoir_facies"] = current_res_set
-        self.state["mode"] = saved_mode 
+        self.state["mode"] = saved_mode
 
         if hasattr(self, "btn_mode"):
-            labels = {"facies": "Fácies", "reservoir": "Reservatório", "clusters": "Clusters", 
-                      "largest": "Maior Cluster", "thickness_local": "Espessura Local"}
+            labels = {
+                "facies": "Fácies",
+                "reservoir": "Reservatório",
+                "clusters": "Clusters",
+                "largest": "Maior Cluster",
+                "thickness_local": "Espessura Local",
+            }
             self.btn_mode.setText(f"Modo: {labels.get(saved_mode, saved_mode)}")
 
-        # 2. Prepara Grid
-        # SE NÃO FOR BASE, É COMPARAÇÃO (Cópia)
-        if model_key != "base":
-            active_grid = global_grid.copy(deep=True)
-            active_grid.cell_data["Facies"] = target_facies
-        else:
-            active_grid = global_grid
-            active_grid.cell_data["Facies"] = facies # Original
-            
-        # 3. Recalcula Propriedades
+        # >>> CORREÇÃO: usa a GEOMETRIA do modelo, não o global_grid do Base
+        source_grid = self.models[model_key].get("grid", global_grid)
+        active_grid = source_grid.copy(deep=True)
+        active_grid.cell_data["Facies"] = target_facies
+
+        # Recalcula propriedades
         is_res = np.isin(target_facies, list(current_res_set)).astype(np.uint8)
         active_grid.cell_data["Reservoir"] = is_res
-        
+
         arr_3d = is_res.reshape((nx, ny, nz), order="F")
         structure = generate_binary_structure(3, 1)
         labeled, _ = label(arr_3d.transpose(2, 1, 0), structure=structure)
         clusters_1d = labeled.transpose(2, 1, 0).reshape(-1, order="F").astype(np.int32)
         active_grid.cell_data["Clusters"] = clusters_1d
-        
+
         counts = np.bincount(clusters_1d.ravel())
-        if counts.size > 0: counts[0] = 0
+        if counts.size > 0:
+            counts[0] = 0
         largest_lbl = counts.argmax() if counts.size > 0 else 0
         active_grid.cell_data["LargestCluster"] = (clusters_1d == largest_lbl).astype(np.uint8)
 
-        # 4. Recalcula Espessura
+        # Recalcula espessuras/verticais no grid correto
         self.recalc_vertical_metrics(active_grid, target_facies, current_res_set)
 
-        # 5. Atualiza Cores e Estado
+        # Atualiza estado/legendas
         lut, rng = make_clusters_lut(clusters_1d)
         self.state["clusters_lut"] = lut
         self.state["clusters_rng"] = rng
@@ -928,10 +1057,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state["current_grid_source"] = active_grid
         self.state["refresh"]()
-        
-        if saved_mode == "clusters": self.populate_clusters_legend()
-        else: self.populate_facies_legend()
-            
+
+        if saved_mode == "clusters":
+            self.populate_clusters_legend()
+        else:
+            self.populate_facies_legend()
+
         self.update_sidebar_metrics_text(model_key)
         self.update_2d_map()
 
@@ -1152,53 +1283,56 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.update_compare_3d_mode_single("compare")
 
     def load_compare_model(self, grdecl_path):
-        try: fac_compare = load_facies_from_grdecl(grdecl_path)
+        # >>> CORREÇÃO PRINCIPAL: carregar GEOMETRIA (grid) + facies do modelo
+        try:
+            from load_data import load_grid_from_grdecl
+            grid_compare, fac_compare = load_grid_from_grdecl(grdecl_path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erro", str(e)); return
-        
+            QtWidgets.QMessageBox.critical(self, "Erro", str(e))
+            return
+
+        # Confere compatibilidade básica
         if fac_compare.size != nx * ny * nz:
-             QtWidgets.QMessageBox.warning(self, "Erro", "Grid incompatível"); return
-        
+            QtWidgets.QMessageBox.warning(self, "Erro", "Grid incompatível")
+            return
+
         import time
         model_id = f"compare_{int(time.time() * 1000)}"
         model_name = os.path.basename(grdecl_path)
-        
-        # --- CORREÇÃO: Inicia com conjunto VAZIO para total independência ---
-        # (Antes copiava do base, o que causava confusão de 'sincronia')
-        rf = set() 
-        
+
+        # Independente do base
+        rf = set()
+
+        # >>> Agora guardamos também o GRID (geometria própria)
         self.models[model_id] = {
             "name": model_name,
             "facies": fac_compare,
+            "grid": grid_compare,              # <<< ESSENCIAL
             "reservoir_facies": rf,
             "view_mode": "facies"
         }
-        
+
         # Estatísticas e Métricas
         stats, _ = facies_distribution_array(fac_compare)
         cm, cp = compute_global_metrics_for_array(fac_compare, rf)
         df_detail = self.generate_detailed_metrics_df(fac_compare)
-        
+
         self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
-        
+
         self.compare_facies = fac_compare
         self.compare_facies_stats = stats
         self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
-        
-        self.active_compare_id = model_id 
-        
+
+        self.active_compare_id = model_id
+
         self.add_model_to_tree(model_id, f"Comparado: {model_name}")
-        
-        # self.fill_unified_facies_table()
+
         self.update_comparison_tables()
-        
-        if hasattr(self, "comp_plotter_comp"):
-            # self.init_compare_3d()
-            pass
-    
-        # Força atualização da visualização dinâmica se estiver na aba de comparação
+
+        # Força atualização se estiver na aba de comparação
         if self.central_stack.currentIndex() == 1:
             self.update_dynamic_comparison_view()
+
         
 
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
@@ -1432,23 +1566,52 @@ class MainWindow(QtWidgets.QMainWindow):
         return t
 
     def init_compare_3d(self):
-        if self.models["base"]["facies"] is None: return
-        from visualize import run; from load_data import grid as gg
-        
+        if self.models["base"]["facies"] is None:
+            return
+
+        from visualize import run
+        from load_data import grid as grid_base
+
+        # BASE
         self.comp_plotter_base.clear()
         self.compare_states["base"] = {}
-        run(mode="facies", external_plotter=self.comp_plotter_base, external_state=self.compare_states["base"], 
-            target_grid=gg, target_facies=self.models["base"]["facies"])
-        
+
+        base_grid = self.models["base"].get("grid", grid_base)
+        g0 = base_grid.copy(deep=True)
+        g0.cell_data["Facies"] = self.models["base"]["facies"]
+
+        run(
+            mode="facies",
+            external_plotter=self.comp_plotter_base,
+            external_state=self.compare_states["base"],
+            target_grid=g0,
+            target_facies=self.models["base"]["facies"],
+        )
+
+        # COMPARE
         self.comp_plotter_comp.clear()
         self.compare_states["compare"] = {}
+
         if self.models["compare"]["facies"] is not None:
-             g2 = gg.copy(deep=True); g2.cell_data["Facies"] = self.models["compare"]["facies"]
-             run(mode="facies", external_plotter=self.comp_plotter_comp, external_state=self.compare_states["compare"], 
-                 target_grid=g2, target_facies=self.models["compare"]["facies"])
-                 
+            compare_grid = self.models["compare"].get("grid", None)
+            if compare_grid is None:
+                # fallback (não deveria acontecer se você usar load_compare_model corrigido)
+                compare_grid = grid_base
+
+            g1 = compare_grid.copy(deep=True)
+            g1.cell_data["Facies"] = self.models["compare"]["facies"]
+
+            run(
+                mode="facies",
+                external_plotter=self.comp_plotter_comp,
+                external_state=self.compare_states["compare"],
+                target_grid=g1,
+                target_facies=self.models["compare"]["facies"],
+            )
+
         self.install_compare_sync_callbacks()
         self.sync_compare_cameras()
+
 
     def sync_compare_cameras(self):
         pb = self.comp_plotter_base
@@ -2119,7 +2282,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_dynamic_comparison_view(self, checked_models=None):
         """Reconstrói a visualização 3D mantendo a posição da câmera e o MODO DE ESPESSURA."""
-        
+
         if checked_models is None:
             checked_models = []
             iterator = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
@@ -2142,54 +2305,61 @@ class MainWindow(QtWidgets.QMainWindow):
                     "view_angle": cam.view_angle,
                     "clipping_range": cam.clipping_range
                 }
-            except Exception: pass
+            except Exception:
+                pass
 
         # --- LIMPEZA ---
         if hasattr(self, 'active_comp_plotters'):
-            for p in self.active_comp_plotters: p.close()
+            for p in self.active_comp_plotters:
+                p.close()
         self.active_comp_plotters = []
         self.active_comp_states = []
 
         if self.comp_viz_layout.count() > 0:
             while self.comp_viz_layout.count():
                 item = self.comp_viz_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
+                if item.widget():
+                    item.widget().deleteLater()
                 elif item.layout():
-                    import sip
-                    sip.delete(item.layout())
+                    while item.layout().count():
+                        w2 = item.layout().takeAt(0).widget()
+                        if w2:
+                            w2.deleteLater()
 
-        if not checked_models:
+        if len(checked_models) == 0:
             self.comp_viz_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
             return
 
         # --- CRIAÇÃO 3D ---
         n_models = len(checked_models)
         cols = 2 if n_models > 1 else 1
-        
+
         grid_container = QtWidgets.QWidget()
         grid_layout = QtWidgets.QGridLayout(grid_container)
-        grid_layout.setContentsMargins(0,0,0,0); grid_layout.setSpacing(2)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(2)
         self.comp_viz_layout.addWidget(grid_container)
-        
+
         from visualize import run
         from load_data import grid as global_grid
-        
+
         for idx, (model_key, model_name) in enumerate(checked_models):
             row, col = idx // cols, idx % cols
             model_data = self.models[model_key]
-            
+
             plotter = BackgroundPlotter(show=False)
             self.active_comp_plotters.append(plotter)
-            
-            temp_grid = global_grid.copy(deep=True)
+
+            # >>> CORREÇÃO: usa o grid do modelo
+            source_grid = model_data.get("grid", global_grid)
+            temp_grid = source_grid.copy(deep=True)
             temp_grid.cell_data["Facies"] = model_data["facies"]
-            
-            # Estado Local
+
             local_state = {"model_key": model_key}
-            
-            # --- CORREÇÃO AQUI: Passa o modo de espessura atual para o estado local ---
+
+            # Mantém modo de espessura atual
             local_state["thickness_mode"] = self.state.get("thickness_mode", "Espessura")
-            
+
             if hasattr(self, 'comp_slicer'):
                 local_state["z_exag"] = self.comp_slicer.spin_z.value()
                 local_state["k_min"] = self.comp_slicer.k_widgets['slider_min'].value()
@@ -2198,21 +2368,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 local_state["i_max"] = self.comp_slicer.i_widgets['slider_max'].value()
                 local_state["j_min"] = self.comp_slicer.j_widgets['slider_min'].value()
                 local_state["j_max"] = self.comp_slicer.j_widgets['slider_max'].value()
-            
-            run(mode=self.state.get("mode", "facies"), 
-                external_plotter=plotter, external_state=local_state, 
-                target_grid=temp_grid, target_facies=model_data["facies"])
-            
+
+            run(
+                mode=self.state.get("mode", "facies"),
+                external_plotter=plotter,
+                external_state=local_state,
+                target_grid=temp_grid,
+                target_facies=model_data["facies"],
+            )
+
             if "update_reservoir_fields" in local_state:
                 local_state["update_reservoir_fields"](model_data["reservoir_facies"])
-                if "refresh" in local_state: 
+                if "refresh" in local_state:
                     local_state["refresh"]()
-            
+
             self.active_comp_states.append(local_state)
-            
-            w = QtWidgets.QWidget(); vl = QtWidgets.QVBoxLayout(w); vl.setContentsMargins(0,0,0,0); vl.setSpacing(0)
-            lbl = QtWidgets.QLabel(f"  {model_name}"); lbl.setStyleSheet("background: #ddd; font-weight: bold;")
-            vl.addWidget(lbl); vl.addWidget(plotter.interactor)
+
+            w = QtWidgets.QWidget()
+            vl = QtWidgets.QVBoxLayout(w)
+            vl.setContentsMargins(0, 0, 0, 0)
+            vl.setSpacing(0)
+
+            lbl = QtWidgets.QLabel(f"  {model_name}")
+            lbl.setStyleSheet("background: #ddd; font-weight: bold;")
+            vl.addWidget(lbl)
+            vl.addWidget(plotter.interactor)
+
             grid_layout.addWidget(w, row, col)
 
         # --- RESTAURA CÂMERA ---
@@ -2229,6 +2410,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sync_multi_cameras(self.active_comp_plotters)
 
         self._build_multi_model_filter_table(checked_models)
+
 
     def _build_multi_model_filter_table(self, checked_models):
         """Constrói a tabela matriz: Linhas = Fácies, Colunas = Modelos."""
@@ -2628,3 +2810,675 @@ class MainWindow(QtWidgets.QMainWindow):
         # Salva no grid
         for k, v in data_map.items():
             target_grid.cell_data[k] = v.reshape(-1, order="F")
+
+
+    def _open_matplotlib_report(self, well_name, sim_model_name, real_depth, real_fac, base_depth, base_fac, sim_depth, sim_fac):
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.patches import Rectangle
+        from matplotlib.collections import PatchCollection
+        from config import load_facies_colors
+        import numpy as np
+        from analysis import resample_to_normalized_depth
+
+        # --- Cores e Cast ---
+        f_colors = load_facies_colors()
+        def get_color(fac_code):
+            return f_colors.get(int(fac_code), (0.5, 0.5, 0.5, 1.0))
+
+        real_fac = real_fac.astype(int)
+        base_fac = base_fac.astype(int)
+        sim_fac = sim_fac.astype(int)
+        all_facies = sorted(list(set(real_fac) | set(base_fac) | set(sim_fac)))
+
+        # --- Janela ---
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Relatório Poço: {well_name}")
+        dialog.resize(1500, 850)
+        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.WindowMinMaxButtonsHint)
+        
+        main_layout = QtWidgets.QVBoxLayout(dialog)
+        tabs = QtWidgets.QTabWidget()
+        main_layout.addWidget(tabs)
+
+        # =================================================================
+        # ABA 1: LOGS + VOLUME (Com Porcentagens Restauradas)
+        # =================================================================
+        tab1 = QtWidgets.QWidget()
+        l1 = QtWidgets.QVBoxLayout(tab1)
+        
+        fig1, (ax1, ax2, ax3, ax4) = plt.subplots(nrows=1, ncols=4, figsize=(14, 7), 
+                                                gridspec_kw={'width_ratios': [0.2, 0.2, 0.2, 3]})
+        
+        # --- Cálculo de Geometria Independente ---
+        # Real
+        r_thick = real_depth - real_depth[0]
+        r_total = r_thick[-1] if len(r_thick) > 0 else 0
+        
+        # Base (Pode ser diferente do Simulado agora)
+        b_thick = base_depth - base_depth[0] if len(base_depth) > 0 else np.array([])
+        b_total = b_thick[-1] if len(b_thick) > 0 else 0
+        
+        # Simulado
+        s_thick = sim_depth - sim_depth[0] if len(sim_depth) > 0 else np.array([])
+        s_total = s_thick[-1] if len(s_thick) > 0 else 0
+        
+        g_max = max(r_total, b_total, s_total)
+
+        def draw_log(ax, d_arr, f_arr, title):
+            patches = []
+            colors = []
+            if len(d_arr) < 2: return
+            
+            curr = f_arr[0]
+            top = d_arr[0]
+            
+            def add_text(h_blk, t_pos, code):
+                if h_blk > (g_max * 0.02):
+                    ax.text(0.5, t_pos + h_blk/2, str(code), 
+                            ha='center', va='center', fontsize=7, fontweight='bold',
+                            color='white' if sum(get_color(code)[:3]) < 1.5 else 'black')
+
+            for i in range(1, len(f_arr)):
+                if f_arr[i] != curr:
+                    base = d_arr[i]
+                    h = base - top
+                    patches.append(Rectangle((0, top), 1, h))
+                    colors.append(get_color(curr))
+                    add_text(h, top, curr)
+                    curr = f_arr[i]
+                    top = base
+            
+            # Último
+            base = d_arr[-1]
+            h = base - top
+            if h > 0:
+                patches.append(Rectangle((0, top), 1, h))
+                colors.append(get_color(curr))
+                add_text(h, top, curr)
+
+            col = PatchCollection(patches, match_original=True)
+            col.set_facecolors(colors)
+            ax.add_collection(col)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(g_max, 0)
+            ax.set_title(title, fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+
+        # 1. BASE
+        draw_log(ax1, b_thick, base_fac, f"Base\n{b_total:.1f}m")
+        ax1.set_ylabel("Espessura (m)")
+        ax1.set_yticks(np.linspace(0, g_max, 10))
+        
+        # 2. SIMULADO
+        draw_log(ax2, s_thick, sim_fac, f"Simul\n{s_total:.1f}m")
+        
+        # 3. REAL
+        draw_log(ax3, r_thick, real_fac, f"Real\n{r_total:.1f}m")
+
+        # --- GRÁFICO DE VOLUME (Com Porcentagens Restauradas) ---
+        def calc_net(d, f):
+            if len(d) < 2: return {}
+            dz = np.diff(d, prepend=d[0]); dz[0]=0
+            c = {}
+            for code in all_facies:
+                mask = (f == code)
+                c[code] = np.sum(dz[mask])
+            return c
+
+        net_base = calc_net(base_depth, base_fac)
+        net_sim = calc_net(sim_depth, sim_fac)
+        net_real = calc_net(real_depth, real_fac)
+        
+        y_pos = np.arange(len(all_facies))
+        h = 0.25
+        
+        vals_b = [net_base.get(f,0) for f in all_facies]
+        vals_s = [net_sim.get(f,0) for f in all_facies]
+        vals_r = [net_real.get(f,0) for f in all_facies]
+        
+        ax4.barh(y_pos + h, vals_b, h, label='Base', color='#999999')
+        ax4.barh(y_pos,     vals_s, h, label='Simulado', color='#007acc')
+        ax4.barh(y_pos - h, vals_r, h, label='Real', color='#444444')
+        
+        ax4.set_yticks(y_pos)
+        ax4.set_yticklabels([str(f) for f in all_facies])
+        ax4.set_title("Balanço Volumétrico por Fácies")
+        ax4.legend()
+        ax4.grid(axis='x', linestyle='--', alpha=0.5)
+        
+        # --- Loop de Texto de Porcentagem (RESTAURADO) ---
+        # Compara Simulado vs Real (que é o objetivo da calibração)
+        for i, (vr, vs) in enumerate(zip(vals_r, vals_s)):
+            if vr > 0:
+                diff_perc = ((vs - vr) / vr) * 100
+                txt = f"{diff_perc:+.1f}%"
+                color = 'green' if abs(diff_perc) < 20 else 'red'
+            else:
+                txt = "Novo" if vs > 0 else ""
+                color = 'blue'
+            
+            # Posiciona o texto à direita da maior barra
+            max_val = max(vr, vals_b[i], vs)
+            if max_val > 0:
+                ax4.text(max_val, y_pos[i], f" {txt}", va='center', color=color, fontsize=8, fontweight='bold')
+        
+        plt.tight_layout()
+        canvas1 = FigureCanvas(fig1)
+        l1.addWidget(canvas1)
+        tabs.addTab(tab1, "Logs & Volume")
+
+        # =================================================================
+        # ABA 2: MATRIZ DE TROCAS + FAMÍLIAS (%)
+        # =================================================================
+        tab2 = QtWidgets.QWidget()
+        l2 = QtWidgets.QVBoxLayout(tab2)
+        fig2, (ax2a, ax2b) = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
+
+        # Matriz
+        n_bins = 200
+        r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
+        s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
+        b_norm = resample_to_normalized_depth(base_depth, base_fac, n_bins)
+        
+        n_classes = len(all_facies)
+        conf_matrix = np.zeros((n_classes, n_classes), dtype=int)
+        f_to_i = {f: i for i, f in enumerate(all_facies)}
+        
+        for rv, sv in zip(r_norm, s_norm):
+            i = f_to_i.get(rv)
+            j = f_to_i.get(sv)
+            if i is not None and j is not None:
+                conf_matrix[i, j] += 1
+
+        ax2a.imshow(conf_matrix, interpolation='nearest', cmap='Blues')
+        ax2a.set_xticks(np.arange(n_classes)); ax2a.set_yticks(np.arange(n_classes))
+        ax2a.set_xticklabels([str(f) for f in all_facies], rotation=45)
+        ax2a.set_yticklabels([str(f) for f in all_facies])
+        ax2a.set_xlabel("Simulado"); ax2a.set_ylabel("Real")
+        # Título Limpo (Sem nome do modelo)
+        ax2a.set_title("Matriz de Trocas (Real vs Simulado)")
+
+        for i in range(n_classes):
+            for j in range(n_classes):
+                val = conf_matrix[i, j]
+                color = "white" if val > conf_matrix.max()/2 else "black"
+                if val > 0:
+                    fw = 'bold' if i == j else 'normal'
+                    ax2a.text(j, i, str(val), ha="center", va="center", color=color, fontweight=fw)
+                if i == j:
+                    rect = Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor='gold', linewidth=3)
+                    ax2a.add_patch(rect)
+
+        # --- Famílias (AGORA EM PORCENTAGEM) ---
+        def get_family(f_code):
+            s = str(f_code)
+            if s.startswith('1'): return "Siliciclásticos"
+            if s.startswith('2'): return "Carbonatos"
+            return "Outros"
+
+        # Soma espessura total por família
+        fam_stats = {"Real": {}, "Sim": {}, "Base": {}}
+        
+        # Totais para normalizar
+        tot_r = sum(net_real.values()) if net_real else 1
+        tot_s = sum(net_sim.values()) if net_sim else 1
+        tot_b = sum(net_base.values()) if net_base else 1
+
+        for f in all_facies:
+            fam = get_family(f)
+            fam_stats["Real"][fam] = fam_stats["Real"].get(fam, 0) + net_real.get(f, 0)
+            fam_stats["Sim"][fam] = fam_stats["Sim"].get(fam, 0) + net_sim.get(f, 0)
+            fam_stats["Base"][fam] = fam_stats["Base"].get(fam, 0) + net_base.get(f, 0)
+
+        families = sorted(list(fam_stats["Real"].keys()))
+        x_fam = np.arange(len(families))
+        
+        # Converte para %
+        bars_b = [(fam_stats["Base"][fam] / tot_b)*100 for fam in families]
+        bars_s = [(fam_stats["Sim"][fam] / tot_s)*100 for fam in families]
+        bars_r = [(fam_stats["Real"][fam] / tot_r)*100 for fam in families]
+
+        ax2b.bar(x_fam - 0.2, bars_b, 0.2, label='Base', color='#999999')
+        ax2b.bar(x_fam,       bars_s, 0.2, label='Simulado', color='#007acc')
+        ax2b.bar(x_fam + 0.2, bars_r, 0.2, label='Real', color='#444444')
+        
+        ax2b.set_xticks(x_fam); ax2b.set_xticklabels(families)
+        ax2b.set_ylabel("Proporção (%)")
+        ax2b.set_title("Balanço por Família (Porcentagem)")
+        ax2b.legend()
+        ax2b.set_ylim(0, 100) # Fixa escala 0-100%
+
+        plt.tight_layout()
+        canvas2 = FigureCanvas(fig2)
+        l2.addWidget(canvas2)
+        tabs.addTab(tab2, "Matriz & Famílias")
+
+        # =================================================================
+        # ABA 3: TABELA DETALHADA
+        # =================================================================
+        tab3 = QtWidgets.QWidget()
+        l3 = QtWidgets.QVBoxLayout(tab3)
+        
+        table = QtWidgets.QTableWidget()
+        cols = ["Fácies", "Real (m)", "Base (m)", "Sim (m)", "Erro Sim/Real (%)"]
+        table.setColumnCount(len(cols))
+        table.setHorizontalHeaderLabels(cols)
+        table.setRowCount(len(all_facies))
+        
+        for row, fac in enumerate(all_facies):
+            vr = net_real.get(fac, 0); vb = net_base.get(fac, 0); vs = net_sim.get(fac, 0)
+            
+            if vr > 0: err_perc = ((vs - vr) / vr) * 100
+            else: err_perc = 100.0 if vs > 0 else 0.0
+            
+            item_fac = QtWidgets.QTableWidgetItem(str(fac)); item_fac.setTextAlignment(QtCore.Qt.AlignCenter)
+            rgba = get_color(fac); bg = QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255))
+            item_fac.setBackground(QBrush(bg)); 
+            if sum(rgba[:3]) < 1.5: item_fac.setForeground(QColor("white"))
+            
+            table.setItem(row, 0, item_fac)
+            table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{vr:.2f}"))
+            table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{vb:.2f}"))
+            table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{vs:.2f}"))
+            
+            item_err = QtWidgets.QTableWidgetItem(f"{err_perc:+.1f}%")
+            if abs(err_perc) > 20: item_err.setForeground(QColor("red"))
+            elif abs(err_perc) < 5: item_err.setForeground(QColor("green"))
+            table.setItem(row, 4, item_err)
+
+        table.resizeColumnsToContents()
+        l3.addWidget(table)
+        tabs.addTab(tab3, "Tabela de Métricas")
+
+        # =================================================================
+        # ABA 4: CORRELAÇÃO EM ESPESSURA REAL (links inclinados)
+        # =================================================================
+        tab4 = QtWidgets.QWidget()
+        l4 = QtWidgets.QVBoxLayout(tab4)
+
+        fig4, ax4 = plt.subplots(figsize=(14, 7))
+        fig4.tight_layout(rect=[0, 0.06, 1, 0.95])
+
+        # bins normalizados (define "quem compara com quem")
+        n_bins = 200
+        b_norm = resample_to_normalized_depth(base_depth, base_fac, n_bins)
+        s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
+        r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
+
+        self._plot_strat_correlation_real_depth(
+            ax4,
+            n_bins=n_bins,
+            base_fac_bins=b_norm,
+            sim_fac_bins=s_norm,
+            real_fac_bins=r_norm,
+            b_total=b_total,
+            s_total=s_total,
+            r_total=r_total,
+            get_color=get_color,
+            # title="Correlação Base → Simulado → Real (espessura real)",
+            min_bins=1,
+            link_alpha=0.18
+        )
+
+        canvas4 = FigureCanvas(fig4)
+        l4.addWidget(canvas4)
+        tabs.addTab(tab4, "Correlação (m)")
+
+        return dialog
+    
+    def _compute_strat_links(self, fac_a, fac_b):
+        """
+        Cria links como SEGMENTOS contínuos em profundidade normalizada.
+        Retorna:
+        blocks_a: lista (s,e,fac)
+        blocks_b: lista (s,e,fac)
+        links: lista (a_idx, b_idx, s, e) onde [s,e) é o intervalo (em bins)
+                em que fac_a e fac_b ficam constantes.
+        """
+        import numpy as np
+
+        def blocks_from_series(f):
+            blocks = []
+            if len(f) == 0:
+                return blocks
+            start = 0
+            curr = int(f[0])
+            for i in range(1, len(f)):
+                if int(f[i]) != curr:
+                    blocks.append((start, i, curr))
+                    start = i
+                    curr = int(f[i])
+            blocks.append((start, len(f), curr))
+            return blocks
+
+        fac_a = np.asarray(fac_a).astype(int)
+        fac_b = np.asarray(fac_b).astype(int)
+        n = len(fac_a)
+
+        blocks_a = blocks_from_series(fac_a)
+        blocks_b = blocks_from_series(fac_b)
+
+        # map bin -> bloco
+        bin_to_a = np.empty(n, dtype=int)
+        for idx, (s, e, _) in enumerate(blocks_a):
+            bin_to_a[s:e] = idx
+
+        bin_to_b = np.empty(n, dtype=int)
+        for idx, (s, e, _) in enumerate(blocks_b):
+            bin_to_b[s:e] = idx
+
+        # links como "runs" contínuos de (a_idx, b_idx)
+        links = []
+        if n == 0:
+            return blocks_a, blocks_b, links
+
+        cur_a = int(bin_to_a[0])
+        cur_b = int(bin_to_b[0])
+        run_s = 0
+
+        for k in range(1, n):
+            a = int(bin_to_a[k])
+            b = int(bin_to_b[k])
+            if a != cur_a or b != cur_b:
+                links.append((cur_a, cur_b, run_s, k))  # [run_s, k)
+                cur_a, cur_b, run_s = a, b, k
+
+        links.append((cur_a, cur_b, run_s, n))
+        return blocks_a, blocks_b, links
+    
+    def _compute_bin_runs(self, fac_from, fac_to, n_bins):
+        """
+        Cria 'runs' contínuos ao longo dos bins onde (fac_from, fac_to) não muda.
+        Retorna lista de tuplas: (f_from, f_to, k0, k1) com intervalo [k0, k1).
+        """
+        import numpy as np
+
+        fac_from = np.asarray(fac_from).astype(int)
+        fac_to = np.asarray(fac_to).astype(int)
+
+        runs = []
+        if len(fac_from) == 0:
+            return runs
+
+        f0 = int(fac_from[0])
+        t0 = int(fac_to[0])
+        k_start = 0
+
+        for k in range(1, n_bins):
+            ff = int(fac_from[k])
+            tt = int(fac_to[k])
+            if ff != f0 or tt != t0:
+                runs.append((f0, t0, k_start, k))
+                f0, t0, k_start = ff, tt, k
+
+        runs.append((f0, t0, k_start, n_bins))
+        return runs
+
+
+    
+    def _plot_strat_correlation(
+        self, ax, n_bins,
+        blocks_left, blocks_mid, blocks_right,
+        links_lm, links_mr,
+        get_color,
+        min_bins=1,
+        link_alpha=0.25,
+        color_links_by="left"  # "left" ou "mid"
+    ):
+        import numpy as np
+        from matplotlib.patches import Rectangle, Polygon
+        from matplotlib.collections import PatchCollection
+
+        ax.set_title(title)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(1, 0)
+        ax.set_xticks([])
+        ax.set_yticks(np.linspace(0, 1, 6))
+        ax.set_ylabel("Profundidade normalizada")
+
+        xL0, xL1 = 0.05, 0.20
+        xM0, xM1 = 0.40, 0.55
+        xR0, xR1 = 0.75, 0.90
+
+        def draw_column(blocks, x0, x1, label):
+            patches = []
+            colors = []
+            for (s, e, fac) in blocks:
+                y0 = s / n_bins
+                y1 = e / n_bins
+                h = y1 - y0
+                patches.append(Rectangle((x0, y0), x1 - x0, h))
+                colors.append(get_color(fac))
+                if h > 0.05:
+                    ax.text((x0 + x1) / 2, y0 + h / 2, str(fac),
+                            ha='center', va='center', fontsize=9,
+                            color='white' if sum(get_color(fac)[:3]) < 1.5 else 'black',
+                            fontweight='bold')
+            col = PatchCollection(patches, match_original=True)
+            col.set_facecolors(colors)
+            col.set_edgecolor((0, 0, 0, 0.15))
+            ax.add_collection(col)
+            ax.text((x0 + x1) / 2, -0.04, label, ha="center", va="top", fontsize=10)
+
+        draw_column(blocks_left, xL0, xL1, "Base")
+        draw_column(blocks_mid,  xM0, xM1, "Simulado")
+        draw_column(blocks_right,xR0, xR1, "Real")
+
+        # Helpers para pegar facies de um bloco
+        def fac_of(blocks, idx):
+            return int(blocks[idx][2])
+
+        def draw_links(x_from, x_to, blocks_from, blocks_to, links, color_mode):
+            for (iA, iB, s, e) in links:
+                w = e - s
+                if w < min_bins:
+                    continue
+
+                y0 = s / n_bins
+                y1 = e / n_bins
+
+                # faixa com mesma altura exata do intervalo
+                # (conecta a borda direita da coluna origem à borda esquerda da coluna destino)
+                poly = Polygon([
+                    (x_from, y0),
+                    (x_to,   y0),
+                    (x_to,   y1),
+                    (x_from, y1),
+                ], closed=True)
+
+                if color_mode == "left":
+                    rgba = get_color(fac_of(blocks_from, iA))
+                else:
+                    rgba = get_color(fac_of(blocks_to, iB))
+
+                # deixa mais transparente
+                poly.set_facecolor((rgba[0], rgba[1], rgba[2], link_alpha))
+                poly.set_edgecolor(None)
+                ax.add_patch(poly)
+
+        # Base -> Sim (cor pelo Base)
+        draw_links(xL1, xM0, blocks_left, blocks_mid, links_lm, "left")
+
+        # Sim -> Real (cor pelo Sim)
+        draw_links(xM1, xR0, blocks_mid, blocks_right, links_mr, "left")
+
+    def _plot_strat_correlation_real_depth(
+        self,
+        ax,
+        n_bins,
+        base_fac_bins, sim_fac_bins, real_fac_bins,
+        b_total, s_total, r_total,
+        get_color,
+        min_bins=2,
+        link_alpha=0.22,
+        well_width_px=85,   # <<< largura "máxima" em pixels (ajuste aqui)
+        gap_px=110          # <<< afastamento entre poços em pixels (ajuste aqui)
+    ):
+        import numpy as np
+        from matplotlib.patches import Rectangle, Polygon
+        from matplotlib.collections import PatchCollection
+
+        def compute_bin_runs(f_from, f_to, n_bins_):
+            f_from = np.asarray(f_from).astype(int)
+            f_to = np.asarray(f_to).astype(int)
+            runs_ = []
+            if len(f_from) == 0:
+                return runs_
+            cur_from = int(f_from[0])
+            cur_to = int(f_to[0])
+            k0 = 0
+            for k in range(1, n_bins_):
+                ff = int(f_from[k])
+                tt = int(f_to[k])
+                if ff != cur_from or tt != cur_to:
+                    runs_.append((cur_from, cur_to, k0, k))
+                    cur_from, cur_to, k0 = ff, tt, k
+            runs_.append((cur_from, cur_to, k0, n_bins_))
+            return runs_
+
+        base_fac_bins = np.asarray(base_fac_bins).astype(int)
+        sim_fac_bins  = np.asarray(sim_fac_bins).astype(int)
+        real_fac_bins = np.asarray(real_fac_bins).astype(int)
+
+        g_max = max(b_total, s_total, r_total)
+
+        # ---------------- Layout geral ----------------
+        # ax.set_title(title, pad=16, fontsize=12)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(g_max, 0)
+        ax.set_xticks([])
+        ax.set_yticks(np.linspace(0, g_max, 10))
+        ax.set_ylabel("Espessura (m)")
+
+        # remove bordas pretas
+        for side in ("top", "right", "bottom"):
+            ax.spines[side].set_visible(False)
+
+        # ---------------- Largura em px -> fração do eixo ----------------
+        fig = ax.figure
+        dpi = fig.get_dpi()
+        fig_w_px = fig.get_size_inches()[0] * dpi
+
+        left_margin = 0.10
+        right_margin = 0.90
+        avail = right_margin - left_margin
+
+        w_frac = well_width_px / fig_w_px
+        gap_frac = gap_px / fig_w_px
+
+        total_needed = 3 * w_frac + 2 * gap_frac
+        if total_needed > avail:
+            scale = avail / total_needed
+            w_frac *= scale
+            gap_frac *= scale
+
+        # posições finais (3 poços)
+        xL0 = left_margin
+        xL1 = xL0 + w_frac
+        xM0 = xL1 + gap_frac
+        xM1 = xM0 + w_frac
+        xR0 = xM1 + gap_frac
+        xR1 = xR0 + w_frac
+
+        def blocks_from_bins(f_bins):
+            blocks = []
+            if len(f_bins) == 0:
+                return blocks
+            start = 0
+            curr = int(f_bins[0])
+            for k in range(1, len(f_bins)):
+                if int(f_bins[k]) != curr:
+                    blocks.append((start, k, curr))
+                    start = k
+                    curr = int(f_bins[k])
+            blocks.append((start, len(f_bins), curr))
+            return blocks
+
+        def draw_column_from_bins(f_bins, total, x0, x1, label):
+            blocks = blocks_from_bins(f_bins)
+            patches, colors = [], []
+
+            for (k0, k1, fac) in blocks:
+                y0 = (k0 / n_bins) * total
+                y1 = (k1 / n_bins) * total
+                h = y1 - y0
+                if h <= 0:
+                    continue
+                patches.append(Rectangle((x0, y0), x1 - x0, h))
+                colors.append(get_color(fac))
+
+                if h > 0.05 * g_max:
+                    ax.text((x0 + x1) / 2, y0 + h / 2, str(fac),
+                            ha='center', va='center', fontsize=9,
+                            color='white' if sum(get_color(fac)[:3]) < 1.5 else 'black',
+                            fontweight='bold')
+
+            col = PatchCollection(patches, match_original=True)
+            col.set_facecolors(colors)
+            col.set_edgecolor("none")
+            ax.add_collection(col)
+
+            # textos no topo, sem sobrepor
+            ax.text((x0 + x1) / 2, -0.055 * g_max, label,
+                    ha="center", va="top", fontsize=10)
+            ax.text((x0 + x1) / 2, -0.025 * g_max, f"{total:.1f}m",
+                    ha="center", va="top", fontsize=10, fontweight="bold")
+
+        # colunas
+        draw_column_from_bins(base_fac_bins, b_total, xL0, xL1, "Base")
+        draw_column_from_bins(sim_fac_bins,  s_total, xM0, xM1, "Simul")
+        draw_column_from_bins(real_fac_bins, r_total, xR0, xR1, "Real")
+
+        # links
+        runs_bs = compute_bin_runs(base_fac_bins, sim_fac_bins, n_bins)
+        runs_sr = compute_bin_runs(sim_fac_bins, real_fac_bins, n_bins)
+
+        def draw_links(runs, x_from, x_to, total_from, total_to):
+            for (f_from, f_to, k0, k1) in runs:
+                w = k1 - k0
+                if w < min_bins:
+                    continue
+
+                y0_from = (k0 / n_bins) * total_from
+                y1_from = (k1 / n_bins) * total_from
+                y0_to   = (k0 / n_bins) * total_to
+                y1_to   = (k1 / n_bins) * total_to
+
+                rgba = get_color(f_from)
+                face = (rgba[0], rgba[1], rgba[2], link_alpha)
+
+                poly = Polygon([
+                    (x_from, y0_from),
+                    (x_to,   y0_to),
+                    (x_to,   y1_to),
+                    (x_from, y1_from),
+                ], closed=True, facecolor=face, edgecolor=None)
+                ax.add_patch(poly)
+
+        draw_links(runs_bs, xL1, xM0, b_total, s_total)  # Base -> Sim
+        draw_links(runs_sr, xM1, xR0, s_total, r_total)  # Sim -> Real
+
+    def _drop_last_block(self, depth, facies):
+        """
+        Remove o último bloco contínuo de fácies (última camada do barcode).
+        """
+        import numpy as np
+        depth = np.asarray(depth, dtype=float)
+        facies = np.asarray(facies).astype(int)
+
+        if len(depth) < 2 or len(facies) < 2:
+            return depth, facies
+
+        last = int(facies[-1])
+        i0 = len(facies) - 1
+        while i0 > 0 and int(facies[i0 - 1]) == last:
+            i0 -= 1
+
+        # se tudo é um bloco só, não corta
+        if i0 <= 0:
+            return depth, facies
+
+        return depth[:i0], facies[:i0]
+
+
