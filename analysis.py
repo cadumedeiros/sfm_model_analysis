@@ -40,6 +40,51 @@ def _get_cell_z_coords(target_grid=None):
     g = target_grid if target_grid is not None else grid
     return g.cell_centers().points[:, 2]
 
+def _get_cell_thickness(target_grid=None):
+    """
+    Retorna espessura por cÃ©lula priorizando o campo fornecido pelo grid
+    (`StratigraphicThickness`). Se nÃ£o existir, calcula a partir dos vÃ©rtices
+    e cacheia em `cell_thickness`.
+    """
+    g = target_grid if target_grid is not None else grid
+
+    # PreferÃªncia: usar diretamente a propriedade vinda do grid
+    for key in ("StratigraphicThickness", "stratigraphic_thickness"):
+        if key in g.cell_data:
+            arr = np.asarray(g.cell_data[key], dtype=float)
+            if arr is not None and len(arr) == g.n_cells:
+                return arr
+
+    # Cache local
+    for key in ("cell_thickness", "CellThickness", "thickness"):
+        if key in g.cell_data:
+            arr = g.cell_data[key]
+            if arr is not None and len(arr) == g.n_cells:
+                return arr
+
+    thick = np.zeros(g.n_cells, dtype=float)
+    for cid in range(g.n_cells):
+        try:
+            cell = g.get_cell(cid)
+            pts = np.asarray(cell.points)
+        except Exception:
+            continue
+        if pts.size == 0:
+            continue
+
+        z_vals = pts[:, 2] if pts.ndim == 2 and pts.shape[1] >= 3 else np.asarray(pts)
+        if z_vals.size >= 8:
+            bottom = np.partition(z_vals, 4)[:4].mean()
+            top = np.partition(z_vals, -4)[-4:].mean()
+        else:
+            bottom = float(np.min(z_vals))
+            top = float(np.max(z_vals))
+
+        thick[cid] = max(0.0, float(top - bottom))
+
+    g.cell_data["cell_thickness"] = thick
+    return thick
+
 def _calc_stats_for_subset(subset_mask, volumes, z_coords):
     """Calcula estatísticas básicas (Cells, Vol, Thickness) para um subconjunto."""
     count = int(subset_mask.sum())
@@ -575,6 +620,7 @@ def sample_well_from_grid_resampled(
     step=0.1,
     scalar_name="Facies",
     tolerance=5.0,
+    return_cell_ids=False,
 ):
     import numpy as np
     import pyvista as pv
@@ -606,6 +652,17 @@ def sample_well_from_grid_resampled(
     sampled = cloud.sample(grid_source, tolerance=float(tolerance))
     fac = sampled.point_data.get(scalar_name, np.zeros(len(depth_res)))
 
+    cell_ids = None
+    if return_cell_ids:
+        if "vtkOriginalCellIds" in sampled.point_data:
+            cell_ids = np.asarray(sampled.point_data["vtkOriginalCellIds"]).astype(int)
+        elif "vtkOriginalCellIds" in sampled.cell_data:
+            cell_ids = np.asarray(sampled.cell_data["vtkOriginalCellIds"]).astype(int)
+        else:
+            cell_ids = np.full(len(depth_res), -1, dtype=int)
+
+    if return_cell_ids:
+        return depth_res, fac, cell_ids
     return depth_res, fac
 
 
@@ -696,4 +753,3 @@ def estimate_probe_tolerance_from_grid(grid, factor=0.9):
     diag = min(diag, max(b[1]-b[0], b[3]-b[2], b[5]-b[4]) * 0.1)
 
     return max(1e-6, factor * diag)
-

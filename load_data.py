@@ -1,113 +1,227 @@
 # load_data.py
-import pyvista as pv
+"""
+Centraliza o carregamento de GRDECL e mantém compatibilidade com o resto do projeto.
+
+IMPORTANTE:
+- Muitos arquivos importam diretamente: from load_data import grid, facies, nx, ny, nz
+  Então este módulo inicializa esses globais no import.
+- Facies e StratigraphicThickness são lidos do texto do GRDECL (pv.read_grdecl nem sempre popula cell_data).
+- A inversão em Z (K) é controlada por flip_k. O segredo é usar SEMPRE o mesmo flip_k
+  para base e para modelos carregados pela UI.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Tuple
+
 import numpy as np
+import pyvista as pv
+
 from config import ANCHOR_Y, APPLY_REFLECTION
 
-# Z Settings (Originais - sem alteração)
-Z_FACTOR = 1.0     
-Z_SHIFT  = 0.0      
-# --------------------------------------
 
-grdecl_path = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
+# =========================
+# Defaults do projeto
+# =========================
+DEFAULT_GRDECL_PATH = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
 
-print(f"Lendo Grid: {grdecl_path}...")
-grid = pv.read_grdecl(grdecl_path)
-print(f"Bounds Originais: {grid.bounds}")
+# Se suas fácies aparecem invertidas em Z, este é o knob principal.
+# Você relatou que: load_grid_from_grdecl(..., flip_k=True) "deu certo"
+FLIP_K_DEFAULT = True
 
-# --- APLICAÇÃO DA TRANSFORMAÇÃO ---
-if APPLY_REFLECTION:
-    grid.points[:, 1] = (2 * ANCHOR_Y) - grid.points[:, 1]
-    print(f">>> Grid Refletido Y (Pivô {ANCHOR_Y})")
+# Debug prints
+VERBOSE_DEFAULT = True
 
-# Ajuste de Z (apenas se precisar no futuro, por padrão fator=1 não faz nada)
-if Z_FACTOR != 1.0 or Z_SHIFT != 0.0:
-    grid.points[:, 2] = (grid.points[:, 2] * Z_FACTOR) + Z_SHIFT
 
-print(f"Bounds Finais:    {grid.bounds}")
+# =========================
+# GRDECL parsing helpers
+# =========================
 
-def load_grid_from_grdecl(path, facies_keyword="Facies"):
+_RE_REPEAT = re.compile(
+    r"^(?P<n>\d+)\*(?P<val>[-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)$"
+)
+
+def _tokenize_keyword_block(lines: list[str]) -> list[str]:
+    """Coleta tokens após uma keyword até o terminador '/'."""
+    tokens: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+
+        # corta no terminador
+        if "/" in s:
+            s = s.split("/", 1)[0].strip()
+
+        if s:
+            tokens.extend(s.split())
+
+        if "/" in line:
+            break
+
+    return tokens
+
+def _expand_repeats(tokens: list[str]) -> list[str]:
+    """Expande tokens do tipo '10*3.5' para ['3.5', ...] (10x)."""
+    out: list[str] = []
+    for t in tokens:
+        m = _RE_REPEAT.match(t)
+        if m:
+            n = int(m.group("n"))
+            val = m.group("val")
+            out.extend([val] * n)
+        else:
+            out.append(t)
+    return out
+
+def read_specgrid(grdecl_path: str) -> Tuple[int, int, int]:
+    """Lê (nx, ny, nz) a partir de SPECGRID."""
+    with open(grdecl_path, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+
+    m = re.search(r"\bSPECGRID\b", text, flags=re.IGNORECASE)
+    if not m:
+        raise ValueError("SPECGRID não encontrado no GRDECL.")
+
+    after = text[m.end():].splitlines()
+    tokens = _tokenize_keyword_block(after)
+
+    if len(tokens) < 3:
+        raise ValueError("SPECGRID inválido (faltam nx, ny, nz).")
+
+    nx, ny, nz = map(int, tokens[:3])
+    return nx, ny, nz
+
+def read_keyword_array(grdecl_path: str, keyword: str, dtype=float) -> np.ndarray:
+    """Lê um array numérico de uma keyword (suporta 'n*valor')."""
+    with open(grdecl_path, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+
+    m = re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE)
+    if not m:
+        raise KeyError(f"Keyword '{keyword}' não encontrado no GRDECL.")
+
+    after = text[m.end():].splitlines()
+    tokens = _tokenize_keyword_block(after)
+    tokens = _expand_repeats(tokens)
+
+    # Trata expoente Fortran D (1.0D+03)
+    def _to_float(tok: str) -> float:
+        return float(tok.replace("D", "E").replace("d", "e"))
+
+    if dtype in (float, np.float32, np.float64):
+        return np.array([_to_float(t) for t in tokens], dtype=float)
+
+    # int
+    return np.array([int(_to_float(t)) for t in tokens], dtype=int)
+
+def _reshape_flat(arr1d: np.ndarray, nx: int, ny: int, nz: int, *, flip_k: bool, dtype) -> np.ndarray:
     """
-    Carrega um GRDECL COMPLETO (geometria + facies), aplicando as mesmas
-    transformações usadas no grid base (reflexão Y / ajuste de Z).
+    Reorganiza o array 1D (GRDECL) para o mesmo ordering do pv.read_grdecl.
 
-    Retorna:
-        grid (pyvista.UnstructuredGrid), facies_1d (np.ndarray int)
+    Convenção: GRDECL -> I mais rápido, depois J, depois K.
+    A gente reshape para (nz, ny, nx) e ravel em C.
+    flip_k=True inverte o eixo K (Z) para corrigir inversão.
     """
-    # 1) Geometria (isso traz ZCORN/COORD -> pontos corretos)
-    g = pv.read_grdecl(path)
+    expected = nx * ny * nz
+    if arr1d.size != expected:
+        raise ValueError(f"Tamanho do array ({arr1d.size}) != nx*ny*nz ({expected}).")
 
-    # 2) Aplica as MESMAS transformações do base (pra manter o mesmo referencial)
-    if APPLY_REFLECTION:
-        g.points[:, 1] = (2 * ANCHOR_Y) - g.points[:, 1]
+    a = np.asarray(arr1d, dtype=dtype).reshape((nz, ny, nx), order="C")
 
-    if Z_FACTOR != 1.0 or Z_SHIFT != 0.0:
-        g.points[:, 2] = (g.points[:, 2] * Z_FACTOR) + Z_SHIFT
+    if flip_k:
+        a = a[::-1, :, :]
 
-    # 3) Lê facies e reorganiza igual ao base
-    fac = read_keyword_array(path, facies_keyword)
-    nx2, ny2, nz2 = read_specgrid(path)  # retorna iterável -> desempacota ok
+    return a.ravel(order="C")
 
-    fac_3d = fac.reshape((nx2, ny2, nz2), order="F")
-    fac_3d = fac_3d[:, :, ::-1]  # inverte K como você já faz
-    fac_1d = fac_3d.reshape(-1, order="F").astype(int)
 
-    # 4) Atribui no grid
+# =========================
+# High-level loaders
+# =========================
+
+def load_grid_from_grdecl(
+    grdecl_path: str,
+    *,
+    facies_keyword: str = "Facies",
+    thickness_keyword: str = "StratigraphicThickness",
+    flip_k: bool = FLIP_K_DEFAULT,
+    apply_reflection: bool = APPLY_REFLECTION,
+    anchor_y: float = ANCHOR_Y,
+    verbose: bool = VERBOSE_DEFAULT,
+):
+    """
+    Carrega geometria + Facies (+ StratigraphicThickness se existir).
+
+    RETORNO (fixo, 2 valores):
+        grid, facies_1d
+    """
+    if verbose:
+        print(f"\nLendo Grid: {grdecl_path}...")
+
+    g = pv.read_grdecl(grdecl_path)
+
+    # Reflexão em Y (se seu projeto usa isso)
+    if apply_reflection:
+        pts = g.points.copy()
+        pts[:, 1] = 2.0 * float(anchor_y) - pts[:, 1]
+        g.points = pts
+        if verbose:
+            print(f">>> Grid Refletido Y (Pivô {anchor_y})")
+
+    if verbose:
+        print("Bounds Finais:   ", g.bounds)
+
+    nx_, ny_, nz_ = read_specgrid(grdecl_path)
+
+    # Facies
+    fac_raw = read_keyword_array(grdecl_path, facies_keyword, dtype=float)
+    fac_1d = _reshape_flat(fac_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=int)
     g.cell_data["Facies"] = fac_1d
+
+    # Thickness (opcional)
+    try:
+        th_raw = read_keyword_array(grdecl_path, thickness_keyword, dtype=float)
+        th_1d = _reshape_flat(th_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=float)
+        g.cell_data["StratigraphicThickness"] = th_1d
+        g.cell_data["cell_thickness"] = th_1d  # alias conveniente
+    except KeyError:
+        if verbose:
+            print(f"[INFO] Keyword '{thickness_keyword}' não existe neste GRDECL.")
+    except Exception as e:
+        if verbose:
+            print(f"[WARN] Falha ao ler '{thickness_keyword}': {e}")
+
+    if verbose:
+        print("has StratigraphicThickness?", "StratigraphicThickness" in g.cell_data)
+        print("cell_data keys sample:", list(g.cell_data.keys())[:10])
+        if "StratigraphicThickness" in g.cell_data:
+            a = g.cell_data["StratigraphicThickness"]
+            print(f"StratigraphicThickness: n={a.size} min={float(np.nanmin(a))} max={float(np.nanmax(a))}")
 
     return g, fac_1d
 
 
-# --- FUNÇÕES DE LEITURA DE PROPRIEDADES (Mantidas Iguais) ---
-def read_keyword_array(path, keyword="Facies"):
-    vals = []
-    inside = False
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line_strip = line.strip()
-            if not inside and line_strip.upper().startswith(keyword.upper()):
-                inside = True
-                line_strip = line_strip[len(keyword):].strip()
-            if inside:
-                if "/" in line_strip:
-                    before_slash = line_strip.split("/")[0]
-                    if before_slash: vals.extend(before_slash.split())
-                    break
-                else:
-                    if line_strip: vals.extend(line_strip.split())
-    return np.array([int(float(v)) for v in vals if v], dtype=int)
+def load_facies_from_grdecl(
+    grdecl_path: str,
+    *,
+    facies_keyword: str = "Facies",
+    flip_k: bool = FLIP_K_DEFAULT,
+):
+    """Compat: alguns lugares importam essa função."""
+    nx_, ny_, nz_ = read_specgrid(grdecl_path)
+    fac_raw = read_keyword_array(grdecl_path, facies_keyword, dtype=float)
+    fac_1d = _reshape_flat(fac_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=int)
+    return fac_1d, nx_, ny_, nz_
 
-def read_specgrid(path):
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if line.strip().upper().startswith("SPECGRID"):
-                nums = []
-                while True:
-                    l2 = next(f).strip()
-                    if "/" in l2: 
-                        nums.extend(l2.split("/")[0].split())
-                        break
-                    nums.extend(l2.split())
-                return map(int, nums[:3])
-    return 1,1,1
 
-facies = read_keyword_array(grdecl_path, "Facies")
-nx, ny, nz = read_specgrid(grdecl_path)
+# =========================
+# Backward-compatible globals
+# =========================
 
-# Se o espelhamento geométrico inverteu o Y físico, 
-# o array de dados (facies) também precisa acompanhar a inversão no eixo J?
-# Geralmente o PyVista mapeia célula a célula pela ordem dos pontos.
-# Vamos manter o padrão. Se as fácies ficarem "espelhadas" visualmente (argila onde devia ter areia),
-# precisaremos inverter o eixo 1 aqui: facies_3d[:, ::-1, ::-1]
-facies_3d = facies.reshape((nx, ny, nz), order="F")   
-facies_3d = facies_3d[:, :, ::-1] # Inverte Z (K)
-facies = facies_3d.reshape(-1, order="F")             
+def _init_default_globals():
+    g, f = load_grid_from_grdecl(DEFAULT_GRDECL_PATH, flip_k=FLIP_K_DEFAULT, verbose=VERBOSE_DEFAULT)
+    nx_, ny_, nz_ = read_specgrid(DEFAULT_GRDECL_PATH)
+    return g, f, nx_, ny_, nz_
 
-grid.cell_data["Facies"] = facies
-
-def load_facies_from_grdecl(path):
-    fac = read_keyword_array(path, "Facies")
-    nx2, ny2, nz2 = read_specgrid(path)
-    fac_3d = fac.reshape((nx2, ny2, nz2), order="F")
-    fac_3d = fac_3d[:, :, ::-1]
-    fac_1d = fac_3d.reshape(-1, order="F")
-    return fac_1d
+grid, facies, nx, ny, nz = _init_default_globals()

@@ -8,15 +8,17 @@ import pandas as pd
 from scipy.ndimage import label, generate_binary_structure
 from matplotlib.colors import ListedColormap
 
-from visualize import run, get_2d_clim, make_clusters_lut, compute_cluster_sizes
-from load_data import facies, nx, ny, nz, load_facies_from_grdecl
+from visualize import run, get_2d_clim, make_clusters_lut, compute_cluster_sizes, prepare_grid_indices
+from load_data import facies, nx, ny, nz
 from config import load_facies_colors, load_markers
+
 from analysis import (
     facies_distribution_array,
     reservoir_facies_distribution_array,
     compute_global_metrics_for_array,
     _get_cell_volumes,
     _get_cell_z_coords,
+    _get_cell_thickness,
     sample_well_from_grid, 
     calculate_well_accuracy,
     print_layers
@@ -459,126 +461,258 @@ class MainWindow(QtWidgets.QMainWindow):
                 name="well_labels"
             )
 
+    def _pick_reference_xy_for_well_report(self, well, markers):
+        """
+        Escolhe (X,Y) de referência do poço para comparar com a coluna do grid.
+        Preferência:
+        1) ponto no meio do intervalo [top_marker, base_marker] (em DEPT/md)
+        2) primeiro ponto do well.data
+        """
+        import numpy as np
+
+        if well is None or well.data is None or well.data.empty:
+            return None
+
+        df = well.data
+
+        # tenta usar marcador (md) se existir
+        dept_mid = None
+        if markers:
+            mds = sorted([m.get("md") for m in markers if m.get("md") is not None])
+            if len(mds) >= 2:
+                dept_mid = 0.5 * (float(mds[0]) + float(mds[-1]))
+
+        if dept_mid is not None and "DEPT" in df.columns:
+            dept = df["DEPT"].to_numpy(dtype=float)
+            i = int(np.argmin(np.abs(dept - dept_mid)))
+            x = float(df.iloc[i]["X"])
+            y = float(df.iloc[i]["Y"])
+            return x, y
+
+        # fallback: primeiro ponto
+        try:
+            x = float(df.iloc[0]["X"])
+            y = float(df.iloc[0]["Y"])
+            return x, y
+        except Exception:
+            return None
+
+
+    def _column_profile_from_grid(self, grid, x, y):
+        """
+        Retorna um perfil vertical topo->base na coluna (i,j) mais próxima do ponto (x,y),
+        usando StratigraphicThickness (preferencial) e Facies do grid.
+
+        Saídas:
+        depth_profile: array (em metros, começando em 0 no topo do grid)
+        fac_profile:   array (mesmo comprimento, facies em degraus)
+        ttot_active:   espessura total ativa (exclui facies == 0)
+        """
+        import numpy as np
+        import pyvista as pv
+        from visualize import prepare_grid_indices
+
+        if grid is None:
+            return np.array([]), np.array([]), 0.0
+
+        g = grid.copy()
+
+        # garante índices estruturais (i_index/j_index/k_index)
+        try:
+            prepare_grid_indices(g)
+        except Exception:
+            pass
+
+        # facies
+        fac = g.cell_data.get("Facies", None)
+        if fac is None:
+            fac = np.zeros(g.n_cells, dtype=int)
+        else:
+            fac = np.asarray(fac).astype(int)
+
+        # thickness: prioridade StratigraphicThickness
+        th = None
+        if "StratigraphicThickness" in g.cell_data:
+            th = np.asarray(g.cell_data["StratigraphicThickness"], dtype=float)
+        elif "cell_thickness" in g.cell_data:
+            th = np.asarray(g.cell_data["cell_thickness"], dtype=float)
+
+        if th is None or len(th) != g.n_cells:
+            th = np.zeros(g.n_cells, dtype=float)
+
+        # precisa de i/j para selecionar coluna
+        i_idx = g.cell_data.get("i_index", None)
+        j_idx = g.cell_data.get("j_index", None)
+        if i_idx is None or j_idx is None:
+            return np.array([]), np.array([]), 0.0
+
+        i_idx = np.asarray(i_idx).astype(int)
+        j_idx = np.asarray(j_idx).astype(int)
+
+        # acha célula mais próxima em XY (z no meio do bound)
+        b = g.bounds
+        z_mid = 0.5 * (float(b[4]) + float(b[5]))
+        try:
+            cid0 = int(g.find_closest_cell((float(x), float(y), float(z_mid))))
+        except Exception:
+            try:
+                p = pv.PolyData(np.array([[float(x), float(y), float(z_mid)]]))
+                samp = p.sample(g, tolerance=1e9)
+                if "vtkOriginalCellIds" in samp.point_data:
+                    cid0 = int(np.asarray(samp.point_data["vtkOriginalCellIds"])[0])
+                else:
+                    cid0 = 0
+            except Exception:
+                return np.array([]), np.array([]), 0.0
+
+        i0 = int(i_idx[cid0])
+        j0 = int(j_idx[cid0])
+
+        # pega todos os cells da coluna (i0,j0)
+        ids = np.where((i_idx == i0) & (j_idx == j0))[0]
+        if ids.size == 0:
+            return np.array([]), np.array([]), 0.0
+
+        # ordena topo -> base pelo Z do centro da célula (robusto contra flip_k/k_index invertido)
+        zc = g.cell_centers().points[:, 2].astype(float)
+        ids = ids[np.argsort(zc[ids])[::-1]]  # topo primeiro
+
+        # REMOVE SEMPRE A ÚLTIMA CÉLULA (a mais profunda), que é a “camada extra” que você quer cortar
+        if ids.size >= 2:
+            ids = ids[:-1]
+
+        # monta perfil em degraus (0 no topo)
+        depth_out = []
+        fac_out = []
+        cum = 0.0
+
+        for cid in ids:
+            t = float(th[cid]) if np.isfinite(th[cid]) else 0.0
+            f = int(fac[cid])
+
+            depth_out.extend([cum, cum + t])
+            fac_out.extend([f, f])
+            cum += t
+
+        depth_out = np.asarray(depth_out, dtype=float)
+        fac_out = np.asarray(fac_out, dtype=int)
+
+        # espessura total ativa (exclui facies 0)
+        mask_active = (fac[ids] != 0) & np.isfinite(th[ids])
+        ttot_active = float(np.sum(th[ids][mask_active])) if ids.size else 0.0
+
+        return depth_out, fac_out, ttot_active
+
+
+
+
     def show_well_comparison_report(self, well_name, model_key="base"):
         """
         Relatório BASE vs SIM vs REAL.
-        - Base e Sim amostrados no grid correspondente (com resampling fino).
-        - Real limitado por marcadores (se compatíveis com o DEPT do poço).
+
+        NOVA LÓGICA (robusta):
+        - REAL: continua limitado pelos marcadores (quando compatíveis).
+        - BASE e SIM: NÃO dependem de interseção geométrica do poço com o grid.
+        Sempre pegam a coluna (i,j) mais próxima do (X,Y) de referência do poço
+        e constroem o perfil topo->base usando StratigraphicThickness.
         """
         import numpy as np
         from PyQt5 import QtWidgets
-        from analysis import (
-            sample_well_from_grid,
-            sample_well_from_grid_resampled,
-            estimate_probe_tolerance_from_grid,
-        )
 
         well = self.wells.get(well_name)
-        if not well:
+        if not well or well.data is None or well.data.empty:
             return
 
         # ------------------------------------------------------------
-        # 1) Define grids (ANTES de usar qualquer variável)
+        # 1) Define grids
         # ------------------------------------------------------------
-        from load_data import grid as grid_base_source
+        from load_data import grid as base_grid
 
-        base_grid = self.models.get("base", {}).get("grid", grid_base_source)
+        if base_grid is None:
+            QtWidgets.QMessageBox.warning(self, "Aviso", "Grid BASE não carregado.")
+            return
 
+        # grid do modelo simulado selecionado (ou base como fallback)
+        grid_sim_source = None
         if model_key == "base":
             grid_sim_source = base_grid
         else:
             grid_sim_source = self.models.get(model_key, {}).get("grid", None) or base_grid
 
         # ------------------------------------------------------------
-        # 2) REAL + marcadores
+        # 2) Marcadores e REAL (mantém sua lógica existente)
         # ------------------------------------------------------------
         markers = self.markers_db.get(well_name, [])
-        full_depth = well.data["DEPT"].values
 
+        full_depth = well.data["DEPT"].to_numpy(dtype=float) if "DEPT" in well.data.columns else None
+        if full_depth is None or full_depth.size == 0:
+            QtWidgets.QMessageBox.warning(self, "Aviso", "Poço sem coluna DEPT para relatório.")
+            return
+
+        # escolher qual coluna do LAS usar como facies real
+        col_real = None
         if "fac" in well.data.columns:
             col_real = "fac"
         elif "lito_upscaled" in well.data.columns:
             col_real = "lito_upscaled"
-        else:
-            col_real = None
 
-        full_real = well.data[col_real].values if col_real is not None else np.zeros_like(full_depth)
+        full_real = well.data[col_real].to_numpy() if col_real is not None else np.zeros_like(full_depth)
 
-        # tenta aplicar marcadores SOMENTE se eles estiverem no mesmo range do DEPT
+        # default: usa tudo
         real_depth0 = full_depth
         real_facies0 = full_real
 
+        # aplica marcadores somente se compatíveis
         if markers:
-            mds = sorted([m["md"] for m in markers if "md" in m])
+            mds = sorted([m.get("md") for m in markers if m.get("md") is not None])
             if len(mds) >= 2:
-                top_md, base_md = mds[0], mds[-1]
-
-                # só aplica se "parecer" compatível com o DEPT do poço
+                top_md, base_md = float(mds[0]), float(mds[-1])
                 dmin, dmax = float(full_depth.min()), float(full_depth.max())
-                if (top_md <= dmax + 1e-6) and (base_md >= dmin - 1e-6):
-                    mask_real0 = (full_depth >= top_md) & (full_depth <= base_md)
-                    real_depth0 = full_depth[mask_real0]
-                    real_facies0 = full_real[mask_real0]
+                if (top_md <= dmax + 1e-6) and (base_md >= dmin - 1e-6) and (base_md > top_md):
+                    mask_r = (full_depth >= top_md) & (full_depth <= base_md)
+                    real_depth0 = full_depth[mask_r]
+                    real_facies0 = full_real[mask_r]
 
         # ------------------------------------------------------------
-        # 3) BASE e SIM com resampling fino (sem z_exag)
+        # 3) BASE e SIM: perfil por coluna (i,j) via StratigraphicThickness
         # ------------------------------------------------------------
-        step = 0.05
-
-        tol_base = estimate_probe_tolerance_from_grid(base_grid, factor=0.9)
-        tol_sim  = estimate_probe_tolerance_from_grid(grid_sim_source, factor=0.9)
-
-        base_depth_res, base_facies_res = sample_well_from_grid_resampled(
-            well.data, base_grid, step=step, tolerance=tol_base
-        )
-        sim_depth_res, sim_facies_res = sample_well_from_grid_resampled(
-            well.data, grid_sim_source, step=step, tolerance=tol_sim
-        )
-
-        # fallback antigo se algo falhar
-        if base_depth_res is None or base_facies_res is None:
-            full_base = sample_well_from_grid(well.data, base_grid)
-            if full_base is None:
-                full_base = np.zeros_like(full_depth)
-            mask_b = (~np.isnan(full_base)) & (full_base != 0)
-            base_depth = full_depth[mask_b]
-            base_facies = full_base[mask_b].astype(int)
-        else:
-            mask_b = (~np.isnan(base_facies_res)) & (base_facies_res != 0)
-            base_depth = base_depth_res[mask_b]
-            base_facies = base_facies_res[mask_b].astype(int)
-
-        if sim_depth_res is None or sim_facies_res is None:
-            full_sim = sample_well_from_grid(well.data, grid_sim_source)
-            if full_sim is None:
-                full_sim = np.zeros_like(full_depth)
-            mask_s = (~np.isnan(full_sim)) & (full_sim != 0)
-            sim_depth = full_depth[mask_s]
-            sim_facies = full_sim[mask_s].astype(int)
-        else:
-            mask_s = (~np.isnan(sim_facies_res)) & (sim_facies_res != 0)
-            sim_depth = sim_depth_res[mask_s]
-            sim_facies = sim_facies_res[mask_s].astype(int)
-
-        # REAL (não precisa resample aqui; seu report já lida)
-        mask_r = (~np.isnan(real_facies0)) & (real_facies0 != 0)
-        real_depth = real_depth0[mask_r]
-        real_facies = real_facies0[mask_r].astype(int) if hasattr(real_facies0, "astype") else real_facies0[mask_r]
-
-        if len(sim_facies) == 0 and len(base_facies) == 0:
-            QtWidgets.QMessageBox.warning(self, "Aviso", "Poço sem interseção válida no grid.")
+        xy = self._pick_reference_xy_for_well_report(well, markers)
+        if xy is None:
+            QtWidgets.QMessageBox.warning(self, "Aviso", "Não consegui obter (X,Y) do poço para comparação.")
             return
+
+        xref, yref = xy
+
+        base_depth, base_facies, base_ttot = self._column_profile_from_grid(base_grid, xref, yref)
+        sim_depth,  sim_facies,  sim_ttot  = self._column_profile_from_grid(grid_sim_source, xref, yref)
+
+        # Se não tiver coluna válida (muito fora do grid), não interrompe: segue com arrays vazios
+        if base_depth.size == 0 and sim_depth.size == 0:
+            # aqui você pode escolher: seguir mesmo assim ou avisar.
+            # Vou avisar, mas sem dar "return" se você quiser manter a UI abrindo.
+            QtWidgets.QMessageBox.information(
+                self,
+                "Info",
+                "Não encontrei coluna válida no grid para o (X,Y) de referência do poço.\n"
+                "O relatório será aberto sem BASE/SIM."
+            )
+
+        # ------------------------------------------------------------
+        # 4) Prepara REAL (formato esperado pelo report)
+        # ------------------------------------------------------------
+        # converte facies real para int se possível
+        try:
+            real_facies = real_facies0.astype(int)
+        except Exception:
+            real_facies = real_facies0
+
+        real_depth = real_depth0
         
-        base_depth, base_facies = self._drop_last_block(base_depth, base_facies)
-        sim_depth,  sim_facies  = self._drop_last_block(sim_depth,  sim_facies)
-
-        print("BASE last fac before report:", base_facies[-1] if len(base_facies) else None)
-        print("SIM  last fac before report:", sim_facies[-1] if len(sim_facies) else None)
-
 
         # ------------------------------------------------------------
-        # 4) Chama report com seu design
+        # 5) Chama o dialog/relatório existente
         # ------------------------------------------------------------
+        # (mantém sua função de report atual)
         report_dialog = self._open_matplotlib_report(
             well_name=well_name,
             sim_model_name=model_key,
@@ -587,6 +721,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sim_depth=sim_depth, sim_fac=sim_facies
         )
         report_dialog.exec_()
+
 
 
 
@@ -3230,7 +3365,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from matplotlib.patches import Rectangle, Polygon
         from matplotlib.collections import PatchCollection
 
-        ax.set_title(title)
+        # ax.set_title(title)
         ax.set_xlim(0, 1)
         ax.set_ylim(1, 0)
         ax.set_xticks([])
@@ -3480,5 +3615,3 @@ class MainWindow(QtWidgets.QMainWindow):
             return depth, facies
 
         return depth[:i0], facies[:i0]
-
-
