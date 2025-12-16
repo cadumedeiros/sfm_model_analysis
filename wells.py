@@ -57,14 +57,33 @@ class Well:
     def _merge_spatial_and_logs(self):
         traj = self.trajectory.sort_values("MD")
         logs = self.logs.sort_values("DEPT")
-        min_md, max_md = traj["MD"].min(), traj["MD"].max()
-        merged = logs[(logs["DEPT"] >= min_md) & (logs["DEPT"] <= max_md)].copy()
-        if merged.empty: return None
 
-        merged["X"] = np.interp(merged["DEPT"], traj["MD"], traj["X"])
-        merged["Y"] = np.interp(merged["DEPT"], traj["MD"], traj["Y"])
-        merged["Z"] = np.interp(merged["DEPT"], traj["MD"], traj["Z"])
+        if logs.empty or traj.empty:
+            return None
+
+        merged = logs.copy()
+
+        md = merged["DEPT"].to_numpy(dtype=float)
+
+        # Interpola trajetória SEM cortar o LAS
+        merged["X"] = np.interp(
+            md, traj["MD"], traj["X"],
+            left=traj["X"].iloc[0],
+            right=traj["X"].iloc[-1]
+        )
+        merged["Y"] = np.interp(
+            md, traj["MD"], traj["Y"],
+            left=traj["Y"].iloc[0],
+            right=traj["Y"].iloc[-1]
+        )
+        merged["Z"] = np.interp(
+            md, traj["MD"], traj["Z"],
+            left=traj["Z"].iloc[0],
+            right=traj["Z"].iloc[-1]
+        )
+
         return merged
+
 
     def get_vtk_polydata(self, z_exag=1.0):
         if self.data is None: return None
@@ -76,7 +95,7 @@ class Well:
         # Tenta pegar lito_upscaled, senao fac
         col = "lito_upscaled" if "lito_upscaled" in self.data.columns else "fac"
         if col in self.data.columns:
-            poly.point_data["Facies_Real"] = self.data[col].fillna(-1).values
+            poly.point_data["Facies_Real"] = self.data[col].fillna(0).values
         
         poly.point_data["MD"] = self.data["DEPT"].values
         return poly.tube(radius=30) # Tubo grosso pra ver a cor

@@ -321,57 +321,96 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compare_stack.addWidget(self.comp_page_2d)
 
     def load_well_dialog(self):
-        """Dialogo para selecionar par de arquivos"""
-        las_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecione o arquivo .LAS", "", "LAS Files (*.las)")
-        if not las_path: return
-        
-        base_name = os.path.splitext(las_path)[0]
-        suggested_dev = base_name + "_dev"
-        
-        if os.path.exists(suggested_dev):
-            dev_path = suggested_dev
-        else:
-            dev_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecione o arquivo de Trajetória (_dev)", os.path.dirname(las_path), "All Files (*)")
-            if not dev_path: return
+        """Diálogo para selecionar VÁRIOS poços (.las + _dev) de uma vez."""
+        # 1) Seleciona múltiplos LAS
+        las_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Selecione 1 ou mais arquivos .LAS",
+            "",
+            "LAS Files (*.las)"
+        )
+        if not las_paths:
+            return
 
-        well_name = os.path.basename(base_name)
-        
-        try:
-            new_well = Well(well_name, dev_path, las_path)
-            if new_well.data is None or new_well.data.empty:
-                raise ValueError("Falha ao sincronizar LAS e DEV.")
-                
-            self.wells[well_name] = new_well
-            print(f"Poço {well_name} carregado.")
-            
-            # --- ATUALIZAÇÃO DA ÁRVORE (Itera sobre todos os modelos) ---
-            root = self.project_tree.invisibleRootItem()
-            for i in range(root.childCount()):
-                model_item = root.child(i)
-                # Verifica se é um modelo
-                if model_item.data(0, QtCore.Qt.UserRole) == "model_root":
-                    model_key = model_item.data(0, QtCore.Qt.UserRole + 1)
-                    
-                    # Procura a pasta "Poços" dentro deste modelo
-                    wells_folder = None
-                    for k in range(model_item.childCount()):
-                        child = model_item.child(k)
-                        if child.text(0) == "Poços":
-                            wells_folder = child
-                            break
-                    
-                    if wells_folder:
-                        # Adiciona o poço nesta pasta
-                        w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
-                        w_item.setData(0, QtCore.Qt.UserRole, "well_item")
-                        w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
-                        w_item.setData(0, QtCore.Qt.UserRole + 2, model_key) # Link ao modelo pai
+        def _guess_dev_path(las_path: str) -> str | None:
+            """Tenta achar o arquivo de trajetória baseado no nome do LAS."""
+            base_name = os.path.splitext(las_path)[0]
+            candidates = [
+                base_name + "_dev",        # seu padrão atual (sem extensão)
+                base_name + "_dev.dev",
+                base_name + "_dev.txt",
+                base_name + ".dev",
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+            return None
 
-            # Plota no 3D
+        loaded = []
+        skipped = []
+
+        # 2) Para cada LAS, tenta encontrar DEV e carregar
+        for las_path in las_paths:
+            base_name = os.path.splitext(las_path)[0]
+            well_name = os.path.basename(base_name)
+
+            dev_path = _guess_dev_path(las_path)
+
+            # Se não achou automaticamente, pergunta (um por poço “faltante”)
+            if dev_path is None:
+                dev_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                    self,
+                    f"Selecione o arquivo de Trajetória (_dev) para o poço: {well_name}",
+                    os.path.dirname(las_path),
+                    "All Files (*)"
+                )
+                if not dev_path:
+                    skipped.append((well_name, "DEV não selecionado"))
+                    continue
+
+            try:
+                new_well = Well(well_name, dev_path, las_path)
+                if new_well.data is None or new_well.data.empty:
+                    raise ValueError("Falha ao sincronizar LAS e DEV.")
+
+                self.wells[well_name] = new_well
+                loaded.append(well_name)
+                print(f"Poço {well_name} carregado.")
+
+                # --- ATUALIZAÇÃO DA ÁRVORE (Itera sobre todos os modelos) ---
+                root = self.project_tree.invisibleRootItem()
+                for i in range(root.childCount()):
+                    model_item = root.child(i)
+                    if model_item.data(0, QtCore.Qt.UserRole) == "model_root":
+                        model_key = model_item.data(0, QtCore.Qt.UserRole + 1)
+
+                        wells_folder = None
+                        for k in range(model_item.childCount()):
+                            child = model_item.child(k)
+                            if child.text(0) == "Poços":
+                                wells_folder = child
+                                break
+
+                        if wells_folder:
+                            w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
+                            w_item.setData(0, QtCore.Qt.UserRole, "well_item")
+                            w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
+                            w_item.setData(0, QtCore.Qt.UserRole + 2, model_key)
+
+            except Exception as e:
+                skipped.append((well_name, str(e)))
+
+        # 3) Atualiza 3D uma vez no final (bem mais rápido)
+        if loaded:
             self.update_wells_3d()
-            
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erro", f"Erro ao carregar poço:\n{str(e)}")
+
+        # 4) Resumo
+        if skipped:
+            msg = "Alguns poços não foram carregados:\n\n" + "\n".join(
+                [f"- {n}: {err}" for n, err in skipped]
+            )
+            QtWidgets.QMessageBox.warning(self, "Carregar Poços", msg)
+
 
     def add_well_to_tree(self, well_name):
         # Cria nó "Poços" se não existir
@@ -603,17 +642,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return depth_out, fac_out, ttot_active
 
-
-
-
     def show_well_comparison_report(self, well_name, model_key="base"):
         """
         Relatório BASE vs SIM vs REAL.
 
-        NOVA LÓGICA (robusta):
-        - REAL: continua limitado pelos marcadores (quando compatíveis).
-        - BASE e SIM: NÃO dependem de interseção geométrica do poço com o grid.
-        Sempre pegam a coluna (i,j) mais próxima do (X,Y) de referência do poço
+        - REAL: limitado pelos marcadores (quando compatíveis).
+        - BASE e SIM: pegam a coluna (i,j) mais próxima do (X,Y) de referência do poço
         e constroem o perfil topo->base usando StratigraphicThickness.
         """
         import numpy as np
@@ -632,17 +666,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Aviso", "Grid BASE não carregado.")
             return
 
-        # grid do modelo simulado selecionado (ou base como fallback)
-        grid_sim_source = None
         if model_key == "base":
             grid_sim_source = base_grid
         else:
             grid_sim_source = self.models.get(model_key, {}).get("grid", None) or base_grid
 
         # ------------------------------------------------------------
-        # 2) Marcadores e REAL (mantém sua lógica existente)
+        # 2) Marcadores e REAL
         # ------------------------------------------------------------
-        markers = self.markers_db.get(well_name, [])
+        key = str(well_name).strip()
+        markers = self.markers_db.get(key, [])
 
         full_depth = well.data["DEPT"].to_numpy(dtype=float) if "DEPT" in well.data.columns else None
         if full_depth is None or full_depth.size == 0:
@@ -656,7 +689,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif "lito_upscaled" in well.data.columns:
             col_real = "lito_upscaled"
 
-        full_real = well.data[col_real].to_numpy() if col_real is not None else np.zeros_like(full_depth)
+        full_real = well.data[col_real].to_numpy(dtype=float) if col_real is not None else np.zeros_like(full_depth, dtype=float)
 
         # default: usa tudo
         real_depth0 = full_depth
@@ -670,8 +703,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 dmin, dmax = float(full_depth.min()), float(full_depth.max())
                 if (top_md <= dmax + 1e-6) and (base_md >= dmin - 1e-6) and (base_md > top_md):
                     mask_r = (full_depth >= top_md) & (full_depth <= base_md)
-                    real_depth0 = full_depth[mask_r]
-                    real_facies0 = full_real[mask_r]
+                    if np.any(mask_r):
+                        real_depth0 = full_depth[mask_r]
+                        real_facies0 = full_real[mask_r]
 
         # ------------------------------------------------------------
         # 3) BASE e SIM: perfil por coluna (i,j) via StratigraphicThickness
@@ -682,14 +716,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         xref, yref = xy
-
         base_depth, base_facies, base_ttot = self._column_profile_from_grid(base_grid, xref, yref)
         sim_depth,  sim_facies,  sim_ttot  = self._column_profile_from_grid(grid_sim_source, xref, yref)
 
-        # Se não tiver coluna válida (muito fora do grid), não interrompe: segue com arrays vazios
         if base_depth.size == 0 and sim_depth.size == 0:
-            # aqui você pode escolher: seguir mesmo assim ou avisar.
-            # Vou avisar, mas sem dar "return" se você quiser manter a UI abrindo.
             QtWidgets.QMessageBox.information(
                 self,
                 "Info",
@@ -698,21 +728,14 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         # ------------------------------------------------------------
-        # 4) Prepara REAL (formato esperado pelo report)
+        # 4) Prepara REAL (NÃO deixar NaN virar int64 MIN)
         # ------------------------------------------------------------
-        # converte facies real para int se possível
-        try:
-            real_facies = real_facies0.astype(int)
-        except Exception:
-            real_facies = real_facies0
-
         real_depth = real_depth0
-        
+        real_facies = np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int)
 
         # ------------------------------------------------------------
         # 5) Chama o dialog/relatório existente
         # ------------------------------------------------------------
-        # (mantém sua função de report atual)
         report_dialog = self._open_matplotlib_report(
             well_name=well_name,
             sim_model_name=model_key,
@@ -721,13 +744,6 @@ class MainWindow(QtWidgets.QMainWindow):
             sim_depth=sim_depth, sim_fac=sim_facies
         )
         report_dialog.exec_()
-
-
-
-
-
-
-
 
     def _open_matplotlib_report(self, well_name, depth, real, sim, accuracy):
         import matplotlib.pyplot as plt
@@ -1693,8 +1709,8 @@ class MainWindow(QtWidgets.QMainWindow):
          self.update_compare_2d_maps()
 
     def open_compare_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar Modelo", "assets", "GRDECL (*.grdecl)")
-        if path: self.load_compare_model(path)
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)")
+        for path in paths: self.load_compare_model(path)
 
     def _create_legend_table(self, h):
         t = QtWidgets.QTableWidget(); t.setColumnCount(len(h)); t.setHorizontalHeaderLabels(h)
