@@ -219,9 +219,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if top_item: 
             top_item.setExpanded(True)
             self.project_tree.setCurrentItem(top_item)
+    
+    def open_selected_well_reports(self):
+        items = self.project_tree.selectedItems()
+        if not items:
+            return
+
+        model_key = self.state.get("active_model_key", "base")
+
+        well_names = []
+        for it in items:
+            if it.data(0, QtCore.Qt.UserRole) == "well_item":
+                well_names.append(it.data(0, QtCore.Qt.UserRole + 1))
+
+        for w in well_names:
+            self.show_well_comparison_report(w, model_key)
 
         
-
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
         
@@ -232,9 +246,15 @@ class MainWindow(QtWidgets.QMainWindow):
         action_load.triggered.connect(self.open_compare_dialog)
         action_load_well = QtWidgets.QAction("Carregar Poço (.las + .dev)...", self)
         action_load_well.triggered.connect(self.load_well_dialog)
-        file_menu.addAction(action_load_well)
+        action_open_reports = QtWidgets.QAction("Abrir relatórios dos poços selecionados", self)
+        action_open_reports.triggered.connect(self.open_selected_well_reports)
+        
+        
         file_menu.addAction(action_load)
+        file_menu.addAction(action_load_well)
+        file_menu.addAction(action_open_reports)
         file_menu.addSeparator()
+        
         action_exit = QtWidgets.QAction("Sair", self)
         action_exit.triggered.connect(self.close)
         file_menu.addAction(action_exit)
@@ -370,6 +390,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             try:
                 new_well = Well(well_name, dev_path, las_path)
+
                 if new_well.data is None or new_well.data.empty:
                     raise ValueError("Falha ao sincronizar LAS e DEV.")
 
@@ -377,25 +398,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 loaded.append(well_name)
                 print(f"Poço {well_name} carregado.")
 
-                # --- ATUALIZAÇÃO DA ÁRVORE (Itera sobre todos os modelos) ---
-                root = self.project_tree.invisibleRootItem()
-                for i in range(root.childCount()):
-                    model_item = root.child(i)
-                    if model_item.data(0, QtCore.Qt.UserRole) == "model_root":
-                        model_key = model_item.data(0, QtCore.Qt.UserRole + 1)
-
-                        wells_folder = None
-                        for k in range(model_item.childCount()):
-                            child = model_item.child(k)
-                            if child.text(0) == "Poços":
-                                wells_folder = child
-                                break
-
-                        if wells_folder:
-                            w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
-                            w_item.setData(0, QtCore.Qt.UserRole, "well_item")
-                            w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
-                            w_item.setData(0, QtCore.Qt.UserRole + 2, model_key)
+                if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
+                    w_item = QtWidgets.QTreeWidgetItem(self.wells_root_item, [well_name])
+                    w_item.setData(0, QtCore.Qt.UserRole, "well_item")
+                    w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
 
             except Exception as e:
                 skipped.append((well_name, str(e)))
@@ -410,6 +416,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 [f"- {n}: {err}" for n, err in skipped]
             )
             QtWidgets.QMessageBox.warning(self, "Carregar Poços", msg)
+
+    def on_tree_double_clicked(self, item, col):
+        role = item.data(0, QtCore.Qt.UserRole)
+        data = item.data(0, QtCore.Qt.UserRole + 1)
+
+        if role == "well_item":
+            well_name = data
+
+            # Modelo “ativo”: o último que você carregou no viewer
+            model_key = self.state.get("active_model_key", "base")
+
+            self.show_well_comparison_report(well_name, model_key)
+            return
+
+        if role == "grid_settings" and data:
+            self.switch_main_view_to_model(data)
+            self.tabs.setCurrentIndex(0)
+            return
 
 
     def add_well_to_tree(self, well_name):
@@ -1001,80 +1025,91 @@ class MainWindow(QtWidgets.QMainWindow):
         self.change_thickness_mode(label)
 
     def setup_docks(self, nx, ny, nz):
-        # --- DOCK EXPLORER (Hierarquia) - ESQUERDA ---
+        # --- DOCK EXPLORER - ESQUERDA ---
         self.dock_explorer = QtWidgets.QDockWidget("Project Explorer", self)
         self.dock_explorer.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
-        self.dock_explorer.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | 
-                                       QtWidgets.QDockWidget.DockWidgetFloatable | 
-                                       QtWidgets.QDockWidget.DockWidgetClosable)
-        
+        self.dock_explorer.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetFloatable |
+            QtWidgets.QDockWidget.DockWidgetClosable
+        )
+
         self.project_tree = QtWidgets.QTreeWidget()
+        self.project_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.project_tree.setHeaderLabel("Hierarquia")
         self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
         self.project_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
         self.project_tree.itemChanged.connect(self.on_tree_item_changed)
         
+
         self.dock_explorer.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_explorer)
-        
+
         self.add_model_to_tree("base", "Modelo Base")
 
-        # --- DOCK PROPRIEDADES (Contextual) - AGORA NA ESQUERDA ---
+        self.wells_root_item = QtWidgets.QTreeWidgetItem(self.project_tree, ["Poços"])
+        self.wells_root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        self.wells_root_item.setData(0, QtCore.Qt.UserRole, "wells_root")
+        self.wells_root_item.setExpanded(True)
+
+        # --- DOCK PROPRIEDADES - DIREITA ---
         self.dock_props = QtWidgets.QDockWidget("Propriedades", self)
         self.dock_props.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
-        self.dock_props.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | 
-                                    QtWidgets.QDockWidget.DockWidgetFloatable | 
-                                    QtWidgets.QDockWidget.DockWidgetClosable)
-        
+        self.dock_props.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetFloatable |
+            QtWidgets.QDockWidget.DockWidgetClosable
+        )
+
         self.props_stack = QtWidgets.QStackedWidget()
-        
-        # Pág 0: Vazio
-        self.props_stack.addWidget(QtWidgets.QLabel("Selecione um item na árvore.")) 
-        
-        # Pág 1: Geometria
-        self.page_grid = QtWidgets.QWidget(); pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
+
+        self.props_stack.addWidget(QtWidgets.QLabel("Selecione um item na árvore."))
+
+        self.page_grid = QtWidgets.QWidget()
+        pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
         self.slicer_widget = GridSlicerWidget(nx, ny, nz, self.on_ui_slice_changed)
-        pg_layout.addWidget(self.slicer_widget); pg_layout.addStretch()
+        pg_layout.addWidget(self.slicer_widget)
+        pg_layout.addStretch()
         self.props_stack.addWidget(self.page_grid)
-        
-        # Pág 2: Propriedades Visualização
+
         self.page_props = QtWidgets.QWidget()
-        pp_layout = QtWidgets.QVBoxLayout(self.page_props); pp_layout.setContentsMargins(2,2,2,2)
-        
+        pp_layout = QtWidgets.QVBoxLayout(self.page_props)
+        pp_layout.setContentsMargins(2, 2, 2, 2)
+
         self.legend_group = QtWidgets.QGroupBox("Legenda & Filtro")
-        lgl = QtWidgets.QVBoxLayout(self.legend_group); lgl.setContentsMargins(2,5,2,2)
-        
-        self.facies_legend_table = QtWidgets.QTableWidget(); self.facies_legend_table.setColumnCount(4)
+        lgl = QtWidgets.QVBoxLayout(self.legend_group)
+        lgl.setContentsMargins(2, 5, 2, 2)
+
+        self.facies_legend_table = QtWidgets.QTableWidget()
+        self.facies_legend_table.setColumnCount(4)
         self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "N", "Res"])
         self.facies_legend_table.verticalHeader().setVisible(False)
         self.facies_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.facies_legend_table.itemChanged.connect(self.on_legend_item_changed)
         lgl.addWidget(self.facies_legend_table)
-        
-        self.clusters_legend_table = QtWidgets.QTableWidget(); self.clusters_legend_table.setColumnCount(3)
+
+        self.clusters_legend_table = QtWidgets.QTableWidget()
+        self.clusters_legend_table.setColumnCount(3)
         self.clusters_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "Células"])
         self.clusters_legend_table.verticalHeader().setVisible(False)
         self.clusters_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.clusters_legend_table.setVisible(False)
         lgl.addWidget(self.clusters_legend_table)
-        
+
         pp_layout.addWidget(self.legend_group)
         self.props_stack.addWidget(self.page_props)
-        
-        # Pág 3: Comparação
+
         self.page_compare = self.setup_comparison_dock_content()
         self.props_stack.addWidget(self.page_compare)
-        
+
         self.dock_props.setWidget(self.props_stack)
-        
-        # ADICIONA NA ESQUERDA
-        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_props)
-        
-        # FORÇA LADO A LADO (Explorer | Propriedades)
-        self.splitDockWidget(self.dock_explorer, self.dock_props, QtCore.Qt.Horizontal)
-        
-        # Define larguras iniciais
-        self.resizeDocks([self.dock_explorer, self.dock_props], [250, 350], QtCore.Qt.Horizontal)
+
+        # >>> AGORA NA DIREITA:
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
+
+        # Ajuste inicial de larguras (explorer menor, props maior)
+        self.resizeDocks([self.dock_explorer, self.dock_props], [320, 420], QtCore.Qt.Horizontal)
+
 
     def add_model_to_tree(self, model_key, model_name):
         root_item = QtWidgets.QTreeWidgetItem(self.project_tree, [model_name])
@@ -1093,20 +1128,6 @@ class MainWindow(QtWidgets.QMainWindow):
             root_item.setCheckState(0, QtCore.Qt.Checked)
 
         root_item.setExpanded(True)
-        
-        # --- PASTA DE POÇOS (NOVA LÓGICA) ---
-        # Cria uma pasta "Poços" específica para este modelo
-        wells_folder = QtWidgets.QTreeWidgetItem(root_item, ["Poços"])
-        wells_folder.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-        wells_folder.setData(0, QtCore.Qt.UserRole, "wells_folder")
-        
-        # Popula com os poços que já existem no projeto
-        for well_name in self.wells.keys():
-            w_item = QtWidgets.QTreeWidgetItem(wells_folder, [well_name])
-            w_item.setData(0, QtCore.Qt.UserRole, "well_item")
-            w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
-            # Guarda o ID do modelo pai no item do poço para sabermos quem plotar
-            w_item.setData(0, QtCore.Qt.UserRole + 2, model_key)
 
         # --- Sub-itens Normais ---
         item_grid = QtWidgets.QTreeWidgetItem(root_item, ["Geometria (Grid)"])
@@ -1216,6 +1237,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.update_sidebar_metrics_text(model_key)
         self.update_2d_map()
+        
 
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
@@ -3631,3 +3653,57 @@ class MainWindow(QtWidgets.QMainWindow):
             return depth, facies
 
         return depth[:i0], facies[:i0]
+    
+    def _compute_auto_well_shift_xy(self, well):
+        """Calcula (dx,dy) para trazer o poço para o centro do grid BASE."""
+        import numpy as np
+        from load_data import grid as base_grid
+
+        if base_grid is None or well is None or well.data is None or well.data.empty:
+            return 0.0, 0.0
+
+        b = base_grid.bounds  # (xmin, xmax, ymin, ymax, zmin, zmax)
+        grid_cx = 0.5 * (b[0] + b[1])
+        grid_cy = 0.5 * (b[2] + b[3])
+
+        wx = float(np.nanmean(well.data["X"].astype(float).values))
+        wy = float(np.nanmean(well.data["Y"].astype(float).values))
+
+        dx = grid_cx - wx
+        dy = grid_cy - wy
+        return dx, dy
+
+
+    def _apply_well_shift_if_needed(self, well):
+        """Aplica shift (dx,dy,dz) no poço. Guarda o shift e reutiliza pros próximos."""
+        import numpy as np
+        from config import (
+            AUTO_WELL_SHIFT, AUTO_WELL_SHIFT_THRESHOLD,
+            WELL_OFFSET_X, WELL_OFFSET_Y, WELL_OFFSET_Z
+        )
+
+        if well is None or well.data is None or well.data.empty:
+            return
+
+        # shift base (manual)
+        mdx, mdy, mdz = float(WELL_OFFSET_X), float(WELL_OFFSET_Y), float(WELL_OFFSET_Z)
+
+        # shift automático (uma vez) e reutiliza para todos os poços do mesmo projeto
+        if AUTO_WELL_SHIFT:
+            if not hasattr(self, "_well_xy_shift"):
+                dx, dy = self._compute_auto_well_shift_xy(well)
+                dist = float(np.hypot(dx, dy))
+                if dist >= float(AUTO_WELL_SHIFT_THRESHOLD):
+                    self._well_xy_shift = (dx, dy)
+                    print(f"[AUTO_WELL_SHIFT] dx={dx:.3f}, dy={dy:.3f} (dist={dist:.3f})")
+                else:
+                    self._well_xy_shift = (0.0, 0.0)
+                    print(f"[AUTO_WELL_SHIFT] shift ignorado (dist={dist:.3f} < threshold)")
+
+            dx, dy = self._well_xy_shift
+        else:
+            dx, dy = 0.0, 0.0
+
+        # aplica (auto + manual)
+        well.apply_xyz_shift(dx + mdx, dy + mdy, mdz)
+
