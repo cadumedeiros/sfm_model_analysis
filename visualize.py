@@ -626,6 +626,10 @@ def run(
 
     if "box_widget" in state: del state["box_widget"]
 
+    # logo = plotter.add_logo_widget("assets/forward_PNG.png", position=(0.02, 0.85), size=(0.12, 0.12))
+    # logo.SetProcessEvents(False)
+    # plotter.set_background("white", top="lightblue")
+
     plotter.enable_lightkit()
     plotter.add_axes()
     

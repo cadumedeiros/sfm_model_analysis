@@ -221,61 +221,97 @@ class MainWindow(QtWidgets.QMainWindow):
             self.project_tree.setCurrentItem(top_item)
     
     def open_selected_well_reports(self):
+        from PyQt5 import QtCore
+
         items = self.project_tree.selectedItems()
         if not items:
             return
 
-        model_key = self.state.get("active_model_key", "base")
+        # 1) tenta inferir o modelo a partir de qualquer item de modelo selecionado
+        selected_model_key = None
+        for it in items:
+            role = it.data(0, QtCore.Qt.UserRole)
+            if role in ("model_root", "grid_settings", "prop_settings", "metrics_view", "map2d_view"):
+                mk = it.data(0, QtCore.Qt.UserRole + 1)
+                if mk:
+                    selected_model_key = mk
+                    break
 
+        # 2) fallback: último modelo “ativo”
+        if not selected_model_key:
+            selected_model_key = self.state.get("active_model_key", "base")
+
+        # ✅ sanitize: se por algum motivo vier lixo (ex: nome de poço), cai pro base
+        if selected_model_key not in self.models:
+            selected_model_key = "base"
+
+        # 3) pega poços selecionados
         well_names = []
         for it in items:
             if it.data(0, QtCore.Qt.UserRole) == "well_item":
-                well_names.append(it.data(0, QtCore.Qt.UserRole + 1))
+                wn = it.data(0, QtCore.Qt.UserRole + 1)
+                if wn:
+                    well_names.append(wn)
 
         for w in well_names:
-            self.show_well_comparison_report(w, model_key)
+            self.show_well_comparison_report(w, selected_model_key)
+
+
 
         
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
-        
-        # 1. Menu Bar
+
         menubar = self.menuBar()
+
+        # --- Arquivo ---
         file_menu = menubar.addMenu("Arquivo")
+
         action_load = QtWidgets.QAction("Carregar Modelo Adicional...", self)
         action_load.triggered.connect(self.open_compare_dialog)
+
         action_load_well = QtWidgets.QAction("Carregar Poço (.las + .dev)...", self)
         action_load_well.triggered.connect(self.load_well_dialog)
-        action_open_reports = QtWidgets.QAction("Abrir relatórios dos poços selecionados", self)
-        action_open_reports.triggered.connect(self.open_selected_well_reports)
-        
-        
+
         file_menu.addAction(action_load)
         file_menu.addAction(action_load_well)
-        file_menu.addAction(action_open_reports)
         file_menu.addSeparator()
-        
+
         action_exit = QtWidgets.QAction("Sair", self)
         action_exit.triggered.connect(self.close)
         file_menu.addAction(action_exit)
-        
-        self.act_persp_viz = QtWidgets.QAction("Visualização", self); self.act_persp_viz.setCheckable(True); self.act_persp_viz.setChecked(True)
+
+        # --- Relatórios ---
+        reports_menu = menubar.addMenu("Relatórios")
+
+        action_reports_dialog = QtWidgets.QAction("Abrir relatórios (selecionar modelo e poços)...", self)
+        action_reports_dialog.triggered.connect(self.open_reports_dialog)
+
+        action_open_reports = QtWidgets.QAction("Abrir relatórios dos poços selecionados", self)
+        action_open_reports.triggered.connect(self.open_selected_well_reports)
+
+        reports_menu.addAction(action_reports_dialog)
+        reports_menu.addAction(action_open_reports)
+
+        # Perspectivas (mantém como você já tinha)
+        self.act_persp_viz = QtWidgets.QAction("Visualização", self)
+        self.act_persp_viz.setCheckable(True)
+        self.act_persp_viz.setChecked(True)
         self.act_persp_viz.triggered.connect(lambda: self.switch_perspective("visualization"))
         menubar.addAction(self.act_persp_viz)
-        
-        self.act_persp_comp = QtWidgets.QAction("Comparação", self); self.act_persp_comp.setCheckable(True)
+
+        self.act_persp_comp = QtWidgets.QAction("Comparação", self)
+        self.act_persp_comp.setCheckable(True)
         self.act_persp_comp.triggered.connect(lambda: self.switch_perspective("comparison"))
         menubar.addAction(self.act_persp_comp)
 
-        # 2. Toolbar
+        # Toolbar / Docks / resto continua igual
         self.setup_toolbar_controls()
-
-        # 3. Docks
         self.setup_docks(nx, ny, nz)
-        
-        # 4. Central Stack
+
         self.central_stack = QtWidgets.QStackedWidget()
         self.setCentralWidget(self.central_stack)
+
         
         # --- PERSPECTIVA 1: VISUALIZAÇÃO (Individual) ---
         self.viz_container = QtWidgets.QStackedWidget() 
@@ -403,6 +439,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     w_item.setData(0, QtCore.Qt.UserRole, "well_item")
                     w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
 
+                    # ✅ Ícone + checkbox (visível no 3D)
+                    w_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight))
+                    w_item.setFlags(w_item.flags() | QtCore.Qt.ItemIsUserCheckable)
+                    w_item.setCheckState(0, QtCore.Qt.Checked)
+
             except Exception as e:
                 skipped.append((well_name, str(e)))
 
@@ -416,25 +457,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 [f"- {n}: {err}" for n, err in skipped]
             )
             QtWidgets.QMessageBox.warning(self, "Carregar Poços", msg)
-
-    def on_tree_double_clicked(self, item, col):
-        role = item.data(0, QtCore.Qt.UserRole)
-        data = item.data(0, QtCore.Qt.UserRole + 1)
-
-        if role == "well_item":
-            well_name = data
-
-            # Modelo “ativo”: o último que você carregou no viewer
-            model_key = self.state.get("active_model_key", "base")
-
-            self.show_well_comparison_report(well_name, model_key)
-            return
-
-        if role == "grid_settings" and data:
-            self.switch_main_view_to_model(data)
-            self.tabs.setCurrentIndex(0)
-            return
-
 
     def add_well_to_tree(self, well_name):
         # Cria nó "Poços" se não existir
@@ -472,57 +494,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_wells_3d()
 
     def update_wells_3d(self):
-        if not hasattr(self, 'plotter'): return
-        
+        if not hasattr(self, 'plotter'):
+            return
+
+        # Decide quais poços estão visíveis via árvore (checkbox)
+        visible = set(self.wells.keys())
+        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
+            visible = set()
+            for i in range(self.wells_root_item.childCount()):
+                it = self.wells_root_item.child(i)
+                if it.data(0, QtCore.Qt.UserRole) == "well_item":
+                    name = it.data(0, QtCore.Qt.UserRole + 1)
+                    if it.checkState(0) == QtCore.Qt.Checked:
+                        visible.add(name)
+
         # Limpa poços antigos
-        for name in self.wells.keys():
+        for name in list(self.wells.keys()):
             self.plotter.remove_actor(f"well_{name}")
             self.plotter.remove_actor(f"marker_{name}")
         self.plotter.remove_actor("well_labels")
-        
+
         z_exag = self.state.get("z_exag", 1.0)
-        lbl_pos = []
-        lbl_txt = []
-        
+        lbl_pos, lbl_txt = [], []
+
         for name, well in self.wells.items():
-            # Tubo com Z corrigido
+            if name not in visible:
+                continue
+
             tube = well.get_vtk_polydata(z_exag=z_exag)
-            
             if tube:
-                # Plota tubo
                 self.plotter.add_mesh(
                     tube,
                     scalars="Facies_Real",
-                    cmap=self.pv_cmap,  # Suas cores exatas
-                    clim=self.clim,     # Seus limites exatos
+                    cmap=self.pv_cmap,
+                    clim=self.clim,
                     name=f"well_{name}",
-                    smooth_shading=False, # False para ver os pixels/cores reais
+                    smooth_shading=False,
                     show_scalar_bar=False,
-                    interpolate_before_map=False # IMPORTANTE: Não deixa misturar cores
+                    interpolate_before_map=False
                 )
-                
-                # Prepara etiqueta
+
                 min_md_idx = np.argmin(well.data["DEPT"].values)
                 top = well.data.iloc[min_md_idx][["X", "Y", "Z"]].values.copy()
                 top[2] *= z_exag
                 top[2] -= (50 * z_exag)
                 lbl_pos.append(top)
                 lbl_txt.append(name)
-            
-            # Plota Marcadores
+
             if name in self.markers_db:
                 glyphs, _ = well.get_markers_mesh(self.markers_db[name], z_exag=z_exag)
                 if glyphs:
                     self.plotter.add_mesh(glyphs, color="red", name=f"marker_{name}")
 
-        # Plota todas as etiquetas de uma vez
         if lbl_pos:
             self.plotter.add_point_labels(
-                lbl_pos, lbl_txt, 
-                font_size=16, text_color="black", 
+                lbl_pos, lbl_txt,
+                font_size=16, text_color="black",
                 point_size=0, always_visible=True,
                 name="well_labels"
             )
+
 
     def _pick_reference_xy_for_well_report(self, well, markers):
         """
@@ -675,29 +706,36 @@ class MainWindow(QtWidgets.QMainWindow):
         e constroem o perfil topo->base usando StratigraphicThickness.
         """
         import numpy as np
-        from PyQt5 import QtWidgets
+        from PyQt5 import QtWidgets, QtCore
 
         well = self.wells.get(well_name)
         if not well or well.data is None or well.data.empty:
             return
 
-        # ------------------------------------------------------------
-        # 1) Define grids
-        # ------------------------------------------------------------
         from load_data import grid as base_grid
-
         if base_grid is None:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Grid BASE não carregado.")
             return
 
+        # --- resolve grid SIM (modelo selecionado) ---
         if model_key == "base":
             grid_sim_source = base_grid
+            sim_model_name = self.models.get("base", {}).get("name", "Base")
         else:
-            grid_sim_source = self.models.get(model_key, {}).get("grid", None) or base_grid
+            model_data = self.models.get(model_key, {})
+            grid_sim_source = model_data.get("grid", None)
+            sim_model_name = model_data.get("name", str(model_key))
 
-        # ------------------------------------------------------------
-        # 2) Marcadores e REAL
-        # ------------------------------------------------------------
+            if grid_sim_source is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Aviso",
+                    f"Modelo '{sim_model_name}' não tem grid carregado.\n"
+                    "Carregue o modelo adicional antes de abrir o relatório."
+                )
+                return
+
+        # --- marcadores e REAL ---
         key = str(well_name).strip()
         markers = self.markers_db.get(key, [])
 
@@ -706,7 +744,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Aviso", "Poço sem coluna DEPT para relatório.")
             return
 
-        # escolher qual coluna do LAS usar como facies real
         col_real = None
         if "fac" in well.data.columns:
             col_real = "fac"
@@ -715,11 +752,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         full_real = well.data[col_real].to_numpy(dtype=float) if col_real is not None else np.zeros_like(full_depth, dtype=float)
 
-        # default: usa tudo
         real_depth0 = full_depth
         real_facies0 = full_real
 
-        # aplica marcadores somente se compatíveis
         if markers:
             mds = sorted([m.get("md") for m in markers if m.get("md") is not None])
             if len(mds) >= 2:
@@ -731,88 +766,115 @@ class MainWindow(QtWidgets.QMainWindow):
                         real_depth0 = full_depth[mask_r]
                         real_facies0 = full_real[mask_r]
 
-        # ------------------------------------------------------------
-        # 3) BASE e SIM: perfil por coluna (i,j) via StratigraphicThickness
-        # ------------------------------------------------------------
+        # --- BASE e SIM por coluna (i,j) ---
         xy = self._pick_reference_xy_for_well_report(well, markers)
         if xy is None:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Não consegui obter (X,Y) do poço para comparação.")
             return
 
         xref, yref = xy
-        base_depth, base_facies, base_ttot = self._column_profile_from_grid(base_grid, xref, yref)
-        sim_depth,  sim_facies,  sim_ttot  = self._column_profile_from_grid(grid_sim_source, xref, yref)
+        base_depth, base_facies, _ = self._column_profile_from_grid(base_grid, xref, yref)
+        sim_depth,  sim_facies,  _ = self._column_profile_from_grid(grid_sim_source, xref, yref)
 
-        if base_depth.size == 0 and sim_depth.size == 0:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Info",
-                "Não encontrei coluna válida no grid para o (X,Y) de referência do poço.\n"
-                "O relatório será aberto sem BASE/SIM."
-            )
-
-        # ------------------------------------------------------------
-        # 4) Prepara REAL (NÃO deixar NaN virar int64 MIN)
-        # ------------------------------------------------------------
+        # REAL: não deixar NaN virar lixo
         real_depth = real_depth0
         real_facies = np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int)
 
-        # ------------------------------------------------------------
-        # 5) Chama o dialog/relatório existente
-        # ------------------------------------------------------------
+        # --- cria dialog não-modal (permite vários abertos) ---
         report_dialog = self._open_matplotlib_report(
             well_name=well_name,
-            sim_model_name=model_key,
+            sim_model_name=sim_model_name,
             real_depth=real_depth, real_fac=real_facies,
             base_depth=base_depth, base_fac=base_facies,
             sim_depth=sim_depth, sim_fac=sim_facies
         )
-        report_dialog.exec_()
 
-    def _open_matplotlib_report(self, well_name, depth, real, sim, accuracy):
+        # importante: não modal + auto-destruir ao fechar
+        report_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        report_dialog.show()
+
+        # guarda referência (evita GC + você pode gerenciar janelas abertas)
+        self.open_reports.append(report_dialog)
+
+        def _cleanup():
+            try:
+                self.open_reports = [d for d in self.open_reports if d is not report_dialog]
+            except Exception:
+                pass
+
+        report_dialog.destroyed.connect(_cleanup)
+
+
+    def _open_matplotlib_report(
+        self,
+        well_name,
+        sim_model_name,
+        real_depth, real_fac,
+        base_depth, base_fac,
+        sim_depth,  sim_fac
+    ):
+        import numpy as np
         import matplotlib.pyplot as plt
+        from PyQt5 import QtWidgets
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-        
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(f"Relatório Poço: {well_name} (Acc: {accuracy*100:.1f}%)")
-        dialog.resize(600, 800)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        
-        fig, ax = plt.subplots(nrows=1, ncols=3, sharey=True, figsize=(8, 10))
-        
-        # Cores (Dicionário simplificado, ideal usar o seu config.py)
-        # cmap = plt.get_cmap("tab20", 20)
-        
-        # Track 1: Real
-        # Usamos pcolormesh ou imshow expandido
-        # Truque: criar uma matriz (N, 1) para plotar como imagem
-        real_img = real.reshape(-1, 1)
-        sim_img = sim.reshape(-1, 1)
-        # Diferença (0 = Igual, 1 = Diferente)
-        diff_img = (real != sim).astype(int).reshape(-1, 1)
-        
-        # Extensão Vertical
-        min_d, max_d = depth.min(), depth.max()
-        extent = [0, 1, max_d, min_d] # Invertido para profundidade crescer para baixo
-        
-        ax[0].imshow(real_img, aspect='auto', extent=extent, cmap='tab20', interpolation='nearest')
-        ax[0].set_title("Real (Log)")
-        ax[0].set_ylabel("Profundidade (m)")
-        
-        ax[1].imshow(sim_img, aspect='auto', extent=extent, cmap='tab20', interpolation='nearest')
-        ax[1].set_title("Simulado (Grid)")
-        
-        # Track 3: Erro (Branco=Acerto, Vermelho=Erro)
         from matplotlib.colors import ListedColormap
-        cmap_err = ListedColormap(['white', 'red'])
-        ax[2].imshow(diff_img, aspect='auto', extent=extent, cmap=cmap_err, interpolation='nearest')
-        ax[2].set_title("Erro")
-        
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Relatório Poço: {well_name}  |  Sim: {sim_model_name}")
+        dialog.resize(900, 800)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # Caso não tenha base/sim, ainda abre com REAL
+        has_base = base_depth is not None and len(base_depth) > 0 and base_fac is not None and len(base_fac) > 0
+        has_sim  = sim_depth  is not None and len(sim_depth)  > 0 and sim_fac  is not None and len(sim_fac)  > 0
+
+        ncols = 1 + int(has_base) + int(has_sim)
+        fig, axes = plt.subplots(nrows=1, ncols=ncols, sharey=False, figsize=(10, 8))
+        if ncols == 1:
+            axes = [axes]
+
+        col = 0
+
+        # --- REAL ---
+        ax = axes[col]
+        col += 1
+        if real_depth is not None and len(real_depth) > 0:
+            # plot como imagem 1-coluna
+            img = np.asarray(real_fac).reshape(-1, 1)
+            min_d, max_d = float(np.min(real_depth)), float(np.max(real_depth))
+            extent = [0, 1, max_d, min_d]
+            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
+            ax.set_title("REAL (LAS)")
+            ax.set_ylabel("Profundidade (m)")
+        else:
+            ax.set_title("REAL (vazio)")
+
+        # --- BASE ---
+        if has_base:
+            ax = axes[col]
+            col += 1
+            img = np.asarray(base_fac).reshape(-1, 1)
+            min_d, max_d = float(np.min(base_depth)), float(np.max(base_depth))
+            extent = [0, 1, max_d, min_d]
+            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
+            ax.set_title("BASE (Grid)")
+
+        # --- SIM ---
+        if has_sim:
+            ax = axes[col]
+            img = np.asarray(sim_fac).reshape(-1, 1)
+            min_d, max_d = float(np.min(sim_depth)), float(np.max(sim_depth))
+            extent = [0, 1, max_d, min_d]
+            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
+            ax.set_title(f"SIM ({sim_model_name})")
+
         plt.tight_layout()
-        
         canvas = FigureCanvas(fig)
         layout.addWidget(canvas)
-        dialog.exec_()
+
+        return dialog
+
 
     def switch_perspective(self, mode):
         if mode == "visualization":
@@ -1112,29 +1174,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def add_model_to_tree(self, model_key, model_name):
-        root_item = QtWidgets.QTreeWidgetItem(self.project_tree, [model_name])
+        root_item = QtWidgets.QTreeWidgetItem([model_name])
         root_item.setData(0, QtCore.Qt.UserRole, "model_root")
         root_item.setData(0, QtCore.Qt.UserRole + 1, model_key)
         root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
-        
-        # Verifica se estamos no modo Comparação para configurar checkbox
-        is_comparison = False
-        if hasattr(self, 'central_stack'):
-            if self.central_stack.currentIndex() == 1:
-                is_comparison = True
-        
+
+        # Se existir o nó Poços, insere antes dele. Senão, adiciona no fim.
+        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
+            idx = max(0, self.project_tree.indexOfTopLevelItem(self.wells_root_item))
+            self.project_tree.insertTopLevelItem(idx, root_item)
+        else:
+            self.project_tree.addTopLevelItem(root_item)
+
+        is_comparison = hasattr(self, 'central_stack') and (self.central_stack.currentIndex() == 1)
         self._set_item_checkbox_visible(root_item, is_comparison)
         if is_comparison:
             root_item.setCheckState(0, QtCore.Qt.Checked)
 
         root_item.setExpanded(True)
 
-        # --- Sub-itens Normais ---
         item_grid = QtWidgets.QTreeWidgetItem(root_item, ["Geometria (Grid)"])
         item_grid.setData(0, QtCore.Qt.UserRole, "grid_settings")
         item_grid.setData(0, QtCore.Qt.UserRole + 1, model_key)
         item_grid.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        
+
         item_props = QtWidgets.QTreeWidgetItem(root_item, ["Propriedades & Filtros"])
         item_props.setData(0, QtCore.Qt.UserRole, "prop_settings")
         item_props.setData(0, QtCore.Qt.UserRole + 1, model_key)
@@ -1150,23 +1213,32 @@ class MainWindow(QtWidgets.QMainWindow):
         item_2d.setData(0, QtCore.Qt.UserRole + 1, model_key)
         item_2d.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
 
+
     # --- LÓGICA DE INTERAÇÃO TREE ---
 
     def on_tree_double_clicked(self, item, col):
-        """Duplo clique em itens da árvore."""
+        """Duplo clique: abre relatório do poço no modelo ativo, ou abre a view do grid."""
         role = item.data(0, QtCore.Qt.UserRole)
-        data = item.data(0, QtCore.Qt.UserRole + 1) # Geralmente o ID ou Nome
+        data = item.data(0, QtCore.Qt.UserRole + 1)
 
         if role == "well_item":
             well_name = data
-            # Pega o ID do modelo pai que salvamos no UserRole + 2
-            parent_model_key = item.data(0, QtCore.Qt.UserRole + 2)
-            if parent_model_key:
-                self.show_well_comparison_report(well_name, parent_model_key)
-        
+
+            model_key = self.state.get("active_model_key", "base")
+            # ✅ sanitize
+            if model_key not in self.models:
+                model_key = "base"
+
+            self.show_well_comparison_report(well_name, model_key)
+            return
+
         if role == "grid_settings" and data:
             self.switch_main_view_to_model(data)
             self.tabs.setCurrentIndex(0)
+            return
+
+
+
 
     def switch_main_view_to_model(self, model_key):
         """Carrega grid, restaura filtros e modo de visualização específicos do modelo."""
@@ -1242,35 +1314,37 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
         if not items:
-            # Se não tiver nada selecionado e não for comparação, mostra vazio
             if self.central_stack.currentIndex() == 0:
                 self.props_stack.setCurrentIndex(0)
             return
-            
+
         item = items[0]
         role = item.data(0, QtCore.Qt.UserRole)
         model_key = item.data(0, QtCore.Qt.UserRole + 1)
-        
-        # Verifica se estamos no modo Comparação
+
+        # ✅ Só atualiza "active_model_key" quando o clique foi em algo de MODELO
+        # (e apenas se esse model_key realmente existe no self.models)
+        if role in ("model_root", "grid_settings", "prop_settings", "metrics_view", "map2d_view"):
+            if model_key and (model_key in self.models):
+                self.state["active_model_key"] = model_key
+
         is_comparison_mode = (self.central_stack.currentIndex() == 1)
-        
+
         # --- LÓGICA DO PAINEL LATERAL (COLUNA 2) ---
         if is_comparison_mode:
-            # No modo comparação, a coluna 2 é SEMPRE o Painel de Comparação
-            # independente do que você clica (a menos que queira ver geometria, mas Dionisos geralmente fixa)
             self.props_stack.setCurrentWidget(self.page_compare)
             self.dock_props.setWindowTitle("Painel de Comparação")
         else:
-            # Modo Visualização: A coluna 2 reage ao clique
             if role == "grid_settings":
                 self.props_stack.setCurrentWidget(self.page_grid)
                 self.dock_props.setWindowTitle("Geometria")
             else:
                 self.props_stack.setCurrentWidget(self.page_props)
                 self.dock_props.setWindowTitle("Propriedades")
-            
+
         # --- LÓGICA DA ÁREA CENTRAL ---
-        if model_key:
+        # (só faz sentido se model_key for de modelo)
+        if role in ("model_root", "grid_settings", "prop_settings", "metrics_view", "map2d_view") and model_key:
             self.update_sidebar_metrics_text(model_key)
 
             if not is_comparison_mode:
@@ -1284,6 +1358,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif role in ["grid_settings", "prop_settings", "model_root"]:
                     self.switch_main_view_to_model(model_key)
                     self.viz_container.setCurrentIndex(0)
+
 
     def _set_item_checkbox_visible(self, item, visible):
         """Define se um item da árvore tem checkbox visível ou não."""
@@ -3706,4 +3781,115 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # aplica (auto + manual)
         well.apply_xyz_shift(dx + mdx, dy + mdy, mdz)
+
+    def open_reports_dialog(self):
+        from PyQt5 import QtWidgets, QtCore
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Relatórios de Poços")
+        dlg.resize(420, 520)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        # Modelo
+        layout.addWidget(QtWidgets.QLabel("Modelo (SIM):"))
+        cmb = QtWidgets.QComboBox()
+        model_keys = [k for k in self.models.keys() if self.models[k].get("facies") is not None]
+        if "base" in self.models and "base" not in model_keys:
+            model_keys = ["base"] + model_keys
+
+        for k in model_keys:
+            name = self.models.get(k, {}).get("name", k)
+            cmb.addItem(name, userData=k)
+
+        layout.addWidget(cmb)
+
+        # Poços
+        layout.addWidget(QtWidgets.QLabel("Poços:"))
+        lst = QtWidgets.QListWidget()
+        lst.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        for wname in sorted(self.wells.keys()):
+            it = QtWidgets.QListWidgetItem(wname)
+            it.setData(QtCore.Qt.UserRole, wname)
+            lst.addItem(it)
+
+        layout.addWidget(lst)
+
+        # Botões
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Open | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(btns)
+
+        def _open():
+            model_key = cmb.currentData()
+            selected = [i.data(QtCore.Qt.UserRole) for i in lst.selectedItems()]
+            if not selected:
+                QtWidgets.QMessageBox.information(dlg, "Info", "Selecione ao menos 1 poço.")
+                return
+            for w in selected:
+                self.show_well_comparison_report(w, model_key)
+            dlg.accept()
+
+        btns.accepted.connect(_open)
+        btns.rejected.connect(dlg.reject)
+
+        dlg.exec_()
+
+    def init_tree_context_menu(self):
+        self.project_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.project_tree.customContextMenuRequested.connect(self.on_tree_context_menu)
+
+    def on_tree_context_menu(self, pos):
+        item = self.project_tree.itemAt(pos)
+        if not item:
+            return
+
+        role = item.data(0, QtCore.Qt.UserRole)
+        menu = QtWidgets.QMenu(self.project_tree)
+
+        def _selected_wells():
+            out = []
+            for it in self.project_tree.selectedItems():
+                if it.data(0, QtCore.Qt.UserRole) == "well_item":
+                    out.append(it.data(0, QtCore.Qt.UserRole + 1))
+            # se não tiver multiselect, usa o item clicado
+            if not out and role == "well_item":
+                out = [item.data(0, QtCore.Qt.UserRole + 1)]
+            return out
+
+        def _open_reports(model_key: str):
+            for w in _selected_wells():
+                self.show_well_comparison_report(w, model_key)
+
+        if role == "well_item":
+            # Abrir no modelo ativo
+            act_open_current = menu.addAction("Abrir relatório (modelo atual)")
+            act_open_current.triggered.connect(lambda: _open_reports(self.state.get("active_model_key", "base")))
+
+            # Submenu: escolher modelo
+            sub = menu.addMenu("Abrir relatório para…")
+            act_base = sub.addAction("Modelo Base")
+            act_base.triggered.connect(lambda: _open_reports("base"))
+
+            # modelos comparados
+            for mk in self.models.keys():
+                if mk == "base":
+                    continue
+                sub_act = sub.addAction(f"{self.models[mk].get('name', mk)}")
+                sub_act.triggered.connect(lambda _=False, mk=mk: _open_reports(mk))
+
+            menu.addSeparator()
+
+            # Toggle visibilidade no 3D
+            act_toggle = menu.addAction("Mostrar/Ocultar no 3D (checkbox)")
+            def _toggle():
+                # alterna apenas o item clicado
+                st = item.checkState(0)
+                item.setCheckState(0, QtCore.Qt.Unchecked if st == QtCore.Qt.Checked else QtCore.Qt.Checked)
+                self.update_wells_3d()
+            act_toggle.triggered.connect(_toggle)
+
+        menu.exec_(self.project_tree.viewport().mapToGlobal(pos))
+
+
+
 
