@@ -121,26 +121,6 @@ def make_facies_table():
     header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
     return table
 
-def fill_facies_table(table, facies_array, reservoir_set):
-    colors = load_facies_colors()
-    vals, counts = np.unique(facies_array.astype(int), return_counts=True)
-    count_dict = {int(v): int(c) for v, c in zip(vals, counts)}
-    present = sorted(count_dict.keys())
-    table.setRowCount(len(present))
-    for row, fac in enumerate(present):
-        rgba = colors.get(fac, (0.8, 0.8, 0.8, 1.0))
-        r, g, b, a = [int(255*c) for c in rgba]
-        item_color = QtWidgets.QTableWidgetItem()
-        item_color.setBackground(QBrush(QColor(r, g, b)))
-        table.setItem(row, 0, item_color)
-        table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(fac)))
-        table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(count_dict[fac])))
-        check = QtWidgets.QTableWidgetItem()
-        check.setFlags(check.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
-        check.setCheckState(QtCore.Qt.Checked if fac in reservoir_set else QtCore.Qt.Unchecked)
-        check.setData(QtCore.Qt.UserRole, fac)
-        table.setItem(row, 3, check)
-
 # --- CLASSE PRINCIPAL ---
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
@@ -292,6 +272,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         reports_menu.addAction(action_reports_dialog)
         reports_menu.addAction(action_open_reports)
+
+        action_models_rank = QtWidgets.QAction("Rankear modelos por aderência aos poços (score)", self)
+        action_models_rank.triggered.connect(self.show_models_well_fit_ranking)
+        reports_menu.addAction(action_models_rank)
 
         # Perspectivas (mantém como você já tinha)
         self.act_persp_viz = QtWidgets.QAction("Visualização", self)
@@ -458,24 +442,6 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             QtWidgets.QMessageBox.warning(self, "Carregar Poços", msg)
 
-    def add_well_to_tree(self, well_name):
-        # Cria nó "Poços" se não existir
-        root = self.project_tree.invisibleRootItem()
-        well_root = None
-        for i in range(root.childCount()):
-            if root.child(i).text(0) == "Poços":
-                well_root = root.child(i)
-                break
-        
-        if not well_root:
-            well_root = QtWidgets.QTreeWidgetItem(root, ["Poços"])
-            well_root.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-        
-        # Adiciona o poço
-        item = QtWidgets.QTreeWidgetItem(well_root, [well_name])
-        item.setData(0, QtCore.Qt.UserRole, "well_item")
-        item.setData(0, QtCore.Qt.UserRole + 1, well_name)
-        item.setCheckState(0, QtCore.Qt.Checked) # Visível por padrão
 
     def update_z_exaggeration(self):
         val = self.slider_z.value()
@@ -592,21 +558,138 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
 
-    def _column_profile_from_grid(self, grid, x, y):
+    def _get_ij_from_xy(self, grid, x, y):
         """
-        Retorna um perfil vertical topo->base na coluna (i,j) mais próxima do ponto (x,y),
-        usando StratigraphicThickness (preferencial) e Facies do grid.
-
-        Saídas:
-        depth_profile: array (em metros, começando em 0 no topo do grid)
-        fac_profile:   array (mesmo comprimento, facies em degraus)
-        ttot_active:   espessura total ativa (exclui facies == 0)
+        Retorna (i0, j0) da célula mais próxima ao ponto (x,y), usando i_index/j_index.
         """
         import numpy as np
         import pyvista as pv
         from visualize import prepare_grid_indices
 
         if grid is None:
+            return None
+
+        g = grid
+        prepare_grid_indices(g)
+        if "i_index" not in g.cell_data or "j_index" not in g.cell_data:
+            return None
+
+        i_idx = np.asarray(g.cell_data["i_index"]).astype(int)
+        j_idx = np.asarray(g.cell_data["j_index"]).astype(int)
+
+        try:
+            # z médio só pra achar a célula mais próxima (não importa muito)
+            zmid = float(np.mean(g.bounds[4:6]))
+            cid0 = int(g.find_closest_cell((float(x), float(y), zmid)))
+        except Exception:
+            # fallback com probe
+            try:
+                pt = pv.PolyData(np.array([[float(x), float(y), float(np.mean(g.bounds[4:6]))]]))
+                samp = pt.sample(g)
+                if "vtkOriginalCellIds" in samp.point_data:
+                    cid0 = int(np.asarray(samp.point_data["vtkOriginalCellIds"])[0])
+                else:
+                    cid0 = 0
+            except Exception:
+                return None
+
+        return int(i_idx[cid0]), int(j_idx[cid0])
+
+
+    def _column_profile_from_grid_ij(self, grid, i0, j0):
+        """
+        Retorna (depth_out, fac_out, ttot_active) para a coluna exata (i0,j0).
+        Mesma lógica do seu método atual: ordena topo->base, corta última célula,
+        usa StratigraphicThickness (ou fallback) e Facies.
+        """
+        import numpy as np
+        from visualize import prepare_grid_indices
+
+        if grid is None:
+            return np.array([]), np.array([]), 0.0
+
+        g = grid
+        prepare_grid_indices(g)
+
+        if "i_index" not in g.cell_data or "j_index" not in g.cell_data:
+            return np.array([]), np.array([]), 0.0
+
+        i_idx = np.asarray(g.cell_data["i_index"]).astype(int)
+        j_idx = np.asarray(g.cell_data["j_index"]).astype(int)
+
+        # Facies
+        if "Facies" in g.cell_data:
+            fac = np.asarray(g.cell_data["Facies"]).astype(int)
+        elif "facies" in g.cell_data:
+            fac = np.asarray(g.cell_data["facies"]).astype(int)
+        else:
+            return np.array([]), np.array([]), 0.0
+
+        # thickness
+        if "StratigraphicThickness" in g.cell_data:
+            th = np.asarray(g.cell_data["StratigraphicThickness"]).astype(float)
+        elif "cell_thickness" in g.cell_data:
+            th = np.asarray(g.cell_data["cell_thickness"]).astype(float)
+        else:
+            th = np.zeros_like(fac, dtype=float)
+
+        ids = np.where((i_idx == int(i0)) & (j_idx == int(j0)))[0]
+        if ids.size == 0:
+            return np.array([]), np.array([]), 0.0
+
+        # topo -> base pelo Z do centro
+        zc = g.cell_centers().points[:, 2].astype(float)
+        ids = ids[np.argsort(zc[ids])[::-1]]
+
+        # corta última célula (camada extra)
+        if ids.size >= 2:
+            ids = ids[:-1]
+
+        depth_out = []
+        fac_out = []
+        cum = 0.0
+
+        for cid in ids:
+            t = float(th[cid]) if np.isfinite(th[cid]) else 0.0
+            f = int(fac[cid])
+            depth_out.extend([cum, cum + t])
+            fac_out.extend([f, f])
+            cum += t
+
+        depth_out = np.asarray(depth_out, dtype=float)
+        fac_out = np.asarray(fac_out, dtype=int)
+
+        mask_active = (fac[ids] != 0) & np.isfinite(th[ids])
+        ttot_active = float(np.sum(th[ids][mask_active])) if ids.size else 0.0
+
+        return depth_out, fac_out, ttot_active
+
+
+    def _column_profile_from_grid(self, grid, x, y, *, i0=None, j0=None, return_ij=False):
+        """
+        Retorna um perfil vertical topo->base na coluna (i,j) do grid.
+
+        Se i0/j0 forem None:
+        - escolhe a coluna (i,j) mais próxima do ponto (x,y).
+
+        Se i0/j0 forem fornecidos:
+        - usa exatamente essa coluna (i0,j0) (útil para janelas 3x3 etc.)
+
+        Saídas:
+        depth_profile: array (m), começando em 0 no topo do grid
+        fac_profile:   array (mesmo comprimento, facies em degraus)
+        ttot_active:   espessura total ativa (exclui facies == 0)
+
+        Se return_ij=True:
+        retorna também (i0, j0).
+        """
+        import numpy as np
+        import pyvista as pv
+        from visualize import prepare_grid_indices
+
+        if grid is None:
+            if return_ij:
+                return np.array([]), np.array([]), 0.0, None, None
             return np.array([]), np.array([]), 0.0
 
         g = grid.copy()
@@ -638,40 +721,50 @@ class MainWindow(QtWidgets.QMainWindow):
         i_idx = g.cell_data.get("i_index", None)
         j_idx = g.cell_data.get("j_index", None)
         if i_idx is None or j_idx is None:
+            if return_ij:
+                return np.array([]), np.array([]), 0.0, None, None
             return np.array([]), np.array([]), 0.0
 
         i_idx = np.asarray(i_idx).astype(int)
         j_idx = np.asarray(j_idx).astype(int)
 
-        # acha célula mais próxima em XY (z no meio do bound)
-        b = g.bounds
-        z_mid = 0.5 * (float(b[4]) + float(b[5]))
-        try:
-            cid0 = int(g.find_closest_cell((float(x), float(y), float(z_mid))))
-        except Exception:
+        # se i0/j0 não vierem, acha célula mais próxima em XY
+        if i0 is None or j0 is None:
+            b = g.bounds
+            z_mid = 0.5 * (float(b[4]) + float(b[5]))
             try:
-                p = pv.PolyData(np.array([[float(x), float(y), float(z_mid)]]))
-                samp = p.sample(g, tolerance=1e9)
-                if "vtkOriginalCellIds" in samp.point_data:
-                    cid0 = int(np.asarray(samp.point_data["vtkOriginalCellIds"])[0])
-                else:
-                    cid0 = 0
+                cid0 = int(g.find_closest_cell((float(x), float(y), float(z_mid))))
             except Exception:
-                return np.array([]), np.array([]), 0.0
+                try:
+                    p = pv.PolyData(np.array([[float(x), float(y), float(z_mid)]]))
+                    samp = p.sample(g, tolerance=1e9)
+                    if "vtkOriginalCellIds" in samp.point_data:
+                        cid0 = int(np.asarray(samp.point_data["vtkOriginalCellIds"])[0])
+                    else:
+                        cid0 = 0
+                except Exception:
+                    if return_ij:
+                        return np.array([]), np.array([]), 0.0, None, None
+                    return np.array([]), np.array([]), 0.0
 
-        i0 = int(i_idx[cid0])
-        j0 = int(j_idx[cid0])
+            i0 = int(i_idx[cid0])
+            j0 = int(j_idx[cid0])
+        else:
+            i0 = int(i0)
+            j0 = int(j0)
 
         # pega todos os cells da coluna (i0,j0)
         ids = np.where((i_idx == i0) & (j_idx == j0))[0]
         if ids.size == 0:
+            if return_ij:
+                return np.array([]), np.array([]), 0.0, i0, j0
             return np.array([]), np.array([]), 0.0
 
-        # ordena topo -> base pelo Z do centro da célula (robusto contra flip_k/k_index invertido)
+        # ordena topo -> base pelo Z do centro da célula (robusto contra flip)
         zc = g.cell_centers().points[:, 2].astype(float)
         ids = ids[np.argsort(zc[ids])[::-1]]  # topo primeiro
 
-        # REMOVE SEMPRE A ÚLTIMA CÉLULA (a mais profunda), que é a “camada extra” que você quer cortar
+        # REMOVE SEMPRE A ÚLTIMA CÉLULA (a mais profunda) — mantém sua regra atual
         if ids.size >= 2:
             ids = ids[:-1]
 
@@ -683,7 +776,6 @@ class MainWindow(QtWidgets.QMainWindow):
         for cid in ids:
             t = float(th[cid]) if np.isfinite(th[cid]) else 0.0
             f = int(fac[cid])
-
             depth_out.extend([cum, cum + t])
             fac_out.extend([f, f])
             cum += t
@@ -695,7 +787,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mask_active = (fac[ids] != 0) & np.isfinite(th[ids])
         ttot_active = float(np.sum(th[ids][mask_active])) if ids.size else 0.0
 
+        if return_ij:
+            return depth_out, fac_out, ttot_active, i0, j0
         return depth_out, fac_out, ttot_active
+
+
 
     def show_well_comparison_report(self, well_name, model_key="base"):
         """
@@ -774,7 +870,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         xref, yref = xy
         base_depth, base_facies, _ = self._column_profile_from_grid(base_grid, xref, yref)
-        sim_depth,  sim_facies,  _ = self._column_profile_from_grid(grid_sim_source, xref, yref)
+        window_size = getattr(self, "well_compare_window_size", 1)
+
+        sim_depth, sim_facies, _, i_best, j_best, fit_best = self._best_profile_score_in_window(
+            grid_sim_source,
+            xref, yref,
+            real_depth=real_depth0,
+            real_fac=np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int),
+            window_size=window_size,
+            n_bins=200,
+            w_strat=0.7,
+            w_thick=0.3,
+            ignore_real_zeros=True,
+            use_kappa=True,
+        )
 
         # REAL: não deixar NaN virar lixo
         real_depth = real_depth0
@@ -804,108 +913,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         report_dialog.destroyed.connect(_cleanup)
 
-
-    def _open_matplotlib_report(
-        self,
-        well_name,
-        sim_model_name,
-        real_depth, real_fac,
-        base_depth, base_fac,
-        sim_depth,  sim_fac
-    ):
-        import numpy as np
-        import matplotlib.pyplot as plt
-        from PyQt5 import QtWidgets
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.colors import ListedColormap
-
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(f"Relatório Poço: {well_name}  |  Sim: {sim_model_name}")
-        dialog.resize(900, 800)
-
-        layout = QtWidgets.QVBoxLayout(dialog)
-
-        # Caso não tenha base/sim, ainda abre com REAL
-        has_base = base_depth is not None and len(base_depth) > 0 and base_fac is not None and len(base_fac) > 0
-        has_sim  = sim_depth  is not None and len(sim_depth)  > 0 and sim_fac  is not None and len(sim_fac)  > 0
-
-        ncols = 1 + int(has_base) + int(has_sim)
-        fig, axes = plt.subplots(nrows=1, ncols=ncols, sharey=False, figsize=(10, 8))
-        if ncols == 1:
-            axes = [axes]
-
-        col = 0
-
-        # --- REAL ---
-        ax = axes[col]
-        col += 1
-        if real_depth is not None and len(real_depth) > 0:
-            # plot como imagem 1-coluna
-            img = np.asarray(real_fac).reshape(-1, 1)
-            min_d, max_d = float(np.min(real_depth)), float(np.max(real_depth))
-            extent = [0, 1, max_d, min_d]
-            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
-            ax.set_title("REAL (LAS)")
-            ax.set_ylabel("Profundidade (m)")
-        else:
-            ax.set_title("REAL (vazio)")
-
-        # --- BASE ---
-        if has_base:
-            ax = axes[col]
-            col += 1
-            img = np.asarray(base_fac).reshape(-1, 1)
-            min_d, max_d = float(np.min(base_depth)), float(np.max(base_depth))
-            extent = [0, 1, max_d, min_d]
-            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
-            ax.set_title("BASE (Grid)")
-
-        # --- SIM ---
-        if has_sim:
-            ax = axes[col]
-            img = np.asarray(sim_fac).reshape(-1, 1)
-            min_d, max_d = float(np.min(sim_depth)), float(np.max(sim_depth))
-            extent = [0, 1, max_d, min_d]
-            ax.imshow(img, aspect="auto", extent=extent, cmap="tab20", interpolation="nearest")
-            ax.set_title(f"SIM ({sim_model_name})")
-
-        plt.tight_layout()
-        canvas = FigureCanvas(fig)
-        layout.addWidget(canvas)
-
-        return dialog
-
-
-    def switch_perspective(self, mode):
-        if mode == "visualization":
-            # 1. Configura Menu
-            self.act_persp_viz.setChecked(True)
-            self.act_persp_comp.setChecked(False)
-            
-            # 2. Dock Esquerdo -> Mostra Árvore
-            self.dock_left_container.setCurrentIndex(0)
-            self.dock_explorer.setWindowTitle("Project Explorer")
-            self.dock_props.setVisible(True) # Mostra propriedades
-            
-            # 3. Central -> Mostra Visualizador Padrão
-            self.central_stack.setCurrentIndex(0)
-            
-        elif mode == "comparison":
-            # 1. Configura Menu
-            self.act_persp_viz.setChecked(False)
-            self.act_persp_comp.setChecked(True)
-            
-            # 2. Dock Esquerdo -> Mostra Painel Comparação
-            self.dock_left_container.setCurrentIndex(1)
-            self.dock_explorer.setWindowTitle("Painel de Comparação")
-            self.dock_props.setVisible(False) # Esconde propriedades (não usadas aqui)
-            
-            # 3. Central -> Mostra 3D Comparado
-            self.central_stack.setCurrentIndex(1)
-            
-            # Força atualização
-            self.update_comparison_tables()
-            self.update_compare_2d_maps()
 
     def setup_comparison_3d_view(self, container):
         """Prepara o container para receber o grid dinâmico."""
@@ -989,71 +996,6 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_ss.triggered.connect(self.take_snapshot)
         toolbar.addAction(btn_ss)
 
-    def update_dynamic_comparison_2d(self, checked_models):
-        """Reconstrói a visualização de Mapas 2D para os modelos selecionados."""
-
-        if hasattr(self, 'active_comp_2d_plotters'):
-            for p in self.active_comp_2d_plotters:
-                p.close()
-        self.active_comp_2d_plotters = []
-
-        if self.comp_2d_layout.count() > 0:
-            while self.comp_2d_layout.count():
-                item = self.comp_2d_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-        if len(checked_models) == 0:
-            self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
-            return
-
-        n_models = len(checked_models)
-        cols = 2 if n_models > 1 else 1
-
-        grid_container = QtWidgets.QWidget()
-        grid_layout = QtWidgets.QGridLayout(grid_container)
-        grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setSpacing(2)
-        self.comp_2d_layout.addWidget(grid_container)
-
-        presets = self.state.get("thickness_presets") or {}
-        thick_mode = self.state.get("thickness_mode", "Espessura")
-        if thick_mode not in presets:
-            thick_mode = "Espessura"
-        scalar, title = presets[thick_mode]
-
-        from load_data import grid as global_grid
-
-        for idx, (model_key, model_name) in enumerate(checked_models):
-            row, col = idx // cols, idx % cols
-            model_data = self.models[model_key]
-
-            p2d = BackgroundPlotter(show=False)
-            self.active_comp_2d_plotters.append(p2d)
-
-            # >>> CORREÇÃO: grid do modelo
-            source_grid = model_data.get("grid", global_grid)
-            temp_grid = source_grid.copy(deep=True)
-            temp_grid.cell_data["Facies"] = model_data["facies"]
-
-            self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
-
-            self._draw_2d_map_local(p2d, temp_grid, scalar, f"{model_name} - {title}")
-
-            w = QtWidgets.QWidget()
-            vl = QtWidgets.QVBoxLayout(w)
-            vl.setContentsMargins(0, 0, 0, 0)
-            vl.setSpacing(0)
-
-            lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
-            lbl.setStyleSheet("background: #ddd; font-weight: bold;")
-            vl.addWidget(lbl)
-            vl.addWidget(p2d.interactor)
-
-            grid_layout.addWidget(w, row, col)
-
-        self._build_multi_model_filter_table(checked_models)
-
 
     def toggle_comparison_view_type(self):
         """Alterna entre ver o Grid 3D e as Tabelas de Métricas na Comparação."""
@@ -1066,16 +1008,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.btn_view_type.setText("Métricas")
                 self.btn_view_type.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
                 self.compare_stack.setCurrentIndex(0) # Página 3D
-
-
-    # Helpers para atualizar o texto do botão (Mantidos)
-    def _update_mode_btn(self, text, data):
-        self.btn_mode.setText(f"Modo: {text}")
-        self.change_mode(data)
-
-    def _update_thick_btn(self, label):
-        self.btn_thick.setText(f"Espessura: {label}")
-        self.change_thickness_mode(label)
 
     # Helpers para atualizar o texto do botão quando clica no menu
     def _update_mode_btn(self, text, data):
@@ -3889,6 +3821,649 @@ class MainWindow(QtWidgets.QMainWindow):
             act_toggle.triggered.connect(_toggle)
 
         menu.exec_(self.project_tree.viewport().mapToGlobal(pos))
+
+    def evaluate_models_against_wells(
+        self,
+        *,
+        well_names=None,
+        model_keys=None,
+        window_size=1,   # <-- NOVO: 1,3,5,7...
+        n_bins=200,
+        w_strat=0.7,
+        w_thick=0.3,
+        ignore_real_zeros=True,
+        use_kappa=True,
+    ):
+        """
+        Retorna lista ranqueada:
+        [{"model_key","model_name","score","details","n_wells_used"}, ...]
+        """
+        import numpy as np
+        from analysis import compute_well_match_score
+
+        if not self.wells:
+            return []
+
+        # poços a avaliar
+        if well_names is None:
+            well_names = list(self.wells.keys())
+        else:
+            well_names = [w for w in well_names if w in self.wells]
+
+        if not well_names:
+            return []
+
+        # modelos a avaliar
+        if model_keys is None:
+            model_keys = list(self.models.keys())
+        else:
+            model_keys = [k for k in model_keys if k in self.models]
+
+        if not model_keys:
+            return []
+
+        # garante ímpar >= 1
+        try:
+            window_size = int(window_size)
+        except Exception:
+            window_size = 1
+        if window_size < 1:
+            window_size = 1
+        if window_size % 2 == 0:
+            window_size += 1
+
+        results = []
+
+        for mk in model_keys:
+            m = self.models.get(mk, {})
+            g = m.get("grid", None)
+            if g is None:
+                continue
+
+            # garante Facies no grid, se seu modelo guarda facies fora
+            if "Facies" not in getattr(g, "cell_data", {}):
+                fac = m.get("facies", None)
+                if fac is not None:
+                    try:
+                        g.cell_data["Facies"] = np.asarray(fac).astype(int)
+                    except Exception:
+                        pass
+
+            per_well = {}
+            score_list = []
+            w_list = []
+
+            for wn in well_names:
+                well = self.wells.get(wn)
+                if well is None or well.data is None or well.data.empty:
+                    continue
+
+                # REAL: igual seu relatório
+                if "DEPT" not in well.data.columns:
+                    continue
+
+                if "fac" in well.data.columns:
+                    col_real = "fac"
+                elif "lito_upscaled" in well.data.columns:
+                    col_real = "lito_upscaled"
+                else:
+                    continue
+
+                full_depth = well.data["DEPT"].to_numpy(dtype=float)
+                full_real  = well.data[col_real].to_numpy(dtype=float)
+
+                key = str(wn).strip()
+                markers = self.markers_db.get(key, [])
+
+                real_depth = full_depth
+                real_fac   = np.where(np.isfinite(full_real), full_real, 0.0).astype(int)
+
+                # recorte por marcadores (mesmo critério do show_well_comparison_report)
+                if markers:
+                    mds = sorted([mm.get("md") for mm in markers if mm.get("md") is not None])
+                    if len(mds) >= 2:
+                        top_md, base_md = float(mds[0]), float(mds[-1])
+                        dmin, dmax = float(full_depth.min()), float(full_depth.max())
+                        if (top_md <= dmax + 1e-6) and (base_md >= dmin - 1e-6) and (base_md > top_md):
+                            mask = (full_depth >= top_md) & (full_depth <= base_md)
+                            if np.any(mask):
+                                real_depth = full_depth[mask]
+                                real_fac   = real_fac[mask]
+
+                # pega (X,Y) de referência exatamente como no relatório
+                xy = self._pick_reference_xy_for_well_report(well, markers)
+                if xy is None:
+                    continue
+
+                xref, yref = xy
+
+                # --------- AQUI É O ÚNICO PONTO QUE MUDA (1x1 vs NxN) ---------
+                if window_size == 1:
+                    # 1x1: coluna mais próxima (comportamento antigo)
+                    sim_depth, sim_fac, _ = self._column_profile_from_grid(g, xref, yref)
+                    if sim_depth is None or len(sim_depth) < 2:
+                        continue
+
+                    s = compute_well_match_score(
+                        real_depth, real_fac,
+                        sim_depth,  sim_fac,
+                        n_bins=n_bins,
+                        w_strat=w_strat,
+                        w_thick=w_thick,
+                        ignore_real_zeros=ignore_real_zeros,
+                        use_kappa=use_kappa,
+                    )
+
+                else:
+                    # NxN: pega o melhor match dentro da janela (3x3, 5x5, ...)
+                    sim_depth, sim_fac, sim_total, i_best, j_best, s = self._best_profile_score_in_window(
+                        g,
+                        xref, yref,
+                        real_depth, real_fac,
+                        window_size=window_size,
+                        n_bins=n_bins,
+                        w_strat=w_strat,
+                        w_thick=w_thick,
+                        ignore_real_zeros=ignore_real_zeros,
+                        use_kappa=use_kappa,
+                    )
+                    if sim_depth is None or len(sim_depth) < 2:
+                        continue
+
+                    # opcional: guardar diagnóstico do deslocamento
+                    s = dict(s)
+                    s["best_i"] = i_best
+                    s["best_j"] = j_best
+                # ----------------------------------------------------------------
+
+                weight = max(int(s.get("n_valid_bins", 0)), 0)
+                per_well[str(wn)] = s
+                score_list.append(float(s.get("score", 0.0)))
+                w_list.append(weight)
+
+            if not w_list or sum(w_list) <= 0:
+                continue
+
+            score_model = float(np.average(np.asarray(score_list, dtype=float),
+                                           weights=np.asarray(w_list, dtype=float)))
+
+            results.append({
+                "model_key": mk,
+                "model_name": str(m.get("name", mk)),
+                "score": score_model,
+                "n_wells_used": int(len(w_list)),
+                "details": per_well,
+            })
+
+        results.sort(key=lambda d: d["score"], reverse=True)
+        return results
+
+    
+    def show_models_well_fit_ranking(self):
+        from PyQt5 import QtWidgets
+
+        ws = int(getattr(self, "well_rank_window_size", 1) or 1)
+
+        ranking = self.evaluate_models_against_wells(
+            window_size=ws,
+            n_bins=200,
+            w_strat=0.7,
+            w_thick=0.3,
+            ignore_real_zeros=True,
+            use_kappa=True,
+        )
+
+        if not ranking:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Ranking modelos x poços",
+                "Não consegui calcular ranking.\n"
+                "Verifique se há modelos com grid, poços com DEPT e fac/fácies, e dados válidos."
+            )
+            return
+
+        self.open_models_ranking_dialog(ranking)
+
+
+    def open_models_ranking_dialog(self, ranking):
+        """
+        Abre uma janela limpa com:
+        - Tabela de modelos (ranking)
+        - Tabela de detalhe por poço do modelo selecionado
+        - ComboBox para janela espacial (1x1, 3x3, 5x5...)
+        """
+        from PyQt5 import QtWidgets, QtCore
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Avaliação dos modelos vs poços")
+        dlg.setMinimumSize(980, 640)
+
+        # guarda ranking no dialog
+        dlg._ranking = ranking
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        # --- Top controls (compactos) ---
+        top_bar = QtWidgets.QHBoxLayout()
+
+        lbl = QtWidgets.QLabel("Clique em um modelo para ver o detalhe por poço.")
+        top_bar.addWidget(lbl)
+
+        # ComboBox: janela espacial do ranking
+        top_bar.addSpacing(12)
+        top_bar.addWidget(QtWidgets.QLabel("Janela:"))
+
+        cmb_window = QtWidgets.QComboBox()
+        cmb_window.addItems(["1x1", "3x3", "5x5", "7x7", "9x9"])
+        top_bar.addWidget(cmb_window)
+
+        top_bar.addStretch(1)
+
+        btn_copy = QtWidgets.QPushButton("Copiar tabela (modelos)")
+        btn_copy.clicked.connect(lambda: self._copy_models_table_to_clipboard(dlg))
+        top_bar.addWidget(btn_copy)
+
+        layout.addLayout(top_bar)
+
+        # --- Splitter (modelos em cima, poços embaixo) ---
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        layout.addWidget(splitter)
+
+        # Tabela 1: Modelos
+        tbl_models = QtWidgets.QTableWidget()
+        tbl_models.setColumnCount(6)
+        tbl_models.setHorizontalHeaderLabels([
+            "Rank", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"
+        ])
+        tbl_models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        tbl_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        tbl_models.setSortingEnabled(True)
+        tbl_models.horizontalHeader().setStretchLastSection(True)
+        tbl_models.verticalHeader().setVisible(False)
+
+        splitter.addWidget(tbl_models)
+
+        # Tabela 2: Detalhe por poço
+        tbl_wells = QtWidgets.QTableWidget()
+        tbl_wells.setColumnCount(7)
+        tbl_wells.setHorizontalHeaderLabels([
+            "Poço", "Score", "Fácies (acc)", "Fácies (kappa)", "Espessura", "T_real", "T_sim"
+        ])
+        tbl_wells.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        tbl_wells.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        tbl_wells.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        tbl_wells.setSortingEnabled(True)
+        tbl_wells.horizontalHeader().setStretchLastSection(True)
+        tbl_wells.verticalHeader().setVisible(False)
+
+        splitter.addWidget(tbl_wells)
+
+        # guarda refs no dialog
+        dlg._tbl_models = tbl_models
+        dlg._tbl_wells = tbl_wells
+        dlg._cmb_rank_window = cmb_window
+
+        # seta combo para o window_size atual
+        ws = int(getattr(self, "well_rank_window_size", 1) or 1)
+        if ws not in (1, 3, 5, 7, 9):
+            ws = 1
+        cmb_window.setCurrentText(f"{ws}x{ws}")
+
+        # função interna: recalcula ranking com o window_size selecionado
+        def _recompute():
+            # lê window_size do combo
+            try:
+                txt = cmb_window.currentText()
+                ws2 = int(txt.split("x")[0])
+            except Exception:
+                ws2 = 1
+
+            self.well_rank_window_size = ws2
+
+            new_ranking = self.evaluate_models_against_wells(
+                window_size=ws2,
+                n_bins=200,
+                w_strat=0.7,
+                w_thick=0.3,
+                ignore_real_zeros=True,
+                use_kappa=True,
+            )
+            dlg._ranking = new_ranking
+
+            # repopula tabelas
+            self._populate_models_ranking_table(dlg)
+            if tbl_models.rowCount() > 0:
+                tbl_models.selectRow(0)
+
+        # preenche inicialmente
+        self._populate_models_ranking_table(dlg)
+
+        # seleção -> detalhe
+        tbl_models.itemSelectionChanged.connect(lambda: self._on_models_table_selection_changed(dlg))
+
+        # troca de janela -> recalcula ranking
+        cmb_window.currentIndexChanged.connect(lambda *_: _recompute())
+
+        # seleciona o 1º automaticamente
+        if tbl_models.rowCount() > 0:
+            tbl_models.selectRow(0)
+
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dlg.show()
+
+        # guarda referência para evitar GC
+        self.open_reports.append(dlg)
+
+
+    def _populate_models_ranking_table(self, dlg):
+        from PyQt5 import QtWidgets, QtCore
+
+        ranking = getattr(dlg, "_ranking", [])
+        tbl = dlg._tbl_models
+        tbl.setRowCount(0)
+
+        for i, r in enumerate(ranking, start=1):
+            row = tbl.rowCount()
+            tbl.insertRow(row)
+
+            # helpers de item
+            def item(text, align_right=False):
+                it = QtWidgets.QTableWidgetItem(str(text))
+                if align_right:
+                    it.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+                return it
+
+            # Rank
+            it_rank = QtWidgets.QTableWidgetItem(f"{i:02d}")
+            it_rank.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            it_rank.setData(QtCore.Qt.UserRole, r.get("model_key"))  # guardo model_key aqui
+            tbl.setItem(row, 0, it_rank)
+
+            # Modelo
+            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+
+            # Score
+            it_score = QtWidgets.QTableWidgetItem(f"{r.get('score', 0.0):.3f}")
+            it_score.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 2, it_score)
+
+            # Para mostrar médias de facies/espessura do modelo (a partir dos poços)
+            details = r.get("details", {}) or {}
+            accs = []
+            kappas = []
+            thks = []
+            for _, s in details.items():
+                accs.append(float(s.get("strat_acc", 0.0)))
+                kappas.append(float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0))))
+                thks.append(float(s.get("thick_score", 0.0)))
+
+            mean_acc = sum(accs) / len(accs) if accs else 0.0
+            mean_kap = sum(kappas) / len(kappas) if kappas else 0.0
+            mean_thk = sum(thks) / len(thks) if thks else 0.0
+
+            it_acc = QtWidgets.QTableWidgetItem(f"{mean_acc:.3f}")
+            it_acc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 3, it_acc)
+
+            it_kap = QtWidgets.QTableWidgetItem(f"{mean_kap:.3f}")
+            it_kap.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 4, it_kap)
+
+            tbl.setItem(row, 5, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
+
+        tbl.resizeColumnsToContents()
+
+    def _on_models_table_selection_changed(self, dlg):
+        from PyQt5 import QtCore
+
+        tbl = dlg._tbl_models
+        sel = tbl.selectedItems()
+        if not sel:
+            return
+
+        # pega a linha selecionada
+        row = tbl.currentRow()
+        if row < 0:
+            return
+
+        # model_key está no item Rank (col 0)
+        it_rank = tbl.item(row, 0)
+        model_key = it_rank.data(QtCore.Qt.UserRole)
+
+        # encontra o registro do ranking
+        ranking = getattr(dlg, "_ranking", [])
+        rec = None
+        for r in ranking:
+            if str(r.get("model_key")) == str(model_key):
+                rec = r
+                break
+
+        if rec is None:
+            return
+
+        self._populate_wells_detail_table(dlg, rec)
+
+    def _populate_wells_detail_table(self, dlg, model_record):
+        from PyQt5 import QtWidgets, QtCore
+
+        tbl = dlg._tbl_wells
+        tbl.setRowCount(0)
+
+        details = model_record.get("details", {}) or {}
+
+        # ordena por score do poço (desc)
+        items = list(details.items())
+        items.sort(key=lambda kv: float(kv[1].get("score", 0.0)), reverse=True)
+
+        for well_name, s in items:
+            row = tbl.rowCount()
+            tbl.insertRow(row)
+
+            score = float(s.get("score", 0.0))
+            acc = float(s.get("strat_acc", 0.0))
+            kap = float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0)))
+            thk = float(s.get("thick_score", 0.0))
+            t_real = float(s.get("t_real", 0.0))
+            t_sim = float(s.get("t_sim", 0.0))
+
+            def ritem(v):
+                it = QtWidgets.QTableWidgetItem(f"{v:.3f}")
+                it.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+                return it
+
+            tbl.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
+            tbl.setItem(row, 1, ritem(score))
+            tbl.setItem(row, 2, ritem(acc))
+            tbl.setItem(row, 3, ritem(kap))
+            tbl.setItem(row, 4, ritem(thk))
+
+            it_tr = QtWidgets.QTableWidgetItem(f"{t_real:.2f}")
+            it_tr.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 5, it_tr)
+
+            it_ts = QtWidgets.QTableWidgetItem(f"{t_sim:.2f}")
+            it_ts.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 6, it_ts)
+
+        tbl.resizeColumnsToContents()
+
+    def _best_profile_score_in_window(
+        self,
+        grid,
+        xref, yref,
+        real_depth, real_fac,
+        *,
+        window_size=1,     # 1,3,5,7...
+        n_bins=200,
+        w_strat=0.7,
+        w_thick=0.3,
+        ignore_real_zeros=True,
+        use_kappa=True,
+    ):
+        """
+        Retorna o melhor match REAL vs pseudo-poço do grid em uma janela NxN.
+
+        Saída (sempre 6 itens):
+        sim_depth, sim_fac, sim_total, i_best, j_best, fit_best
+
+        - Se window_size=1: compara somente a coluna central (1x1).
+        - Se window_size=3: varre 3x3 e pega o melhor score.
+        - Se window_size=5: varre 5x5, etc.
+        """
+        import numpy as np
+        from analysis import compute_well_match_score  # ou compute_well_fit_score, se for o seu nome
+
+        if grid is None:
+            return np.array([]), np.array([]), 0.0, None, None, {"score": 0.0}
+
+        ij = self._get_ij_from_xy(grid, xref, yref)
+        if ij is None:
+            return np.array([]), np.array([]), 0.0, None, None, {"score": 0.0}
+
+        i0, j0 = ij
+
+        # garante ímpar >=1
+        window_size = int(window_size)
+        if window_size < 1:
+            window_size = 1
+        if window_size % 2 == 0:
+            window_size += 1
+
+        half = window_size // 2
+
+        best_fit = None
+        best_depth = None
+        best_fac = None
+        best_total = 0.0
+        best_i = None
+        best_j = None
+
+        for di in range(-half, half + 1):
+            for dj in range(-half, half + 1):
+                ii = i0 + di
+                jj = j0 + dj
+
+                sim_depth, sim_fac, sim_total = self._column_profile_from_grid_ij(grid, ii, jj)
+                if sim_depth is None or len(sim_depth) < 2:
+                    continue
+
+                fit = compute_well_match_score(
+                    real_depth, real_fac,
+                    sim_depth, sim_fac,
+                    n_bins=n_bins,
+                    w_strat=w_strat,
+                    w_thick=w_thick,
+                    ignore_real_zeros=ignore_real_zeros,
+                    use_kappa=use_kappa,
+                )
+
+                if best_fit is None or float(fit.get("score", 0.0)) > float(best_fit.get("score", 0.0)):
+                    best_fit = fit
+                    best_depth = sim_depth
+                    best_fac = sim_fac
+                    best_total = float(sim_total) if np.isfinite(sim_total) else 0.0
+                    best_i, best_j = int(ii), int(jj)
+
+        if best_fit is None:
+            return np.array([]), np.array([]), 0.0, int(i0), int(j0), {"score": 0.0}
+
+        return best_depth, best_fac, best_total, best_i, best_j, best_fit
+
+
+    def _copy_models_table_to_clipboard(self, dlg):
+        from PyQt5 import QtWidgets
+
+        tbl = dlg._tbl_models
+        rows = tbl.rowCount()
+        cols = tbl.columnCount()
+
+        headers = [tbl.horizontalHeaderItem(c).text() for c in range(cols)]
+        lines = ["\t".join(headers)]
+
+        for r in range(rows):
+            vals = []
+            for c in range(cols):
+                it = tbl.item(r, c)
+                vals.append(it.text() if it else "")
+            lines.append("\t".join(vals))
+
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def _best_profile_score_in_window_3x3(self, grid, xref, yref, real_depth, real_fac, **kwargs):
+        return self._best_profile_score_in_window(
+            grid, xref, yref, real_depth, real_fac,
+            window_size=3,
+            **kwargs
+        )
+
+    
+    def _best_profile_in_window_3x3(self, grid, x, y, real_depth, real_fac, *, n_bins=200):
+        """
+        Varre uma janela 3x3 em torno da coluna mais próxima de (x,y) e retorna
+        o perfil do grid (pseudo-poço) que MAIS se parece com o poço real.
+
+        Critério: compute_well_fit_score (score final que você já usa no ranking),
+        comparando (real_depth/real_fac) vs (sim_depth/sim_fac).
+        """
+        import numpy as np
+        from analysis import compute_well_fit_score  # função do seu analysis.py
+
+        # pega a coluna central (a mais próxima)
+        _, _, _, ic, jc = self._column_profile_from_grid(grid, x, y, return_ij=True)
+
+        if ic is None or jc is None:
+            return np.array([]), np.array([]), 0.0, None, None, {"score": 0.0}
+
+        best = None
+        best_score = -1.0
+
+        # offsets da janela 3x3
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                i0 = ic + di
+                j0 = jc + dj
+
+                sim_depth, sim_fac, sim_total = self._column_profile_from_grid(
+                    grid, x, y, i0=i0, j0=j0, return_ij=False
+                )
+
+                if sim_depth is None or len(sim_depth) < 2:
+                    continue
+
+                fit = compute_well_fit_score(
+                    real_depth=real_depth,
+                    real_facies=real_fac,
+                    sim_depth=sim_depth,
+                    sim_facies=sim_fac,
+                    n_bins=n_bins,
+                    use_kappa=True,
+                    ignore_real_zeros=True,
+                    w_strat=0.9,
+                    w_thick=0.1,
+                )
+
+                score = float(fit.get("score", 0.0))
+                if score > best_score:
+                    best_score = score
+                    best = (sim_depth, sim_fac, sim_total, i0, j0, fit)
+
+        if best is None:
+            return np.array([]), np.array([]), 0.0, ic, jc, {"score": 0.0}
+
+        return best
+
+    
+
+
+
+
+
+
+
+
+
+
 
 
 

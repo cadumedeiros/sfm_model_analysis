@@ -753,3 +753,198 @@ def estimate_probe_tolerance_from_grid(grid, factor=0.9):
     diag = min(diag, max(b[1]-b[0], b[3]-b[2], b[5]-b[4]) * 0.1)
 
     return max(1e-6, factor * diag)
+
+
+def _cohen_kappa_from_bins(real_bins, sim_bins, valid_mask=None):
+    """
+    Calcula Cohen's Kappa a partir de dois vetores categóricos (bins).
+    Retorna (kappa, n_valid).
+    """
+    import numpy as np
+
+    r = np.asarray(real_bins)
+    s = np.asarray(sim_bins)
+
+    n = min(r.size, s.size)
+    if n == 0:
+        return 0.0, 0
+
+    r = r[:n]
+    s = s[:n]
+
+    if valid_mask is None:
+        valid_mask = np.ones(n, dtype=bool)
+    else:
+        valid_mask = np.asarray(valid_mask, dtype=bool)[:n]
+
+    r = r[valid_mask]
+    s = s[valid_mask]
+
+    if r.size == 0:
+        return 0.0, 0
+
+    # classes presentes (união)
+    classes = np.unique(np.concatenate([r, s]))
+    k = classes.size
+
+    if k == 1:
+        return None, int(r.size)
+
+    idx = {c: i for i, c in enumerate(classes)}
+    conf = np.zeros((k, k), dtype=int)
+    for rr, ss in zip(r, s):
+        conf[idx[rr], idx[ss]] += 1
+
+    N = conf.sum()
+    if N == 0:
+        return 0.0, 0
+
+    p0 = float(np.trace(conf) / N)  # acerto observado
+    pr = conf.sum(axis=1) / N       # marginais real
+    ps = conf.sum(axis=0) / N       # marginais sim
+    pe = float((pr * ps).sum())     # acerto esperado ao acaso
+
+    if (1.0 - pe) <= 1e-12:
+        return 0.0, int(N)
+
+    kappa = float((p0 - pe) / (1.0 - pe))
+    return kappa, int(N)
+
+
+def compute_well_match_score_from_profiles(
+    real_depth, real_fac,
+    sim_depth,  sim_fac,
+    *,
+    n_bins=200,
+    w_strat=0.7,
+    w_thick=0.3,
+    ignore_real_zeros=True,
+    use_kappa=True,
+):
+    """
+    Score 0..1 para REAL vs SIM, usando:
+      - Fácies via bins normalizados (n_bins)
+      - Espessura total do intervalo
+
+    Retorna dict com:
+      score, strat_acc, strat_kappa_norm, thick_score, n_valid_bins,
+      t_real, t_sim
+    """
+    import numpy as np
+
+    # thickness
+    def _thk(d):
+        if d is None:
+            return 0.0
+        d = np.asarray(d, dtype=float)
+        d = d[np.isfinite(d)]
+        if d.size < 2:
+            return 0.0
+        return float(d.max() - d.min())
+
+    t_real = _thk(real_depth)
+    t_sim  = _thk(sim_depth)
+
+    if t_real <= 1e-9:
+        thick_score = 0.0
+    else:
+        rel_err = abs(t_sim - t_real) / t_real
+        thick_score = float(np.clip(1.0 - rel_err, 0.0, 1.0))
+
+    # bins normalizados (mesma rotina do relatório)
+    r_norm = resample_to_normalized_depth(real_depth, real_fac, n_samples=n_bins).astype(int)
+    s_norm = resample_to_normalized_depth(sim_depth,  sim_fac,  n_samples=n_bins).astype(int)
+
+    valid = np.ones(n_bins, dtype=bool)
+    valid &= np.isfinite(r_norm)
+    valid &= (r_norm != -999.25)
+    if ignore_real_zeros:
+        valid &= (r_norm != 0)
+
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        return {
+            "score": 0.0,
+            "strat_acc": 0.0,
+            "strat_kappa_norm": 0.0,
+            "thick_score": thick_score,
+            "n_valid_bins": 0,
+            "t_real": float(t_real),
+            "t_sim": float(t_sim),
+        }
+
+    strat_acc = float((r_norm[valid] == s_norm[valid]).sum() / n_valid)
+
+    kappa_norm = 0.0
+    if use_kappa:
+        kappa, _ = _cohen_kappa_from_bins(r_norm, s_norm, valid_mask=valid)
+
+    if kappa is None:
+        # Kappa não informativo → usa apenas ACC
+        kappa_norm = None
+        strat_score = strat_acc
+    else:
+        kappa_norm = float(np.clip((kappa + 1.0) / 2.0, 0.0, 1.0))
+        strat_score = 0.5 * strat_acc + 0.5 * kappa_norm
+
+
+    w_sum = max(w_strat + w_thick, 1e-9)
+    score = float((w_strat * strat_score + w_thick * thick_score) / w_sum)
+
+    return {
+        "score": score,
+        "strat_acc": strat_acc,
+        "strat_kappa_norm": 0.0 if kappa_norm is None else kappa_norm,
+        "thick_score": thick_score,
+        "n_valid_bins": n_valid,
+        "t_real": float(t_real),
+        "t_sim": float(t_sim),
+    }
+
+def compute_well_match_score(
+    real_depth, real_facies,
+    sim_depth, sim_facies,
+    *,
+    n_bins=200,
+    w_strat=0.7,
+    w_thick=0.3,
+    ignore_real_zeros=True,
+    use_kappa=True,
+):
+    """
+    Backward-compatible alias.
+    Mantém window.py antigo funcionando.
+    """
+    return compute_well_match_score_from_profiles(
+        real_depth, real_facies,
+        sim_depth, sim_facies,
+        n_bins=n_bins,
+        w_strat=w_strat,
+        w_thick=w_thick,
+        ignore_real_zeros=ignore_real_zeros,
+        use_kappa=use_kappa,
+    )
+
+
+def compute_well_fit_score(
+    real_depth, real_facies,
+    sim_depth, sim_facies,
+    *,
+    n_bins=200,
+    w_strat=0.7,
+    w_thick=0.3,
+    ignore_real_zeros=True,
+    use_kappa=True,
+):
+    """
+    Alias do score “final” (mesma lógica do match score).
+    """
+    return compute_well_match_score(
+        real_depth, real_facies,
+        sim_depth, sim_facies,
+        n_bins=n_bins,
+        w_strat=w_strat,
+        w_thick=w_thick,
+        ignore_real_zeros=ignore_real_zeros,
+        use_kappa=use_kappa,
+    )
