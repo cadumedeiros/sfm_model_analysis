@@ -127,6 +127,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
 
+        self.current_mode = mode
+
         self.open_reports = []
         
         # --- 1. DADOS E ESTADO INICIAL ---
@@ -165,7 +167,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Ex: se vai de 11 a 22, clim=[11, 22]
             self.clim = [ids[0], ids[-1]]
 
-        self.state = {"reservoir_facies": initial_reservoir}
+        self.state = {"reservoir_facies": initial_reservoir, "mode": mode}
         self.compare_states = {"base": {}, "compare": {}}
         self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
         self.compare_path = None
@@ -255,13 +257,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu.addAction(action_load)
         file_menu.addAction(action_load_well)
-
         file_menu.addSeparator()
+
         action_exit = QtWidgets.QAction("Sair", self)
         action_exit.triggered.connect(self.close)
         file_menu.addAction(action_exit)
 
-        # Perspectivas (não aparecem mais no topo; ficam pro estado interno)
+        # --- Exibir (para reabrir docks/toolbars) ---
+        self.view_menu = menubar.addMenu("Exibir")
+
+        # Perspectivas (interno)
         self.act_persp_viz = QtWidgets.QAction("Visualização", self)
         self.act_persp_viz.setCheckable(True)
         self.act_persp_viz.setChecked(True)
@@ -271,23 +276,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_persp_comp.setCheckable(True)
         self.act_persp_comp.triggered.connect(lambda: self.switch_perspective("comparison"))
 
-        # Ribbon
+        # Ribbon (cria o widget)
         self.setup_toolbar_controls()
 
-        # Central (Ribbon + conteúdo)
-        self.central_stack = QtWidgets.QStackedWidget()
-        self._central_wrapper = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(self._central_wrapper)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        v.addWidget(self.ribbon)
-        v.addWidget(self.central_stack)
-        self.setCentralWidget(self._central_wrapper)
+        # >>> Ribbon em ToolBar (isso força docks abaixo do painel superior)
+        self.ribbon_toolbar = QtWidgets.QToolBar("Ribbon")
+        self.ribbon_toolbar.setMovable(False)
+        self.ribbon_toolbar.setFloatable(False)
+        self.ribbon_toolbar.setAllowedAreas(QtCore.Qt.TopToolBarArea)
+        self.ribbon_toolbar.setStyleSheet("QToolBar { border: 0px; }")
+        self.ribbon_toolbar.addWidget(self.ribbon)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, self.ribbon_toolbar)
 
-        # Docks
+        # Central: somente o stack (sem ribbon dentro)
+        self.central_stack = QtWidgets.QStackedWidget()
+        self.setCentralWidget(self.central_stack)
+
+        # Docks (Explorer/Props)
         self.setup_docks(nx, ny, nz)
 
-        # --- PERSPECTIVA 1: VISUALIZAÇÃO (Individual) ---
+        # Ações do menu Exibir (toggle docks/toolbars)
+        self.view_menu.addAction(self.dock_explorer.toggleViewAction())
+        self.view_menu.addAction(self.dock_props.toggleViewAction())
+        self.view_menu.addSeparator()
+        self.view_menu.addAction(self.ribbon_toolbar.toggleViewAction())
+
+        # --- PERSPECTIVA 1: VISUALIZAÇÃO ---
         self.viz_container = QtWidgets.QStackedWidget()
         self.tabs = self.viz_container
 
@@ -319,30 +333,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.central_stack.addWidget(self.viz_container)
 
-        # --- PERSPECTIVA 2: COMPARAÇÃO (Stack: 3D vs Relatório) ---
+        # --- PERSPECTIVA 2: COMPARAÇÃO ---
         self.compare_stack = QtWidgets.QStackedWidget()
 
-        # Página 0: Visualização 3D (dinâmica)
         self.comp_page_3d = QtWidgets.QWidget()
         self.comp_layout_3d = QtWidgets.QVBoxLayout(self.comp_page_3d)
         self.comp_layout_3d.setContentsMargins(0, 0, 0, 0)
         self.compare_stack.addWidget(self.comp_page_3d)
 
-        # Página 1: Métricas comparadas
         self.comp_page_metrics = QtWidgets.QWidget()
         self.comp_metrics_layout = QtWidgets.QVBoxLayout(self.comp_page_metrics)
         self.comp_metrics_layout.setContentsMargins(6, 6, 6, 6)
 
         self.tabs_compare_metrics = QtWidgets.QTabWidget()
 
-        # Aba: Fácies
         t_fa = QtWidgets.QWidget()
         l_fa = QtWidgets.QVBoxLayout(t_fa)
         self.facies_compare_table = QtWidgets.QTableWidget()
         l_fa.addWidget(self.facies_compare_table)
         self.tabs_compare_metrics.addTab(t_fa, "Fácies")
 
-        # Aba: Reservatório
         t_res = QtWidgets.QWidget()
         l_res = QtWidgets.QVBoxLayout(t_res)
         self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
@@ -352,13 +362,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_metrics_layout.addWidget(self.tabs_compare_metrics)
         self.compare_stack.addWidget(self.comp_page_metrics)
 
-        self.central_stack.addWidget(self.compare_stack)
-
-        # Página 2: Mapas 2D
         self.comp_page_2d = QtWidgets.QWidget()
         self.comp_2d_layout = QtWidgets.QVBoxLayout(self.comp_page_2d)
         self.comp_2d_layout.setContentsMargins(0, 0, 0, 0)
         self.compare_stack.addWidget(self.comp_page_2d)
+
+        self.central_stack.addWidget(self.compare_stack)
+
 
 
     def _make_embedded_plotter(self, parent=None):
@@ -945,17 +955,29 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(label)
 
     def setup_toolbar_controls(self):
-        """Ribbon (estilo Word/Excel) com as principais funcionalidades."""
+        """Ribbon (estilo Office) com grupos discretos."""
         self.ribbon = QtWidgets.QTabWidget()
         self.ribbon.setDocumentMode(True)
         self.ribbon.setMovable(False)
         self.ribbon.setUsesScrollButtons(True)
         self.ribbon.setElideMode(QtCore.Qt.ElideRight)
-        self.ribbon.setMaximumHeight(135)
+        self.ribbon.setMaximumHeight(130)
+
+        # >>> Títulos dos grupos discretos (sem negrito, menor)
         self.ribbon.setStyleSheet("""
             QTabWidget::pane { border: 0px; }
             QTabBar::tab { padding: 6px 12px; }
-            QGroupBox { font-weight: 600; }
+            QGroupBox {
+                font-weight: normal;
+                font-size: 11px;
+                margin-top: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0px 2px;
+                color: #444;
+            }
         """)
 
         def make_tab():
@@ -985,9 +1007,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 b.clicked.connect(slot)
             return b
 
-        # ---------------------------
         # HOME
-        # ---------------------------
         self.ribbon_tab_home, l_home = make_tab()
 
         gb_data, gl_data = make_group("Dados")
@@ -996,14 +1016,10 @@ class MainWindow(QtWidgets.QMainWindow):
         l_home.addWidget(gb_data)
 
         gb_persp, gl_persp = make_group("Perspectiva")
-        self.btn_persp_viz = make_btn(
-            "Visualizar", QtWidgets.QStyle.SP_DesktopIcon,
-            lambda: self.switch_perspective("visualization"), checkable=True
-        )
-        self.btn_persp_comp = make_btn(
-            "Comparar", QtWidgets.QStyle.SP_DirLinkIcon,
-            lambda: self.switch_perspective("comparison"), checkable=True
-        )
+        self.btn_persp_viz = make_btn("Visualizar", QtWidgets.QStyle.SP_DesktopIcon,
+                                    lambda: self.switch_perspective("visualization"), checkable=True)
+        self.btn_persp_comp = make_btn("Comparar", QtWidgets.QStyle.SP_DirLinkIcon,
+                                    lambda: self.switch_perspective("comparison"), checkable=True)
         self._persp_group = QtWidgets.QButtonGroup(self)
         self._persp_group.setExclusive(True)
         self._persp_group.addButton(self.btn_persp_viz)
@@ -1020,11 +1036,8 @@ class MainWindow(QtWidgets.QMainWindow):
         l_home.addStretch(1)
         self.ribbon.addTab(self.ribbon_tab_home, "Home")
 
-        # ---------------------------
         # VIEW
-        # ---------------------------
         self.ribbon_tab_view, l_view = make_tab()
-
         gb_mode, gl_mode = make_group("Modo")
         self.btn_mode = QtWidgets.QToolButton(self)
         self.btn_mode.setText("Modo: Fácies")
@@ -1033,18 +1046,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mode.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_mode.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
         self.btn_mode.setAutoRaise(True)
-
         menu_mode = QtWidgets.QMenu(self.btn_mode)
-        modes = [
-            ("Fácies", "facies"),
-            ("Reservatório", "reservoir"),
-            ("Clusters", "clusters"),
-            ("Maior Cluster", "largest"),
-            ("Espessura Local", "thickness_local"),
-        ]
-        for text, data in modes:
-            action = menu_mode.addAction(text)
-            action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
+        for text, data in [("Fácies", "facies"), ("Reservatório", "reservoir"), ("Clusters", "clusters"),
+                        ("Maior Cluster", "largest"), ("Espessura Local", "thickness_local")]:
+            a = menu_mode.addAction(text)
+            a.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
         self.btn_mode.setMenu(menu_mode)
         gl_mode.addWidget(self.btn_mode)
         l_view.addWidget(gb_mode)
@@ -1057,24 +1063,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_thick.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_thick.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
         self.btn_thick.setAutoRaise(True)
-
         menu_thick = QtWidgets.QMenu(self.btn_thick)
-        thickness_opts = ["Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]
-        for label in thickness_opts:
-            action = menu_thick.addAction(label)
-            action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
+        for label in ["Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]:
+            a = menu_thick.addAction(label)
+            a.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
         self.btn_thick.setMenu(menu_thick)
         gl_thick.addWidget(self.btn_thick)
-
         l_view.addWidget(gb_thick)
+
         l_view.addStretch(1)
         self.ribbon.addTab(self.ribbon_tab_view, "View")
 
-        # ---------------------------
-        # COMPARE
-        # ---------------------------
+        # COMPARE + REPORTS (mantém seu conteúdo atual)
         self.ribbon_tab_compare, l_cmp = make_tab()
-
         gb_cmp_view, gl_cmp_view = make_group("Vista")
         self.lbl_comp_view = QtWidgets.QLabel("Vista:")
         self.combo_comp_view = QtWidgets.QComboBox()
@@ -1083,30 +1084,23 @@ class MainWindow(QtWidgets.QMainWindow):
         gl_cmp_view.addWidget(self.lbl_comp_view)
         gl_cmp_view.addWidget(self.combo_comp_view)
         l_cmp.addWidget(gb_cmp_view)
-
         gb_cmp_actions, gl_cmp_actions = make_group("Ações")
         gl_cmp_actions.addWidget(make_btn("Atualizar", QtWidgets.QStyle.SP_BrowserReload, self.refresh_comparison_active_view))
         l_cmp.addWidget(gb_cmp_actions)
-
         l_cmp.addStretch(1)
         self.ribbon.addTab(self.ribbon_tab_compare, "Compare")
 
-        # ---------------------------
-        # REPORTS
-        # ---------------------------
         self.ribbon_tab_reports, l_rep = make_tab()
-
         gb_reports, gl_reports = make_group("Relatórios")
         gl_reports.addWidget(make_btn("Abrir...", QtWidgets.QStyle.SP_DialogOpenButton, self.open_reports_dialog))
         gl_reports.addWidget(make_btn("Selecionados", QtWidgets.QStyle.SP_FileDialogContentsView, self.open_selected_well_reports))
         l_rep.addWidget(gb_reports)
-
         gb_rank, gl_rank = make_group("Score")
         gl_rank.addWidget(make_btn("Ranking", QtWidgets.QStyle.SP_ArrowUp, self.show_models_well_fit_ranking))
         l_rep.addWidget(gb_rank)
-
         l_rep.addStretch(1)
         self.ribbon.addTab(self.ribbon_tab_reports, "Reports")
+
 
 
 
@@ -1132,8 +1126,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.change_thickness_mode(label)
 
     def setup_docks(self, nx, ny, nz):
-        # --- DOCK EXPLORER - ESQUERDA ---
+        """Cria o Project Explorer (esquerda) e o Inspector (direita)."""
+        # ---------------------------
+        # Dock ESQUERDO: Project Explorer
+        # ---------------------------
         self.dock_explorer = QtWidgets.QDockWidget("Project Explorer", self)
+        self.dock_explorer.setObjectName("dock_explorer")
         self.dock_explorer.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
         self.dock_explorer.setFeatures(
             QtWidgets.QDockWidget.DockWidgetMovable |
@@ -1141,122 +1139,99 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QDockWidget.DockWidgetClosable
         )
 
+        explorer_widget = QtWidgets.QWidget()
+        explorer_layout = QtWidgets.QVBoxLayout(explorer_widget)
+        explorer_layout.setContentsMargins(6, 6, 6, 6)
+
         self.project_tree = QtWidgets.QTreeWidget()
-        self.project_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.project_tree.setHeaderLabel("Hierarquia")
-        self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
         self.project_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
         self.project_tree.itemChanged.connect(self.on_tree_item_changed)
-        
+        self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
 
-        self.dock_explorer.setWidget(self.project_tree)
+        explorer_layout.addWidget(self.project_tree)
+        self.dock_explorer.setWidget(explorer_widget)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_explorer)
 
-        self.add_model_to_tree("base", "Modelo Base")
-
-        self.wells_root_item = QtWidgets.QTreeWidgetItem(self.project_tree, ["Poços"])
-        self.wells_root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-        self.wells_root_item.setData(0, QtCore.Qt.UserRole, "wells_root")
-        self.wells_root_item.setExpanded(True)
-
-        # --- DOCK PROPRIEDADES - DIREITA ---
+        # ---------------------------
+        # Dock DIREITO: Inspector (Geometria + Propriedades + Compare)
+        # ---------------------------
         self.dock_props = QtWidgets.QDockWidget("Propriedades", self)
-        self.dock_props.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        self.dock_props.setObjectName("dock_props")
+        self.dock_props.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
         self.dock_props.setFeatures(
             QtWidgets.QDockWidget.DockWidgetMovable |
             QtWidgets.QDockWidget.DockWidgetFloatable |
             QtWidgets.QDockWidget.DockWidgetClosable
         )
 
-        self.props_stack = QtWidgets.QStackedWidget()
+        self.inspector_tabs = QtWidgets.QTabWidget()
+        self.inspector_tabs.setDocumentMode(True)
 
-        self.props_stack.addWidget(QtWidgets.QLabel("Selecione um item na árvore."))
+        # Aba 1: Geometria (reusa seu widget atual de cortes)
+        # Se você já tem um widget pronto, mantenha o nome/instância existente.
+        # Vou assumir que você cria algo tipo self.grid_slicer_widget na versão atual.
+        # Se não existir, você pode adaptar para o seu construtor real.
+        if hasattr(self, "grid_slicer_widget") and self.grid_slicer_widget is not None:
+            self.inspector_tab_geom = self.grid_slicer_widget
+        else:
+            # fallback: chama seu construtor atual (ajuste o nome se for diferente no seu código)
+            self.inspector_tab_geom = self._build_grid_slicer_widget(nx, ny, nz) if hasattr(self, "_build_grid_slicer_widget") else QtWidgets.QWidget()
 
-        self.page_grid = QtWidgets.QWidget()
-        pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
-        self.slicer_widget = GridSlicerWidget(nx, ny, nz, self.on_ui_slice_changed)
-        pg_layout.addWidget(self.slicer_widget)
-        pg_layout.addStretch()
-        self.props_stack.addWidget(self.page_grid)
+        self.inspector_tabs.addTab(self.inspector_tab_geom, "Geometria")
 
-        self.page_props = QtWidgets.QWidget()
-        pp_layout = QtWidgets.QVBoxLayout(self.page_props)
-        pp_layout.setContentsMargins(2, 2, 2, 2)
+        # Aba 2: Propriedades (reusa a página que já existia)
+        if hasattr(self, "page_grid_props") and self.page_grid_props is not None:
+            self.inspector_tab_props = self.page_grid_props
+        else:
+            # fallback: tenta criar a página de props se existir builder
+            self.inspector_tab_props = self._build_grid_props_page() if hasattr(self, "_build_grid_props_page") else QtWidgets.QWidget()
 
-        self.legend_group = QtWidgets.QGroupBox("Legenda & Filtro")
-        lgl = QtWidgets.QVBoxLayout(self.legend_group)
-        lgl.setContentsMargins(2, 5, 2, 2)
+        self.inspector_tabs.addTab(self.inspector_tab_props, "Propriedades")
 
-        self.facies_legend_table = QtWidgets.QTableWidget()
-        self.facies_legend_table.setColumnCount(4)
-        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "N", "Res"])
-        self.facies_legend_table.verticalHeader().setVisible(False)
-        self.facies_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        self.facies_legend_table.itemChanged.connect(self.on_legend_item_changed)
-        lgl.addWidget(self.facies_legend_table)
+        # Aba 3: Compare (só existe se você já tinha page_compare)
+        if hasattr(self, "page_compare") and self.page_compare is not None:
+            self.inspector_tabs.addTab(self.page_compare, "Comparação")
 
-        self.clusters_legend_table = QtWidgets.QTableWidget()
-        self.clusters_legend_table.setColumnCount(3)
-        self.clusters_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "Células"])
-        self.clusters_legend_table.verticalHeader().setVisible(False)
-        self.clusters_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        self.clusters_legend_table.setVisible(False)
-        lgl.addWidget(self.clusters_legend_table)
-
-        pp_layout.addWidget(self.legend_group)
-        self.props_stack.addWidget(self.page_props)
-
-        self.page_compare = self.setup_comparison_dock_content()
-        self.props_stack.addWidget(self.page_compare)
-
-        self.dock_props.setWidget(self.props_stack)
-
-        # >>> AGORA NA DIREITA:
+        self.dock_props.setWidget(self.inspector_tabs)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
 
-        # Ajuste inicial de larguras (explorer menor, props maior)
-        self.resizeDocks([self.dock_explorer, self.dock_props], [320, 420], QtCore.Qt.Horizontal)
+        # (Opcional) deixa a direita um pouco mais estreita por padrão
+        try:
+            self.resizeDocks([self.dock_explorer, self.dock_props], [320, 320], QtCore.Qt.Horizontal)
+        except Exception:
+            pass
 
 
-    def add_model_to_tree(self, model_key, model_name):
-        root_item = QtWidgets.QTreeWidgetItem([model_name])
-        root_item.setData(0, QtCore.Qt.UserRole, "model_root")
-        root_item.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
 
-        # Se existir o nó Poços, insere antes dele. Senão, adiciona no fim.
-        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
-            idx = max(0, self.project_tree.indexOfTopLevelItem(self.wells_root_item))
-            self.project_tree.insertTopLevelItem(idx, root_item)
-        else:
-            self.project_tree.addTopLevelItem(root_item)
+    def add_model_to_tree(self, model_key, name, is_base=False):
+        """Adiciona o modelo no Project Explorer com sub-itens mínimos."""
+        root = self.project_tree.invisibleRootItem()
 
-        is_comparison = hasattr(self, 'central_stack') and (self.central_stack.currentIndex() == 1)
-        self._set_item_checkbox_visible(root_item, is_comparison)
-        if is_comparison:
-            root_item.setCheckState(0, QtCore.Qt.Checked)
+        item = QtWidgets.QTreeWidgetItem(root)
+        item.setText(0, name)
+        item.setData(0, QtCore.Qt.UserRole, "model_root")
+        item.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
 
-        root_item.setExpanded(True)
+        # Ícone (pasta/modelo)
+        item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
 
-        item_grid = QtWidgets.QTreeWidgetItem(root_item, ["Geometria (Grid)"])
-        item_grid.setData(0, QtCore.Qt.UserRole, "grid_settings")
-        item_grid.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        item_grid.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        # Sub-itens enxutos
+        sub_geom = QtWidgets.QTreeWidgetItem(item)
+        sub_geom.setText(0, "Geometria (Grid)")
+        sub_geom.setData(0, QtCore.Qt.UserRole, "model_geom")
+        sub_geom.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
+        sub_geom.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
 
-        item_props = QtWidgets.QTreeWidgetItem(root_item, ["Propriedades & Filtros"])
-        item_props.setData(0, QtCore.Qt.UserRole, "prop_settings")
-        item_props.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        item_props.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
+        sub_props = QtWidgets.QTreeWidgetItem(item)
+        sub_props.setText(0, "Propriedades & Filtros")
+        sub_props.setData(0, QtCore.Qt.UserRole, "model_props")
+        sub_props.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
+        sub_props.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
 
-        item_metrics = QtWidgets.QTreeWidgetItem(root_item, ["Métricas & Estatísticas"])
-        item_metrics.setData(0, QtCore.Qt.UserRole, "metrics_view")
-        item_metrics.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        item_metrics.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView))
+        item.setExpanded(True)
+        return item
 
-        item_2d = QtWidgets.QTreeWidgetItem(root_item, ["Mapas 2D"])
-        item_2d.setData(0, QtCore.Qt.UserRole, "map2d_view")
-        item_2d.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        item_2d.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
 
 
     # --- LÓGICA DE INTERAÇÃO TREE ---
@@ -1359,50 +1334,34 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
         if not items:
-            if self.central_stack.currentIndex() == 0:
-                self.props_stack.setCurrentIndex(0)
             return
 
-        item = items[0]
-        role = item.data(0, QtCore.Qt.UserRole)
-        model_key = item.data(0, QtCore.Qt.UserRole + 1)
+        it = items[0]
+        it_type = it.data(0, QtCore.Qt.UserRole)
+        model_key = it.data(0, QtCore.Qt.UserRole + 1)
 
-        # ✅ Só atualiza "active_model_key" quando o clique foi em algo de MODELO
-        # (e apenas se esse model_key realmente existe no self.models)
-        if role in ("model_root", "grid_settings", "prop_settings", "metrics_view", "map2d_view"):
-            if model_key and (model_key in self.models):
-                self.state["active_model_key"] = model_key
+        # Se clicou no root do modelo, só atualiza modelo ativo
+        if it_type == "model_root":
+            if model_key:
+                self.active_model_key = model_key
+            return
 
-        is_comparison_mode = (self.central_stack.currentIndex() == 1)
+        # Se clicou em sub-itens do modelo: troca aba do Inspector
+        if hasattr(self, "inspector_tabs") and isinstance(self.inspector_tabs, QtWidgets.QTabWidget):
+            if it_type == "model_geom":
+                # Aba "Geometria"
+                idx = self.inspector_tabs.indexOf(self.inspector_tab_geom) if hasattr(self, "inspector_tab_geom") else 0
+                if idx >= 0:
+                    self.inspector_tabs.setCurrentIndex(idx)
+            elif it_type == "model_props":
+                idx = self.inspector_tabs.indexOf(self.inspector_tab_props) if hasattr(self, "inspector_tab_props") else 1
+                if idx >= 0:
+                    self.inspector_tabs.setCurrentIndex(idx)
 
-        # --- LÓGICA DO PAINEL LATERAL (COLUNA 2) ---
-        if is_comparison_mode:
-            self.props_stack.setCurrentWidget(self.page_compare)
-            self.dock_props.setWindowTitle("Painel de Comparação")
-        else:
-            if role == "grid_settings":
-                self.props_stack.setCurrentWidget(self.page_grid)
-                self.dock_props.setWindowTitle("Geometria")
-            else:
-                self.props_stack.setCurrentWidget(self.page_props)
-                self.dock_props.setWindowTitle("Propriedades")
+        # Mantém seu comportamento anterior de atualizar a seleção/modelo
+        if model_key:
+            self.active_model_key = model_key
 
-        # --- LÓGICA DA ÁREA CENTRAL ---
-        # (só faz sentido se model_key for de modelo)
-        if role in ("model_root", "grid_settings", "prop_settings", "metrics_view", "map2d_view") and model_key:
-            self.update_sidebar_metrics_text(model_key)
-
-            if not is_comparison_mode:
-                if role == "metrics_view":
-                    self.viz_container.setCurrentIndex(2)
-                    self.update_metrics_view_content(model_key)
-                elif role == "map2d_view":
-                    self.switch_main_view_to_model(model_key)
-                    self.viz_container.setCurrentIndex(1)
-                    self.update_2d_map()
-                elif role in ["grid_settings", "prop_settings", "model_root"]:
-                    self.switch_main_view_to_model(model_key)
-                    self.viz_container.setCurrentIndex(0)
 
 
     def _set_item_checkbox_visible(self, item, visible):
@@ -1744,14 +1703,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def update_comparison_tables(self):
+        # --- garante que a tabela GLOBAL existe e está na UI ---
+        if not hasattr(self, "global_compare_table"):
+            self.global_compare_table = QtWidgets.QTableWidget()
+            self.global_compare_table.setColumnCount(4)
+            self.global_compare_table.setHorizontalHeaderLabels(["Métrica", "Base", "Comp", "Dif"])
+            self.global_compare_table.verticalHeader().setVisible(False)
+            self.global_compare_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            self.global_compare_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+
+            # Se existir o tab widget de métricas comparadas, coloca como primeira aba
+            if hasattr(self, "tabs_compare_metrics") and isinstance(self.tabs_compare_metrics, QtWidgets.QTabWidget):
+                # evita duplicar se já existir
+                existing = [self.tabs_compare_metrics.tabText(i) for i in range(self.tabs_compare_metrics.count())]
+                if "Global" not in existing:
+                    tab_global = QtWidgets.QWidget()
+                    l = QtWidgets.QVBoxLayout(tab_global)
+                    l.setContentsMargins(0, 0, 0, 0)
+                    l.addWidget(self.global_compare_table)
+                    self.tabs_compare_metrics.insertTab(0, tab_global, "Global")
+
+        # --- validações mínimas (não derruba o app) ---
+        if not hasattr(self, "cached_metrics") or "base" not in self.cached_metrics or "compare" not in self.cached_metrics:
+            return
+
         # 1. Recupera as métricas do cache
-        m0 = self.cached_metrics["base"]["metrics"]
-        m1 = self.cached_metrics["compare"]["metrics"]
-        
+        m0 = self.cached_metrics["base"].get("metrics", {})
+        m1 = self.cached_metrics["compare"].get("metrics", {})
+
         # --- TABELA 1: GLOBAL ---
         rows = []
-        def get(m, k): return m.get(k) if m else None
-        
+
+        def get(m, k):
+            return m.get(k) if m else None
+
         rows.append(("NTG", get(m0, "ntg"), get(m1, "ntg")))
         rows.append(("Total Cel", get(m0, "total_cells"), get(m1, "total_cells")))
         rows.append(("Res Cel", get(m0, "res_cells"), get(m1, "res_cells")))
@@ -1760,69 +1745,246 @@ class MainWindow(QtWidgets.QMainWindow):
         rows.append(("Maior Cluster", get(m0, "largest_size"), get(m1, "largest_size")))
 
         self.global_compare_table.setRowCount(len(rows))
-        for i, (l, a, b) in enumerate(rows):
-            self.global_compare_table.setItem(i, 0, QtWidgets.QTableWidgetItem(l))
-            
+        for i, (label, a, b) in enumerate(rows):
+            self.global_compare_table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(label)))
+
             val_a = f"{a:.3f}" if isinstance(a, float) else str(a) if a is not None else "-"
             val_b = f"{b:.3f}" if isinstance(b, float) else str(b) if b is not None else "-"
-            
+
             self.global_compare_table.setItem(i, 1, QtWidgets.QTableWidgetItem(val_a))
             self.global_compare_table.setItem(i, 2, QtWidgets.QTableWidgetItem(val_b))
-            
-            # Coluna Diferença
+
             if isinstance(a, (int, float)) and isinstance(b, (int, float)):
                 diff = b - a
-                # Formatação condicional simples para diferença
                 item_diff = QtWidgets.QTableWidgetItem(f"{diff:.3f}")
-                if diff > 0: item_diff.setForeground(QColor("green"))
-                elif diff < 0: item_diff.setForeground(QColor("red"))
+                if diff > 0:
+                    item_diff.setForeground(QColor("green"))
+                elif diff < 0:
+                    item_diff.setForeground(QColor("red"))
                 self.global_compare_table.setItem(i, 3, item_diff)
             else:
                 self.global_compare_table.setItem(i, 3, QtWidgets.QTableWidgetItem("-"))
+
         self.global_compare_table.resizeColumnsToContents()
 
         # --- TABELA 2: DISTRIBUIÇÃO DE FÁCIES (GRID INTEIRO) ---
-        # Usa self.base_facies_stats e self.compare_facies_stats calculados no init/load
-        stats0 = getattr(self, "base_facies_stats", {})
-        stats1 = getattr(self, "compare_facies_stats", {})
-        
-        if stats0:
-            all_facies = sorted(set(stats0.keys()) | (set(stats1.keys()) if stats1 else set()))
+        stats0 = getattr(self, "base_facies_stats", {}) or {}
+        stats1 = getattr(self, "compare_facies_stats", {}) or {}
+
+        if hasattr(self, "facies_compare_table") and stats0:
+            all_facies = sorted(set(stats0.keys()) | set(stats1.keys()))
             self.facies_compare_table.setRowCount(len(all_facies))
-            
+
             for row, fac in enumerate(all_facies):
-                s0 = stats0.get(fac, {"cells": 0, "fraction": 0.0, "volume": 0.0, "thickness_gross": 0.0})
-                s1 = stats1.get(fac, {"cells": 0, "fraction": 0.0, "volume": 0.0, "thickness_gross": 0.0}) if stats1 else {"cells": 0, "fraction": 0.0, "volume": 0.0, "thickness_gross": 0.0}
-                
+                s0 = stats0.get(fac, {"cells": 0, "fraction": 0.0})
+                s1 = stats1.get(fac, {"cells": 0, "fraction": 0.0})
+
                 self.facies_compare_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(fac)))
-                self.facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0["cells"])))
-                self.facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0['fraction']:.1f}%"))
-                self.facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1["cells"])))
-                self.facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1['fraction']:.1f}%"))
+                self.facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0.get("cells", 0))))
+                self.facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0.get('fraction',0.0):.1f}%"))
+                self.facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1.get("cells", 0))))
+                self.facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1.get('fraction',0.0):.1f}%"))
                 self.facies_compare_table.setItem(row, 5, QtWidgets.QTableWidgetItem(f"{s0.get('volume',0):.2e}"))
                 self.facies_compare_table.setItem(row, 6, QtWidgets.QTableWidgetItem(f"{s1.get('volume',0):.2e}"))
                 self.facies_compare_table.setItem(row, 7, QtWidgets.QTableWidgetItem(f"{s0.get('thickness_gross',0):.1f}"))
                 self.facies_compare_table.setItem(row, 8, QtWidgets.QTableWidgetItem(f"{s1.get('thickness_gross',0):.1f}"))
+
             self.facies_compare_table.resizeColumnsToContents()
 
         # --- TABELA 3: RESERVATÓRIO ---
-        # Usa reservoir_facies_distribution_array
+        # Nota: aqui sua versão original usa o "facies" importado do load_data
         stats0r, _ = reservoir_facies_distribution_array(facies, self.models["base"]["reservoir_facies"])
-        stats1r = getattr(self, "comp_res_stats", {})
-        
-        if stats0r:
-            res_union = sorted(set(stats0r.keys()) | set(stats1r.keys() if stats1r else []))
+        stats1r = getattr(self, "comp_res_stats", {}) or {}
+
+        if hasattr(self, "reservoir_facies_compare_table") and stats0r:
+            res_union = sorted(set(stats0r.keys()) | set(stats1r.keys()))
             self.reservoir_facies_compare_table.setRowCount(len(res_union))
+
             for row, fac in enumerate(res_union):
                 s0 = stats0r.get(fac, {"cells": 0, "fraction": 0.0})
-                s1 = stats1r.get(fac, {"cells": 0, "fraction": 0.0}) if stats1r else {"cells": 0, "fraction": 0.0}
-                
+                s1 = stats1r.get(fac, {"cells": 0, "fraction": 0.0})
+
                 self.reservoir_facies_compare_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(fac)))
-                self.reservoir_facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0["cells"])))
-                self.reservoir_facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0['fraction']:.1f}%"))
-                self.reservoir_facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1["cells"])))
-                self.reservoir_facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1['fraction']:.1f}%"))
+                self.reservoir_facies_compare_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(s0.get("cells", 0))))
+                self.reservoir_facies_compare_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{100*s0.get('fraction',0.0):.1f}%"))
+                self.reservoir_facies_compare_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(s1.get("cells", 0))))
+                self.reservoir_facies_compare_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{100*s1.get('fraction',0.0):.1f}%"))
+
             self.reservoir_facies_compare_table.resizeColumnsToContents()
+    
+    def update_multi_model_filter_table(self, model_keys):
+        """Matriz Fácies x Modelos (checkbox) para definir reservoir_facies por modelo.
+        - Inclui união de fácies de todos os modelos
+        - Trata NaN/float com segurança (NaN -> 0)
+        - Desabilita checkbox quando a fácies não existe naquele modelo
+        - Mostra cor da fácies (ícone + fundo suave) usando self.facies_colors
+        - Nunca deixa signals bloqueados (try/finally)
+        """
+        if not hasattr(self, "multi_model_table"):
+            return
+
+        def safe_unique_facies(f):
+            if f is None:
+                return np.array([], dtype=int)
+            a = np.asarray(f)
+            if a.size == 0:
+                return np.array([], dtype=int)
+
+            if np.issubdtype(a.dtype, np.floating):
+                a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0).astype(int, copy=False)
+            elif a.dtype == object:
+                out = []
+                for x in a.ravel():
+                    try:
+                        if x is None:
+                            out.append(0)
+                        else:
+                            fx = float(x)
+                            if np.isnan(fx) or np.isinf(fx):
+                                out.append(0)
+                            else:
+                                out.append(int(fx))
+                    except Exception:
+                        out.append(0)
+                a = np.asarray(out, dtype=int)
+            else:
+                a = a.astype(int, copy=False)
+
+            return np.unique(a)
+
+        def facies_color_icon(fac_id: int):
+            """Retorna (QIcon, QColor_bg) ou (None, None) se não existir."""
+            if not hasattr(self, "facies_colors") or not self.facies_colors:
+                return None, None
+            rgba = self.facies_colors.get(int(fac_id))
+            if rgba is None:
+                return None, None
+            try:
+                r, g, b = rgba[0], rgba[1], rgba[2]
+                q = QtGui.QColor(int(r * 255), int(g * 255), int(b * 255))
+                pm = QtGui.QPixmap(14, 14)
+                pm.fill(q)
+                icon = QtGui.QIcon(pm)
+                bg = QtGui.QColor(q)
+                bg.setAlpha(45)
+                return icon, bg
+            except Exception:
+                return None, None
+
+        t = self.multi_model_table
+        t.blockSignals(True)
+        try:
+            facies_union = set()
+            facies_by_model = {}
+
+            for mk in model_keys:
+                _, f = self._get_model_payload(mk)
+                uniq = safe_unique_facies(f)
+                s = set(int(x) for x in uniq.tolist())
+                facies_by_model[mk] = s
+                facies_union |= s
+
+            facies_list = sorted(int(x) for x in facies_union)
+
+            headers = ["Fácies"]
+            for mk in model_keys:
+                if str(mk).lower() == "base":
+                    headers.append("Base")
+                elif hasattr(self, "models") and mk in self.models and self.models[mk].get("name"):
+                    headers.append(self.models[mk]["name"])
+                else:
+                    headers.append(str(mk))
+
+            t.clear()
+            t.setRowCount(len(facies_list))
+            t.setColumnCount(1 + len(model_keys))
+            t.setHorizontalHeaderLabels(headers)
+
+            for r, fac in enumerate(facies_list):
+                it_fac = QtWidgets.QTableWidgetItem(str(fac))
+                it_fac.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+
+                icon, bg = facies_color_icon(fac)
+                if icon is not None:
+                    it_fac.setIcon(icon)
+                if bg is not None:
+                    it_fac.setBackground(QtGui.QBrush(bg))
+
+                t.setItem(r, 0, it_fac)
+
+                for c, mk in enumerate(model_keys, start=1):
+                    present = fac in facies_by_model.get(mk, set())
+
+                    it = QtWidgets.QTableWidgetItem("")
+                    it.setData(QtCore.Qt.UserRole, (mk, int(fac)))
+
+                    if not present:
+                        it.setFlags(QtCore.Qt.ItemIsSelectable)  # sem checkbox
+                        it.setCheckState(QtCore.Qt.Unchecked)
+                        t.setItem(r, c, it)
+                        continue
+
+                    it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsSelectable)
+
+                    rf = set()
+                    if hasattr(self, "models") and mk in self.models:
+                        rf = self.models[mk].get("reservoir_facies") or set()
+
+                    it.setCheckState(QtCore.Qt.Checked if int(fac) in rf else QtCore.Qt.Unchecked)
+                    t.setItem(r, c, it)
+
+            t.resizeColumnsToContents()
+
+        finally:
+            t.blockSignals(False)
+
+
+    def contextMenuEvent(self, event):
+        menu = self.createPopupMenu()
+        if menu is not None:
+            menu.exec_(event.globalPos())
+
+
+    def _get_model_payload(self, model_key):
+        """Retorna (grid, facies) para Base ou modelo adicional."""
+        def pick(d, *keys):
+            if not isinstance(d, dict):
+                return None
+            for k in keys:
+                if k in d and d[k] is not None:
+                    return d[k]
+            return None
+
+        key_str = str(model_key)
+        is_base = key_str.lower() == "base"
+
+        if is_base:
+            # >>> No seu projeto o BASE grid vem de load_data.grid (global)
+            from load_data import grid as grid_base
+            fac = None
+            if hasattr(self, "models") and isinstance(self.models, dict) and "base" in self.models:
+                fac = pick(self.models["base"], "facies", "facies_data")
+            return grid_base, fac
+
+        # Modelos adicionais (você guarda grid e facies no self.models[model_id])
+        if hasattr(self, "models") and isinstance(self.models, dict) and key_str in self.models:
+            m = self.models[key_str]
+            grid = pick(m, "grid", "ugrid", "pv_grid")
+            facies = pick(m, "facies", "facies_data")
+            return grid, facies
+
+        return None, None
+
+
+
+
+    def _get_reservoir_facies_for_base(self):
+        """Reservoir facies do modelo base, se existir."""
+        if hasattr(self, "models") and isinstance(self.models, dict) and "base" in self.models:
+            return self.models["base"].get("reservoir_facies")
+        return None
+
+
 
     def update_base_reservoir_compare(self, item):
          if item.column() != 3: return
@@ -2130,6 +2292,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 2. Atualiza visualização principal (Active Grid)
         self.state["mode"] = new_mode
+        self.current_mode = new_mode
         self.state["refresh"]()
         
         # 3. Atualiza estados de Comparação (se existirem)
@@ -2576,39 +2739,42 @@ class MainWindow(QtWidgets.QMainWindow):
   
 
     def update_dynamic_comparison_view(self, checked_models=None):
-        """
-        Recria a view de comparação 3D para os modelos selecionados.
-        """
         from visualize import run
 
         if checked_models is None:
             checked_models = self.get_checked_models()
 
-        checked_models = [m for m in checked_models if m != "Base"]
-        models_to_show = ["Base"] + checked_models
+        checked_non_base = [m for m in checked_models if str(m).lower() != "base"]
+        models_to_show = ["base"] + checked_non_base
 
+        # >>> Atualiza a matriz de filtro sempre que muda seleção
+        self.update_multi_model_filter_table(models_to_show)
+
+        # parâmetros globais
+        mode = self.state.get("mode", "facies")
+        z_exag = float(self.state.get("z_exag", 15.0))
+        show_scalar_bar = bool(self.state.get("show_scalar_bar", True))
+
+        # limpa plotters antigos
         if hasattr(self, "active_comp_plotters"):
             for p in self.active_comp_plotters:
-                try:
-                    p.close()
-                except:
-                    pass
+                try: p.close()
+                except Exception: pass
 
         while self.comp_layout_3d.count():
             child = self.comp_layout_3d.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            if child.widget(): child.widget().deleteLater()
 
         self.active_comp_plotters = []
+        self.active_comp_states = []   # <<< ESSENCIAL p/ sliders + filtro
         self.compare_states_multi = {}
 
         grid_layout = QtWidgets.QGridLayout()
         grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setSpacing(4)
+        grid_layout.setSpacing(6)
 
         n = len(models_to_show)
         cols = 3 if n >= 3 else n
-        rows = (n + cols - 1) // cols
 
         for idx, model_key in enumerate(models_to_show):
             row = idx // cols
@@ -2619,42 +2785,52 @@ class MainWindow(QtWidgets.QMainWindow):
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(2)
 
-            lbl = QtWidgets.QLabel(model_key)
+            display_name = "Base" if str(model_key).lower() == "base" else str(model_key)
+            if hasattr(self, "models") and model_key in self.models and self.models[model_key].get("name"):
+                display_name = self.models[model_key]["name"]
+
+            lbl = QtWidgets.QLabel(display_name)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
 
             plotter, plotter_widget = self._make_embedded_plotter(parent=w)
-            plotter.set_background("white")
+            try: plotter.set_background("white")
+            except Exception: pass
 
             v.addWidget(lbl)
             v.addWidget(plotter_widget)
-
             grid_layout.addWidget(w, row, col)
 
-            if model_key == "Base":
-                grid = self.grids.get("Base")
-                facies = self.facies_data.get("Base")
-            else:
-                grid = self.additional_grids.get(model_key)
-                facies = self.additional_facies.get(model_key)
-
+            grid, facies = self._get_model_payload(model_key)
             if grid is None or facies is None:
-                plotter.add_text("Grid não carregado", font_size=10)
+                try: plotter.add_text("Grid não carregado", font_size=10)
+                except Exception: pass
                 self.active_comp_plotters.append(plotter)
                 continue
 
             local_state = {}
             _, local_state = run(
-                mode=self.current_mode,
-                z_exag=self.z_exag,
-                show_scalar_bar=self.show_scalar_bar,
+                mode=mode,
+                z_exag=z_exag,
+                show_scalar_bar=show_scalar_bar,
                 external_plotter=plotter,
                 external_state=local_state,
                 target_grid=grid,
                 target_facies=facies,
             )
 
+            # >>> marca qual modelo esse state pertence (p/ filtro)
+            local_state["model_key"] = model_key
+
+            # >>> garante campos de reservatório (p/ modos reservoir/clusters)
+            rf = set()
+            if hasattr(self, "models") and model_key in self.models:
+                rf = self.models[model_key].get("reservoir_facies", set()) or set()
+            if "update_reservoir_fields" in local_state:
+                local_state["update_reservoir_fields"](rf)
+
             self.active_comp_plotters.append(plotter)
-            self.compare_states_multi[model_key] = local_state
+            self.active_comp_states.append(local_state)
+            self.compare_states_multi[str(model_key)] = local_state
 
         container = QtWidgets.QWidget()
         container.setLayout(grid_layout)
@@ -2667,9 +2843,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if len(self.active_comp_plotters) > 1:
             self.sync_multi_cameras(self.active_comp_plotters)
-
-        for model_key, state in self.compare_states_multi.items():
-            state["refresh"] = lambda s=state: self.refresh_comparison_single(s)
 
 
 
@@ -2737,29 +2910,49 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_multi_model_filter_changed(self, item):
         """Callback ao clicar num checkbox da tabela matriz."""
+        if item is None:
+            return
+
+        # Se não é checkable (fácies não existe naquele modelo), ignora
+        if not (item.flags() & QtCore.Qt.ItemIsUserCheckable):
+            return
+
         data = item.data(QtCore.Qt.UserRole)
-        if not data: return
-        
+        if not data or not isinstance(data, tuple) or len(data) != 2:
+            return
+
         model_key, fac = data
-        is_checked = (item.checkState() == QtCore.Qt.Checked)
-        
+        model_key = "base" if str(model_key).lower() == "base" else model_key
+        try:
+            fac = int(fac)
+        except Exception:
+            fac = 0
+
+        if not hasattr(self, "models") or model_key not in self.models:
+            return
+
+        # Garante set de reservoir_facies
+        if self.models[model_key].get("reservoir_facies") is None:
+            self.models[model_key]["reservoir_facies"] = set()
+
         target_set = self.models[model_key]["reservoir_facies"]
-        if is_checked: target_set.add(fac)
-        else: target_set.discard(fac)
-        
-        # 1. Atualiza visualização 3D (se houver estados ativos)
-        if hasattr(self, 'active_comp_states'):
+
+        is_checked = (item.checkState() == QtCore.Qt.Checked)
+        if is_checked:
+            target_set.add(fac)
+        else:
+            target_set.discard(fac)
+
+        # Atualiza o(s) estados ativos daquele modelo (3D ou 2D)
+        if hasattr(self, "active_comp_states"):
             for state in self.active_comp_states:
                 if state.get("model_key") == model_key:
                     if "update_reservoir_fields" in state:
-                        state["update_reservoir_fields"](target_set)
-                    if "refresh" in state: state["refresh"]()
-                    break
-        
-        # 2. --- CORREÇÃO: Atualiza Mapas 2D se estiverem visíveis ---
-        # Verifica se estamos na Perspectiva Comparação (1) e na Aba 2D (2)
-        if self.central_stack.currentIndex() == 1 and self.compare_stack.currentIndex() == 2:
-            self.refresh_comparison_active_view()
+                        # passa uma cópia (evita efeitos colaterais)
+                        state["update_reservoir_fields"](set(int(x) for x in target_set))
+                    if "refresh" in state:
+                        state["refresh"]()
+
     
     def on_comp_view_changed(self, index):
         """Muda a página do Stack de Comparação baseado no ComboBox."""
@@ -2769,65 +2962,96 @@ class MainWindow(QtWidgets.QMainWindow):
         if index < self.compare_stack.count():
             self.compare_stack.setCurrentIndex(index)
             self.refresh_comparison_active_view()
+    
+    def get_checked_models(self):
+        """Retorna a lista de model_keys marcados (checkbox) na árvore."""
+        checked = []
+        root = self.project_tree.invisibleRootItem()
+
+        for i in range(root.childCount()):
+            item = root.child(i)
+            if item.data(0, QtCore.Qt.UserRole) != "model_root":
+                continue
+
+            # Só considera se o item é checkable e está marcado
+            if (item.flags() & QtCore.Qt.ItemIsUserCheckable) and item.checkState(0) == QtCore.Qt.Checked:
+                model_key = item.data(0, QtCore.Qt.UserRole + 1)
+                if model_key is None:
+                    model_key = item.text(0)
+                checked.append(model_key)
+
+        return checked
+
 
 
     def refresh_comparison_active_view(self):
-        """Identifica qual view está ativa e chama a função de update correspondente."""
-        # Se não estiver no modo comparação global, ignora
-        if self.central_stack.currentIndex() != 1: return
+        if not hasattr(self, "combo_comp_view"):
+            return
 
-        idx = self.compare_stack.currentIndex()
-        
-        # Coleta modelos marcados na árvore
-        checked_models = []
-        iterator = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
-        while iterator.value():
-            item = iterator.value()
-            if item.data(0, QtCore.Qt.UserRole) == "model_root":
-                if item.checkState(0) == QtCore.Qt.Checked:
-                    checked_models.append((item.data(0, QtCore.Qt.UserRole + 1), item.text(0)))
-            iterator += 1
+        checked_models = self.get_checked_models() if hasattr(self, "get_checked_models") else []
 
-        if idx == 0: # 3D Grid
+        # Não tentar renderizar se ainda não tem pelo menos Base + 1 modelo
+        checked_non_base = [m for m in checked_models if str(m).lower() != "base"]
+        if self.combo_comp_view.currentIndex() in (0, 2) and len(checked_non_base) == 0:
+            # Página 3D
+            if self.combo_comp_view.currentIndex() == 0:
+                while self.comp_layout_3d.count():
+                    child = self.comp_layout_3d.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                label = QtWidgets.QLabel("Marque 1+ modelos no Project Explorer para comparar.")
+                label.setAlignment(QtCore.Qt.AlignCenter)
+                self.comp_layout_3d.addWidget(label)
+            # Página 2D
+            if self.combo_comp_view.currentIndex() == 2:
+                while self.comp_2d_layout.count():
+                    child = self.comp_2d_layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                label = QtWidgets.QLabel("Marque 1+ modelos no Project Explorer para comparar.")
+                label.setAlignment(QtCore.Qt.AlignCenter)
+                self.comp_2d_layout.addWidget(label)
+            return
+
+        # Render normal
+        if self.combo_comp_view.currentIndex() == 0:
             self.update_dynamic_comparison_view(checked_models)
-        elif idx == 1: # Relatório de Métricas
-            self.update_comparison_tables_multi(checked_models)
-            # Atualiza também o filtro lateral pois ele é útil para ver dados
-            self._build_multi_model_filter_table(checked_models)
-        elif idx == 2: # Mapas 2D
+        elif self.combo_comp_view.currentIndex() == 1:
+            self.update_comparison_tables()
+        elif self.combo_comp_view.currentIndex() == 2:
             self.update_dynamic_comparison_2d(checked_models)
+
     
     def update_dynamic_comparison_2d(self, checked_models):
-        """
-        Recria a view de comparação 2D (mapas) para os modelos selecionados.
-        """
         from visualize import run
 
-        checked_models = [m for m in checked_models if m != "Base"]
-        models_to_show = ["Base"] + checked_models
+        checked_non_base = [m for m in checked_models if str(m).lower() != "base"]
+        models_to_show = ["base"] + checked_non_base
 
-        if hasattr(self, "active_comp_2d_plotters"):
-            for p in self.active_comp_2d_plotters:
-                try:
-                    p.close()
-                except:
-                    pass
+        self.update_multi_model_filter_table(models_to_show)
+
+        mode = self.state.get("mode", "facies")
+        z_exag = float(self.state.get("z_exag", 15.0))
+        show_scalar_bar = bool(self.state.get("show_scalar_bar", True))
+
+        if hasattr(self, "active_comp_plotters"):
+            for p in self.active_comp_plotters:
+                try: p.close()
+                except Exception: pass
 
         while self.comp_2d_layout.count():
             child = self.comp_2d_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            if child.widget(): child.widget().deleteLater()
 
-        self.active_comp_2d_plotters = []
-        self.compare_2d_states_multi = {}
+        self.active_comp_plotters = []
+        self.active_comp_states = []
 
         grid_layout = QtWidgets.QGridLayout()
         grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setSpacing(4)
+        grid_layout.setSpacing(6)
 
         n = len(models_to_show)
         cols = 3 if n >= 3 else n
-        rows = (n + cols - 1) // cols
 
         for idx, model_key in enumerate(models_to_show):
             row = idx // cols
@@ -2838,42 +3062,49 @@ class MainWindow(QtWidgets.QMainWindow):
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(2)
 
-            lbl = QtWidgets.QLabel(model_key)
+            display_name = "Base" if str(model_key).lower() == "base" else str(model_key)
+            if hasattr(self, "models") and model_key in self.models and self.models[model_key].get("name"):
+                display_name = self.models[model_key]["name"]
+
+            lbl = QtWidgets.QLabel(display_name)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
 
-            p2d, p2d_widget = self._make_embedded_plotter(parent=w)
-            p2d.set_background("white")
+            plotter, plotter_widget = self._make_embedded_plotter(parent=w)
+            try: plotter.set_background("white")
+            except Exception: pass
 
             v.addWidget(lbl)
-            v.addWidget(p2d_widget)
-
+            v.addWidget(plotter_widget)
             grid_layout.addWidget(w, row, col)
 
-            if model_key == "Base":
-                grid = self.grids.get("Base")
-                facies = self.facies_data.get("Base")
-            else:
-                grid = self.additional_grids.get(model_key)
-                facies = self.additional_facies.get(model_key)
-
+            grid, facies = self._get_model_payload(model_key)
             if grid is None or facies is None:
-                p2d.add_text("Grid não carregado", font_size=10)
-                self.active_comp_2d_plotters.append(p2d)
+                try: plotter.add_text("Grid não carregado", font_size=10)
+                except Exception: pass
+                self.active_comp_plotters.append(plotter)
                 continue
 
             local_state = {}
             _, local_state = run(
-                mode=self.current_mode,
-                z_exag=self.z_exag,
-                show_scalar_bar=self.show_scalar_bar,
-                external_plotter=p2d,
+                mode=mode,
+                z_exag=z_exag,
+                show_scalar_bar=show_scalar_bar,
+                external_plotter=plotter,
                 external_state=local_state,
                 target_grid=grid,
                 target_facies=facies,
             )
 
-            self.active_comp_2d_plotters.append(p2d)
-            self.compare_2d_states_multi[model_key] = local_state
+            local_state["model_key"] = model_key
+
+            rf = set()
+            if hasattr(self, "models") and model_key in self.models:
+                rf = self.models[model_key].get("reservoir_facies", set()) or set()
+            if "update_reservoir_fields" in local_state:
+                local_state["update_reservoir_fields"](rf)
+
+            self.active_comp_plotters.append(plotter)
+            self.active_comp_states.append(local_state)
 
         container = QtWidgets.QWidget()
         container.setLayout(grid_layout)
