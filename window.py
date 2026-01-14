@@ -955,152 +955,267 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(label)
 
     def setup_toolbar_controls(self):
-        """Ribbon (estilo Office) com grupos discretos."""
-        self.ribbon = QtWidgets.QTabWidget()
-        self.ribbon.setDocumentMode(True)
-        self.ribbon.setMovable(False)
-        self.ribbon.setUsesScrollButtons(True)
-        self.ribbon.setElideMode(QtCore.Qt.ElideRight)
-        self.ribbon.setMaximumHeight(130)
+        """
+        Cria um "ribbon" (estilo Word/Petrel) no topo, com abas e grupos.
+        - Home: Dados / Perspectiva / Ferramentas
+        - View: Vista / Modo / Espessura / Janelas
+        - Compare: Vista de comparação
+        - Reports: (placeholder)
+        """
+        # Remove a toolbar antiga, se existir
+        for tb in self.findChildren(QtWidgets.QToolBar):
+            self.removeToolBar(tb)
 
-        # >>> Títulos dos grupos discretos (sem negrito, menor)
-        self.ribbon.setStyleSheet("""
-            QTabWidget::pane { border: 0px; }
-            QTabBar::tab { padding: 6px 12px; }
-            QGroupBox {
-                font-weight: normal;
-                font-size: 11px;
-                margin-top: 14px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0px 2px;
-                color: #444;
-            }
-        """)
+        # ---------- helpers internos ----------
+        def make_tool_btn(text, icon, *, checkable=False):
+            btn = QtWidgets.QToolButton()
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            btn.setIcon(icon)
+            btn.setIconSize(QtCore.QSize(28, 28))
+            btn.setText(text)
+            btn.setAutoRaise(True)
+            btn.setCheckable(checkable)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            return btn
+
+        def make_group(title):
+            frame = QtWidgets.QFrame()
+            frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+            frame.setFrameShadow(QtWidgets.QFrame.Plain)
+
+            v = QtWidgets.QVBoxLayout(frame)
+            v.setContentsMargins(8, 6, 8, 6)
+            v.setSpacing(4)
+
+            h = QtWidgets.QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            v.addLayout(h)
+
+            # Título embaixo dos ícones (não negrito)
+            lbl = QtWidgets.QLabel(title)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            f = lbl.font()
+            f.setBold(False)
+            lbl.setFont(f)
+            lbl.setStyleSheet("color: rgba(0,0,0,160);")
+            v.addWidget(lbl)
+
+            return frame, h
 
         def make_tab():
             w = QtWidgets.QWidget()
-            l = QtWidgets.QHBoxLayout(w)
-            l.setContentsMargins(10, 8, 10, 8)
-            l.setSpacing(12)
-            return w, l
+            lay = QtWidgets.QHBoxLayout(w)
+            lay.setContentsMargins(8, 6, 8, 6)
+            lay.setSpacing(10)
+            return w, lay
 
-        def make_group(title):
-            gb = QtWidgets.QGroupBox(title)
-            gb.setFlat(True)
-            gl = QtWidgets.QHBoxLayout(gb)
-            gl.setContentsMargins(10, 6, 10, 6)
-            gl.setSpacing(8)
-            return gb, gl
+        # ---------- widget principal ----------
+        self.ribbon_tabs = QtWidgets.QTabWidget()
+        self.ribbon_tabs.setDocumentMode(True)
+        self.ribbon_tabs.setMovable(False)
+        self.ribbon_tabs.setUsesScrollButtons(True)
 
-        def make_btn(text, std_icon, slot=None, checkable=False):
-            b = QtWidgets.QToolButton()
-            b.setText(text)
-            b.setIcon(self.style().standardIcon(std_icon))
-            b.setIconSize(QtCore.QSize(26, 26))
-            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-            b.setAutoRaise(True)
-            b.setCheckable(checkable)
-            if slot is not None:
-                b.clicked.connect(slot)
-            return b
+        # Container pra “separador” e altura consistente
+        self.ribbon_container = QtWidgets.QWidget()
+        vroot = QtWidgets.QVBoxLayout(self.ribbon_container)
+        vroot.setContentsMargins(0, 0, 0, 0)
+        vroot.setSpacing(0)
+        vroot.addWidget(self.ribbon_tabs)
 
-        # HOME
-        self.ribbon_tab_home, l_home = make_tab()
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        sep.setFixedHeight(1)
+        vroot.addWidget(sep)
 
-        gb_data, gl_data = make_group("Dados")
-        gl_data.addWidget(make_btn("Modelo", QtWidgets.QStyle.SP_DialogOpenButton, self.open_compare_dialog))
-        gl_data.addWidget(make_btn("Poços", QtWidgets.QStyle.SP_FileDialogStart, self.load_well_dialog))
-        l_home.addWidget(gb_data)
+        # Isso força o ribbon a ficar ACIMA dos docks (resolve “mesmo nível”)
+        self.setMenuWidget(self.ribbon_container)
 
-        gb_persp, gl_persp = make_group("Perspectiva")
-        self.btn_persp_viz = make_btn("Visualizar", QtWidgets.QStyle.SP_DesktopIcon,
-                                    lambda: self.switch_perspective("visualization"), checkable=True)
-        self.btn_persp_comp = make_btn("Comparar", QtWidgets.QStyle.SP_DirLinkIcon,
-                                    lambda: self.switch_perspective("comparison"), checkable=True)
-        self._persp_group = QtWidgets.QButtonGroup(self)
-        self._persp_group.setExclusive(True)
-        self._persp_group.addButton(self.btn_persp_viz)
-        self._persp_group.addButton(self.btn_persp_comp)
-        self.btn_persp_viz.setChecked(True)
-        gl_persp.addWidget(self.btn_persp_viz)
-        gl_persp.addWidget(self.btn_persp_comp)
-        l_home.addWidget(gb_persp)
+        # ---------- HOME ----------
+        tab_home, home_lay = make_tab()
 
-        gb_tools, gl_tools = make_group("Ferramentas")
-        gl_tools.addWidget(make_btn("Snapshot", QtWidgets.QStyle.SP_DialogSaveButton, self.take_snapshot))
-        l_home.addWidget(gb_tools)
+        g_dados, g_dados_row = make_group("Dados")
+        btn_modelo = make_tool_btn(
+            "Modelo",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+        )
+        btn_modelo.clicked.connect(self.open_compare_dialog)  # carrega modelos adicionais
+        btn_pocos = make_tool_btn(
+            "Poços",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon),
+        )
+        btn_pocos.clicked.connect(self.load_well_dialog)
+        g_dados_row.addWidget(btn_modelo)
+        g_dados_row.addWidget(btn_pocos)
 
-        l_home.addStretch(1)
-        self.ribbon.addTab(self.ribbon_tab_home, "Home")
+        g_persp, g_persp_row = make_group("Perspectiva")
+        # Usa as actions existentes (mantém check-state)
+        self.act_persp_viz.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
+        self.act_persp_comp.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
 
-        # VIEW
-        self.ribbon_tab_view, l_view = make_tab()
-        gb_mode, gl_mode = make_group("Modo")
+        btn_viz = QtWidgets.QToolButton()
+        btn_viz.setDefaultAction(self.act_persp_viz)
+        btn_viz.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        btn_viz.setIconSize(QtCore.QSize(28, 28))
+        btn_viz.setAutoRaise(True)
+
+        btn_comp = QtWidgets.QToolButton()
+        btn_comp.setDefaultAction(self.act_persp_comp)
+        btn_comp.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        btn_comp.setIconSize(QtCore.QSize(28, 28))
+        btn_comp.setAutoRaise(True)
+
+        g_persp_row.addWidget(btn_viz)
+        g_persp_row.addWidget(btn_comp)
+
+        g_tools, g_tools_row = make_group("Ferramentas")
+        btn_snap = make_tool_btn(
+            "Snapshot",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
+        )
+        btn_snap.clicked.connect(self.take_snapshot)
+        g_tools_row.addWidget(btn_snap)
+
+        home_lay.addWidget(g_dados)
+        home_lay.addWidget(g_persp)
+        home_lay.addWidget(g_tools)
+        home_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_home, "Home")
+
+        # ---------- VIEW ----------
+        tab_view, view_lay = make_tab()
+
+        g_vista, g_vista_row = make_group("Vista")
+
+        self.act_view_3d = QtWidgets.QAction("3D", self, checkable=True)
+        self.act_view_2d = QtWidgets.QAction("Mapas 2D", self, checkable=True)
+        self.act_view_metrics = QtWidgets.QAction("Métricas", self, checkable=True)
+        grp = QtWidgets.QActionGroup(self)
+        grp.setExclusive(True)
+        grp.addAction(self.act_view_3d)
+        grp.addAction(self.act_view_2d)
+        grp.addAction(self.act_view_metrics)
+        self.act_view_3d.setChecked(True)
+
+        self.act_view_3d.triggered.connect(self.show_main_3d_view)
+        self.act_view_2d.triggered.connect(self.show_map2d_view)
+        self.act_view_metrics.triggered.connect(self.show_metrics_view)
+
+        b3d = QtWidgets.QToolButton()
+        b3d.setDefaultAction(self.act_view_3d)
+        b3d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        b3d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
+        b3d.setIconSize(QtCore.QSize(28, 28))
+        b3d.setAutoRaise(True)
+
+        b2d = QtWidgets.QToolButton()
+        b2d.setDefaultAction(self.act_view_2d)
+        b2d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        b2d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
+        b2d.setIconSize(QtCore.QSize(28, 28))
+        b2d.setAutoRaise(True)
+
+        bmet = QtWidgets.QToolButton()
+        bmet.setDefaultAction(self.act_view_metrics)
+        bmet.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        bmet.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView))
+        bmet.setIconSize(QtCore.QSize(28, 28))
+        bmet.setAutoRaise(True)
+
+        g_vista_row.addWidget(b3d)
+        g_vista_row.addWidget(b2d)
+        g_vista_row.addWidget(bmet)
+
+        g_modo, g_modo_row = make_group("Modo")
         self.btn_mode = QtWidgets.QToolButton(self)
-        self.btn_mode.setText("Modo: Fácies")
-        self.btn_mode.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
-        self.btn_mode.setIconSize(QtCore.QSize(26, 26))
         self.btn_mode.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_mode.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.btn_mode.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
+        self.btn_mode.setIconSize(QtCore.QSize(28, 28))
         self.btn_mode.setAutoRaise(True)
-        menu_mode = QtWidgets.QMenu(self.btn_mode)
-        for text, data in [("Fácies", "facies"), ("Reservatório", "reservoir"), ("Clusters", "clusters"),
-                        ("Maior Cluster", "largest"), ("Espessura Local", "thickness_local")]:
-            a = menu_mode.addAction(text)
-            a.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
-        self.btn_mode.setMenu(menu_mode)
-        gl_mode.addWidget(self.btn_mode)
-        l_view.addWidget(gb_mode)
 
-        gb_thick, gl_thick = make_group("Espessura")
+        menu_mode = QtWidgets.QMenu(self.btn_mode)
+        modes = [
+            ("Fácies", "facies"),
+            ("Reservatório", "reservoir"),
+            ("Clusters", "clusters"),
+            ("Maior Cluster", "largest"),
+            ("Espessura Local", "thickness_local"),
+        ]
+        for text, data in modes:
+            action = menu_mode.addAction(text)
+            action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
+        self.btn_mode.setMenu(menu_mode)
+        self._update_mode_btn("Fácies", "facies")
+        g_modo_row.addWidget(self.btn_mode)
+
+        g_esp, g_esp_row = make_group("Espessura")
         self.btn_thick = QtWidgets.QToolButton(self)
-        self.btn_thick.setText("Espessura: Espessura")
-        self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        self.btn_thick.setIconSize(QtCore.QSize(26, 26))
         self.btn_thick.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_thick.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        self.btn_thick.setIconSize(QtCore.QSize(28, 28))
         self.btn_thick.setAutoRaise(True)
+
         menu_thick = QtWidgets.QMenu(self.btn_thick)
-        for label in ["Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]:
-            a = menu_thick.addAction(label)
-            a.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
+        thickness_opts = ["Espessura", "NTG coluna", "NTG envelope", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]
+        for label in thickness_opts:
+            action = menu_thick.addAction(label)
+            action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
         self.btn_thick.setMenu(menu_thick)
-        gl_thick.addWidget(self.btn_thick)
-        l_view.addWidget(gb_thick)
+        self._update_thick_btn("Espessura")
+        g_esp_row.addWidget(self.btn_thick)
 
-        l_view.addStretch(1)
-        self.ribbon.addTab(self.ribbon_tab_view, "View")
+        g_windows, g_windows_row = make_group("Janelas")
+        # placeholders: serão ligados aos docks depois de setup_docks()
+        self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
+        self.btn_toggle_props = make_tool_btn("Inspector", self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon), checkable=True)
+        self.btn_toggle_explorer.setEnabled(False)
+        self.btn_toggle_props.setEnabled(False)
+        g_windows_row.addWidget(self.btn_toggle_explorer)
+        g_windows_row.addWidget(self.btn_toggle_props)
 
-        # COMPARE + REPORTS (mantém seu conteúdo atual)
-        self.ribbon_tab_compare, l_cmp = make_tab()
-        gb_cmp_view, gl_cmp_view = make_group("Vista")
-        self.lbl_comp_view = QtWidgets.QLabel("Vista:")
+        view_lay.addWidget(g_vista)
+        view_lay.addWidget(g_modo)
+        view_lay.addWidget(g_esp)
+        view_lay.addWidget(g_windows)
+        view_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_view, "View")
+
+        # ---------- COMPARE ----------
+        tab_cmp, cmp_lay = make_tab()
+
+        g_cmp_view, g_cmp_row = make_group("Vista")
         self.combo_comp_view = QtWidgets.QComboBox()
         self.combo_comp_view.addItems(["Visualização 3D", "Métricas Comparadas", "Mapas 2D"])
         self.combo_comp_view.currentIndexChanged.connect(self.on_comp_view_changed)
-        gl_cmp_view.addWidget(self.lbl_comp_view)
-        gl_cmp_view.addWidget(self.combo_comp_view)
-        l_cmp.addWidget(gb_cmp_view)
-        gb_cmp_actions, gl_cmp_actions = make_group("Ações")
-        gl_cmp_actions.addWidget(make_btn("Atualizar", QtWidgets.QStyle.SP_BrowserReload, self.refresh_comparison_active_view))
-        l_cmp.addWidget(gb_cmp_actions)
-        l_cmp.addStretch(1)
-        self.ribbon.addTab(self.ribbon_tab_compare, "Compare")
 
-        self.ribbon_tab_reports, l_rep = make_tab()
-        gb_reports, gl_reports = make_group("Relatórios")
-        gl_reports.addWidget(make_btn("Abrir...", QtWidgets.QStyle.SP_DialogOpenButton, self.open_reports_dialog))
-        gl_reports.addWidget(make_btn("Selecionados", QtWidgets.QStyle.SP_FileDialogContentsView, self.open_selected_well_reports))
-        l_rep.addWidget(gb_reports)
-        gb_rank, gl_rank = make_group("Score")
-        gl_rank.addWidget(make_btn("Ranking", QtWidgets.QStyle.SP_ArrowUp, self.show_models_well_fit_ranking))
-        l_rep.addWidget(gb_rank)
-        l_rep.addStretch(1)
-        self.ribbon.addTab(self.ribbon_tab_reports, "Reports")
+        combo_wrap = QtWidgets.QWidget()
+        cw_l = QtWidgets.QHBoxLayout(combo_wrap)
+        cw_l.setContentsMargins(0, 0, 0, 0)
+        cw_l.addWidget(QtWidgets.QLabel("Vista:"))
+        cw_l.addWidget(self.combo_comp_view)
+        g_cmp_row.addWidget(combo_wrap)
 
+        cmp_lay.addWidget(g_cmp_view)
+        cmp_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_cmp, "Compare")
+
+        # ---------- REPORTS (placeholder) ----------
+        tab_rep, rep_lay = make_tab()
+        g_rep, g_rep_row = make_group("Relatórios")
+        lbl = QtWidgets.QLabel("Em breve: atalhos de relatórios aqui.")
+        lbl.setStyleSheet("color: rgba(0,0,0,150);")
+        g_rep_row.addWidget(lbl)
+        rep_lay.addWidget(g_rep)
+        rep_lay.addStretch(1)
+        self.ribbon_tabs.addTab(tab_rep, "Reports")
+        # Compat com setup_ui (que usa self.ribbon)
+        self.ribbon = self.ribbon_tabs
 
 
 
@@ -1116,22 +1231,78 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.btn_view_type.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
                 self.compare_stack.setCurrentIndex(0) # Página 3D
 
-    # Helpers para atualizar o texto do botão quando clica no menu
     def _update_mode_btn(self, text, data):
-        self.btn_mode.setText(f"Modo: {text}")
-        self.change_mode(data)
+        # Texto do botão (ribbon)
+        if hasattr(self, "btn_mode") and self.btn_mode is not None:
+            self.btn_mode.setText(f"Modo\n{text}")
+            self.btn_mode.setToolTip(f"Modo: {text}")
+
+        # Sempre salva no state
+        self.state["mode"] = data
+
+        # Só aplica (render) se o visualize.run já tiver registrado refresh
+        if "refresh" in self.state and callable(self.state["refresh"]):
+            self.change_mode(data)
+
 
     def _update_thick_btn(self, label):
-        self.btn_thick.setText(f"Espessura: {label}")
-        self.change_thickness_mode(label)
+        # Texto do botão (ribbon)
+        if hasattr(self, "btn_thick") and self.btn_thick is not None:
+            self.btn_thick.setText(f"Espessura\n{label}")
+            self.btn_thick.setToolTip(f"Espessura: {label}")
+
+        # Sempre salva no state
+        self.state["thickness_mode"] = label
+
+        # Só aplica (render) se o visualize.run já tiver registrado refresh
+        if "refresh" in self.state and callable(self.state["refresh"]):
+            self.change_thickness_mode(label)
+
+
+    def show_main_3d_view(self):
+        """Mostra a visualização 3D no modo Visualização."""
+        if not hasattr(self, "viz_container"):
+            return
+        self.viz_container.setCurrentIndex(0)
+
+        model_key = self.state.get("active_model_key", "base")
+        try:
+            self.switch_main_view_to_model(model_key)
+        except Exception:
+            pass
+
+
+    def show_map2d_view(self):
+        """Mostra Mapas 2D no modo Visualização."""
+        if not hasattr(self, "viz_container"):
+            return
+        self.viz_container.setCurrentIndex(1)
+
+        model_key = self.state.get("active_model_key", "base")
+        try:
+            self.switch_main_view_to_model(model_key)
+            self.update_2d_map()
+        except Exception:
+            pass
+
+
+    def show_metrics_view(self):
+        """Mostra a aba de métricas (texto) no modo Visualização."""
+        if not hasattr(self, "viz_container"):
+            return
+        self.viz_container.setCurrentIndex(2)
+
+        model_key = self.state.get("active_model_key", "base")
+        try:
+            self.update_metrics_view_content(model_key)
+        except Exception:
+            pass
+
+
 
     def setup_docks(self, nx, ny, nz):
-        """Cria o Project Explorer (esquerda) e o Inspector (direita)."""
-        # ---------------------------
-        # Dock ESQUERDO: Project Explorer
-        # ---------------------------
+        # --- DOCK EXPLORER - ESQUERDA ---
         self.dock_explorer = QtWidgets.QDockWidget("Project Explorer", self)
-        self.dock_explorer.setObjectName("dock_explorer")
         self.dock_explorer.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
         self.dock_explorer.setFeatures(
             QtWidgets.QDockWidget.DockWidgetMovable |
@@ -1139,99 +1310,123 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QDockWidget.DockWidgetClosable
         )
 
-        explorer_widget = QtWidgets.QWidget()
-        explorer_layout = QtWidgets.QVBoxLayout(explorer_widget)
-        explorer_layout.setContentsMargins(6, 6, 6, 6)
-
         self.project_tree = QtWidgets.QTreeWidget()
+        self.project_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.project_tree.setHeaderLabel("Hierarquia")
+        self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
         self.project_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
         self.project_tree.itemChanged.connect(self.on_tree_item_changed)
-        self.project_tree.itemDoubleClicked.connect(self.on_tree_double_clicked)
 
-        explorer_layout.addWidget(self.project_tree)
-        self.dock_explorer.setWidget(explorer_widget)
+        self.dock_explorer.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_explorer)
 
-        # ---------------------------
-        # Dock DIREITO: Inspector (Geometria + Propriedades + Compare)
-        # ---------------------------
-        self.dock_props = QtWidgets.QDockWidget("Propriedades", self)
-        self.dock_props.setObjectName("dock_props")
-        self.dock_props.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
+        # Modelos (top-level) + Poços (top-level)
+        self.add_model_to_tree("base", "Modelo Base")
+
+        self.wells_root_item = QtWidgets.QTreeWidgetItem(self.project_tree, ["Poços"])
+        self.wells_root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        self.wells_root_item.setData(0, QtCore.Qt.UserRole, "wells_root")
+        self.wells_root_item.setExpanded(True)
+
+        # --- DOCK INSPECTOR - DIREITA ---
+        self.dock_props = QtWidgets.QDockWidget("Inspector", self)
+        self.dock_props.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
         self.dock_props.setFeatures(
             QtWidgets.QDockWidget.DockWidgetMovable |
             QtWidgets.QDockWidget.DockWidgetFloatable |
             QtWidgets.QDockWidget.DockWidgetClosable
         )
 
+        # Abas do inspector (Geometria / Propriedades / Comparação)
         self.inspector_tabs = QtWidgets.QTabWidget()
-        self.inspector_tabs.setDocumentMode(True)
 
-        # Aba 1: Geometria (reusa seu widget atual de cortes)
-        # Se você já tem um widget pronto, mantenha o nome/instância existente.
-        # Vou assumir que você cria algo tipo self.grid_slicer_widget na versão atual.
-        # Se não existir, você pode adaptar para o seu construtor real.
-        if hasattr(self, "grid_slicer_widget") and self.grid_slicer_widget is not None:
-            self.inspector_tab_geom = self.grid_slicer_widget
-        else:
-            # fallback: chama seu construtor atual (ajuste o nome se for diferente no seu código)
-            self.inspector_tab_geom = self._build_grid_slicer_widget(nx, ny, nz) if hasattr(self, "_build_grid_slicer_widget") else QtWidgets.QWidget()
+        # ----- Geometria -----
+        self.page_grid = QtWidgets.QWidget()
+        pg_layout = QtWidgets.QVBoxLayout(self.page_grid)
+        pg_layout.setContentsMargins(4, 4, 4, 4)
+        self.slicer_widget = GridSlicerWidget(nx, ny, nz, self.on_ui_slice_changed)
+        pg_layout.addWidget(self.slicer_widget)
+        pg_layout.addStretch(1)
+        self.inspector_tabs.addTab(self.page_grid, "Geometria")
 
-        self.inspector_tabs.addTab(self.inspector_tab_geom, "Geometria")
+        # ----- Propriedades -----
+        self.page_props = QtWidgets.QWidget()
+        pp_layout = QtWidgets.QVBoxLayout(self.page_props)
+        pp_layout.setContentsMargins(4, 4, 4, 4)
 
-        # Aba 2: Propriedades (reusa a página que já existia)
-        if hasattr(self, "page_grid_props") and self.page_grid_props is not None:
-            self.inspector_tab_props = self.page_grid_props
-        else:
-            # fallback: tenta criar a página de props se existir builder
-            self.inspector_tab_props = self._build_grid_props_page() if hasattr(self, "_build_grid_props_page") else QtWidgets.QWidget()
+        self.legend_group = QtWidgets.QGroupBox("Legenda & Filtro")
+        lgl = QtWidgets.QVBoxLayout(self.legend_group)
+        lgl.setContentsMargins(2, 6, 2, 2)
 
-        self.inspector_tabs.addTab(self.inspector_tab_props, "Propriedades")
+        self.facies_legend_table = QtWidgets.QTableWidget()
+        self.facies_legend_table.setColumnCount(4)
+        self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "N", "Res"])
+        self.facies_legend_table.verticalHeader().setVisible(False)
+        self.facies_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.facies_legend_table.itemChanged.connect(self.on_legend_item_changed)
+        lgl.addWidget(self.facies_legend_table)
 
-        # Aba 3: Compare (só existe se você já tinha page_compare)
-        if hasattr(self, "page_compare") and self.page_compare is not None:
-            self.inspector_tabs.addTab(self.page_compare, "Comparação")
+        self.clusters_legend_table = QtWidgets.QTableWidget()
+        self.clusters_legend_table.setColumnCount(3)
+        self.clusters_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "Células"])
+        self.clusters_legend_table.verticalHeader().setVisible(False)
+        self.clusters_legend_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.clusters_legend_table.setVisible(False)
+        lgl.addWidget(self.clusters_legend_table)
+
+        pp_layout.addWidget(self.legend_group)
+        pp_layout.addStretch(1)
+        self.inspector_tabs.addTab(self.page_props, "Propriedades")
+
+        # ----- Comparação -----
+        self.page_compare = self.setup_comparison_dock_content()
+        self.inspector_tabs.addTab(self.page_compare, "Comparação")
 
         self.dock_props.setWidget(self.inspector_tabs)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
 
-        # (Opcional) deixa a direita um pouco mais estreita por padrão
-        try:
-            self.resizeDocks([self.dock_explorer, self.dock_props], [320, 320], QtCore.Qt.Horizontal)
-        except Exception:
-            pass
+        # Ajuste inicial de larguras
+        self.resizeDocks([self.dock_explorer, self.dock_props], [320, 420], QtCore.Qt.Horizontal)
+
+        # Liga botões "Janelas" do ribbon aos docks (reabrir Explorer/Inspector)
+        if hasattr(self, "btn_toggle_explorer") and isinstance(self.btn_toggle_explorer, QtWidgets.QToolButton):
+            act = self.dock_explorer.toggleViewAction()
+            act.setText("Explorer")
+            act.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
+            self.btn_toggle_explorer.setDefaultAction(act)
+            self.btn_toggle_explorer.setEnabled(True)
+
+        if hasattr(self, "btn_toggle_props") and isinstance(self.btn_toggle_props, QtWidgets.QToolButton):
+            act = self.dock_props.toggleViewAction()
+            act.setText("Inspector")
+            act.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon))
+            self.btn_toggle_props.setDefaultAction(act)
+            self.btn_toggle_props.setEnabled(True)
 
 
 
-    def add_model_to_tree(self, model_key, name, is_base=False):
-        """Adiciona o modelo no Project Explorer com sub-itens mínimos."""
-        root = self.project_tree.invisibleRootItem()
-
-        item = QtWidgets.QTreeWidgetItem(root)
-        item.setText(0, name)
+    def add_model_to_tree(self, model_key, model_name):
+        """Adiciona apenas o item do modelo (sem sub-itens) no Project Explorer."""
+        item = QtWidgets.QTreeWidgetItem([model_name])
         item.setData(0, QtCore.Qt.UserRole, "model_root")
-        item.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
+        item.setData(0, QtCore.Qt.UserRole + 1, model_key)
+        item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
 
-        # Ícone (pasta/modelo)
-        item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        is_comparison = hasattr(self, "central_stack") and (self.central_stack.currentIndex() == 1)
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+        item.setCheckState(0, QtCore.Qt.Checked if is_comparison else QtCore.Qt.Unchecked)
+        self._set_item_checkbox_visible(item, is_comparison)
 
-        # Sub-itens enxutos
-        sub_geom = QtWidgets.QTreeWidgetItem(item)
-        sub_geom.setText(0, "Geometria (Grid)")
-        sub_geom.setData(0, QtCore.Qt.UserRole, "model_geom")
-        sub_geom.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
-        sub_geom.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
+            idx = self.project_tree.indexOfTopLevelItem(self.wells_root_item)
+            if idx < 0:
+                self.project_tree.addTopLevelItem(item)
+            else:
+                self.project_tree.insertTopLevelItem(idx, item)
+        else:
+            self.project_tree.addTopLevelItem(item)
 
-        sub_props = QtWidgets.QTreeWidgetItem(item)
-        sub_props.setText(0, "Propriedades & Filtros")
-        sub_props.setData(0, QtCore.Qt.UserRole, "model_props")
-        sub_props.setData(0, QtCore.Qt.UserRole + 1, "base" if is_base else model_key)
-        sub_props.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
-
-        item.setExpanded(True)
         return item
-
 
 
     # --- LÓGICA DE INTERAÇÃO TREE ---
@@ -1336,32 +1531,43 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items:
             return
 
-        it = items[0]
-        it_type = it.data(0, QtCore.Qt.UserRole)
-        model_key = it.data(0, QtCore.Qt.UserRole + 1)
+        item = items[0]
+        role = item.data(0, QtCore.Qt.UserRole)
 
-        # Se clicou no root do modelo, só atualiza modelo ativo
-        if it_type == "model_root":
-            if model_key:
-                self.active_model_key = model_key
+        # Seleção de modelo
+        if role == "model_root":
+            model_key = item.data(0, QtCore.Qt.UserRole + 1) or "base"
+            self.state["active_model_key"] = model_key
+
+            try:
+                self.update_sidebar_metrics_text(model_key)
+            except Exception:
+                pass
+
+            # Em modo visualização: mostra Propriedades por padrão
+            if hasattr(self, "inspector_tabs") and self.central_stack.currentIndex() == 0:
+                self.inspector_tabs.setCurrentWidget(self.page_props)
+
+            # Atualiza a vista ativa (3D / 2D / métricas)
+            if self.central_stack.currentIndex() == 0:
+                idx = self.viz_container.currentIndex() if hasattr(self, "viz_container") else 0
+
+                if idx == 2:
+                    self.update_metrics_view_content(model_key)
+                else:
+                    self.switch_main_view_to_model(model_key)
+                    if idx == 1:
+                        self.update_2d_map()
+
+            elif self.central_stack.currentIndex() == 1:
+                if hasattr(self, "inspector_tabs"):
+                    self.inspector_tabs.setCurrentWidget(self.page_compare)
+
             return
 
-        # Se clicou em sub-itens do modelo: troca aba do Inspector
-        if hasattr(self, "inspector_tabs") and isinstance(self.inspector_tabs, QtWidgets.QTabWidget):
-            if it_type == "model_geom":
-                # Aba "Geometria"
-                idx = self.inspector_tabs.indexOf(self.inspector_tab_geom) if hasattr(self, "inspector_tab_geom") else 0
-                if idx >= 0:
-                    self.inspector_tabs.setCurrentIndex(idx)
-            elif it_type == "model_props":
-                idx = self.inspector_tabs.indexOf(self.inspector_tab_props) if hasattr(self, "inspector_tab_props") else 1
-                if idx >= 0:
-                    self.inspector_tabs.setCurrentIndex(idx)
-
-        # Mantém seu comportamento anterior de atualizar a seleção/modelo
-        if model_key:
-            self.active_model_key = model_key
-
+        # Seleção de poço: não muda a vista por padrão
+        if role in ("well_item", "wells_root"):
+            return
 
 
     def _set_item_checkbox_visible(self, item, visible):
@@ -2155,17 +2361,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_ui_slice_changed(self, axis, mode, value):
         """Recebe alterações do Widget de Geometria (Cortes e Z-Exag)."""
+        # Pode ser chamado antes do visualize.run(...) preencher callbacks.
+        refresh_main = self.state.get("refresh")
+
         if axis == "z" and mode == "scale":
-            # Atualiza Exagero Z
             self.state["z_exag"] = float(value)
-            self.state["refresh"]() # Redesenha
+            if callable(refresh_main):
+                refresh_main()
         else:
-            # Atualiza Cortes (I, J, K)
-            if "set_slice" in self.state: 
+            if "set_slice" in self.state:
                 self.state["set_slice"](axis, mode, value)
-        
+                if callable(refresh_main):
+                    refresh_main()
+
         # Sincroniza com a Comparação (Cortes e Z)
         self.sync_slices_to_compare(axis, mode, value)
+
 
     def sync_slices_to_compare(self, axis, mode, value):
         """Replica cortes e exagero Z para os estados de comparação."""
@@ -2293,32 +2504,41 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2. Atualiza visualização principal (Active Grid)
         self.state["mode"] = new_mode
         self.current_mode = new_mode
-        self.state["refresh"]()
-        
-        # 3. Atualiza estados de Comparação (se existirem)
-        if self.compare_states.get("base"):
-            self.compare_states["base"]["mode"] = new_mode
+
+        refresh_main = self.state.get("refresh")
+        if not callable(refresh_main):
+            # Ainda inicializando: setup_toolbar_controls chama isso antes do visualize.run(...)
+            return
+
+        refresh_main()
+
+        # 3. Atualiza estados de Comparação (se existirem e estiverem prontos)
+        st_base = self.compare_states.get("base")
+        if isinstance(st_base, dict) and callable(st_base.get("refresh")):
+            st_base["mode"] = new_mode
             if new_mode == "clusters":
                 rf = self.models["base"]["reservoir_facies"]
-                if "update_reservoir_fields" in self.compare_states["base"]:
-                    self.compare_states["base"]["update_reservoir_fields"](rf)
-            self.compare_states["base"]["refresh"]()
+                upd = st_base.get("update_reservoir_fields")
+                if callable(upd):
+                    upd(rf)
+            st_base["refresh"]()
 
-        if self.compare_states.get("compare"):
-            self.compare_states["compare"]["mode"] = new_mode
+        st_cmp = self.compare_states.get("compare")
+        if isinstance(st_cmp, dict) and callable(st_cmp.get("refresh")):
+            st_cmp["mode"] = new_mode
             if new_mode == "clusters":
                 # Pega o ID correto do modelo comparado ativo
                 target_id = getattr(self, "active_compare_id", "compare")
-                # Se active_compare_id não estiver em models, fallback seguro
-                if target_id not in self.models: target_id = "compare"
-                
+                if target_id not in self.models:
+                    target_id = "compare"
                 rf = self.models[target_id]["reservoir_facies"]
-                if "update_reservoir_fields" in self.compare_states["compare"]:
-                    self.compare_states["compare"]["update_reservoir_fields"](rf)
-            self.compare_states["compare"]["refresh"]()
+                upd = st_cmp.get("update_reservoir_fields")
+                if callable(upd):
+                    upd(rf)
+            st_cmp["refresh"]()
 
         # 4. Se estiver na visualização dinâmica (Aba Comparação), atualiza tudo
-        if self.central_stack.currentIndex() == 1:
+        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
             self.update_dynamic_comparison_view()
 
         # 5. Interface Lateral (Toggle de Tabelas)
@@ -2327,29 +2547,42 @@ class MainWindow(QtWidgets.QMainWindow):
             # Mostra AMBAS: Fácies (para filtrar) e Clusters (para ver cores)
             self.facies_legend_table.setVisible(True)
             self.clusters_legend_table.setVisible(True)
-            
-            self.populate_facies_legend() # Garante que filtro esteja atualizado
-            self.populate_clusters_legend() # Preenche cores dos clusters
+
+            self.populate_facies_legend()    # Garante que filtro esteja atualizado
+            self.populate_clusters_legend()  # Preenche cores dos clusters
         else:
             self.legend_group.setTitle("Legenda & Filtro")
             self.facies_legend_table.setVisible(True)
             self.clusters_legend_table.setVisible(False)
             self.populate_facies_legend()
-            
-        if hasattr(self, 'comp_plotter_base'): self.comp_plotter_base.render()
-        if hasattr(self, 'comp_plotter_comp'): self.comp_plotter_comp.render()
+
+        if hasattr(self, "comp_plotter_base"):
+            self.comp_plotter_base.render()
+        if hasattr(self, "comp_plotter_comp"):
+            self.comp_plotter_comp.render()
+
 
     def change_thickness_mode(self, label):
         self.state["thickness_mode"] = label
-        
+
         # Atualiza o modelo único (Visualização)
-        if "update_thickness" in self.state: self.state["update_thickness"]()
-        self.state["refresh"]()
-        self.update_2d_map()
-        
-        # --- CORREÇÃO: Atualiza a Comparação (se estiver ativa) ---
-        if self.central_stack.currentIndex() == 1:
-            self.refresh_comparison_active_view()
+        if "update_thickness" in self.state and callable(self.state["update_thickness"]):
+            self.state["update_thickness"]()
+
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            refresh()
+
+        # Atualiza 2D se existir
+        if hasattr(self, "update_2d_map") and callable(self.update_2d_map):
+            self.update_2d_map()
+
+        # Atualiza a Comparação (se estiver ativa)
+        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
+            if hasattr(self, "refresh_comparison_active_view") and callable(self.refresh_comparison_active_view):
+                self.refresh_comparison_active_view()
+
+
 
     def toggle_tree_checkboxes(self, show):
         """Habilita ou desabilita checkboxes em todos os modelos raiz."""
@@ -2534,68 +2767,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_compare_2d_maps()
     
     def switch_perspective(self, mode):
+        """Alterna entre visualização (0) e comparação (1)."""
         if mode == "visualization":
-            if hasattr(self, 'act_persp_viz'):
-                self.act_persp_viz.setChecked(True)
-            if hasattr(self, 'act_persp_comp'):
-                self.act_persp_comp.setChecked(False)
-
-            if hasattr(self, 'btn_persp_viz'):
-                self.btn_persp_viz.setChecked(True)
-            if hasattr(self, 'btn_persp_comp'):
-                self.btn_persp_comp.setChecked(False)
-
-            # 1. Central: Visualização Padrão
             self.central_stack.setCurrentIndex(0)
+            self.act_persp_viz.setChecked(True)
+            self.act_persp_comp.setChecked(False)
 
-            # 2. Árvore: Modo Normal (Expansível, sem Checkboxes)
-            self.project_tree.setItemsExpandable(True)
-            self.project_tree.expandAll()
+            if hasattr(self, "inspector_tabs"):
+                self.inspector_tabs.setCurrentWidget(self.page_props)
+
             self.toggle_tree_checkboxes(False)
-            self.dock_explorer.setWindowTitle("Project Explorer")
+            self.project_tree.expandAll()
 
-            # 3. Painel Lateral: Propriedades do item selecionado
-            if hasattr(self, 'page_grid_props'):
-                self.props_stack.setCurrentWidget(self.page_grid_props)
-            self.dock_props.setWindowTitle("Propriedades")
-            self.on_tree_selection_changed()
-
-            # Ribbon: aponta pro tab de View
-            if hasattr(self, 'ribbon') and hasattr(self, 'ribbon_tab_view'):
-                self.ribbon.setCurrentWidget(self.ribbon_tab_view)
+            if hasattr(self, "act_view_3d"):
+                self.act_view_3d.setChecked(True)
+            self.show_main_3d_view()
 
         elif mode == "comparison":
-            if hasattr(self, 'act_persp_viz'):
-                self.act_persp_viz.setChecked(False)
-            if hasattr(self, 'act_persp_comp'):
-                self.act_persp_comp.setChecked(True)
-
-            if hasattr(self, 'btn_persp_viz'):
-                self.btn_persp_viz.setChecked(False)
-            if hasattr(self, 'btn_persp_comp'):
-                self.btn_persp_comp.setChecked(True)
-
-            # 1. Central: Modo Comparação
             self.central_stack.setCurrentIndex(1)
+            self.act_persp_viz.setChecked(False)
+            self.act_persp_comp.setChecked(True)
 
-            # Força o update da visualização atual baseada no combo
-            if hasattr(self, 'combo_comp_view'):
-                self.on_comp_view_changed(self.combo_comp_view.currentIndex())
+            if hasattr(self, "inspector_tabs"):
+                self.inspector_tabs.setCurrentWidget(self.page_compare)
 
-            # 2. Árvore: Modo Seletor (Travado, Colapsado, com Checkboxes)
-            self.project_tree.collapseAll()
-            self.project_tree.setItemsExpandable(False)
             self.toggle_tree_checkboxes(True)
-            self.dock_explorer.setWindowTitle("Seletor de Modelos")
+            self.project_tree.collapseAll()
 
-            # 3. Painel Lateral: Filtros de Comparação
-            if hasattr(self, 'page_compare'):
-                self.props_stack.setCurrentWidget(self.page_compare)
-            self.dock_props.setWindowTitle("Painel de Comparação")
+            checked_models = self.get_checked_models()
+            self.update_dynamic_comparison_view(checked_models)
 
-            # Ribbon: aponta pro tab de Compare
-            if hasattr(self, 'ribbon') and hasattr(self, 'ribbon_tab_compare'):
-                self.ribbon.setCurrentWidget(self.ribbon_tab_compare)
+        self.current_perspective = mode
+
 
     
     def update_comparison_tables_multi(self, checked_models):
