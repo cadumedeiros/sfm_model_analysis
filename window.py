@@ -2803,24 +2803,24 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def update_comparison_tables_multi(self, checked_models):
         """
-        Atualiza as tabelas de comparação (Global, Fácies, Reservatório) 
+        Atualiza as tabelas de comparação (Global, Fácies, Reservatório)
         para N modelos selecionados.
         checked_models: lista de tuplas [(model_key, model_name), ...]
         """
-        if not checked_models: 
+        if not checked_models:
             self.global_compare_table.setRowCount(0)
             self.facies_compare_table.setRowCount(0)
             self.reservoir_facies_compare_table.setRowCount(0)
             return
 
-        # --- 1. TABELA GLOBAL ---
+        # --- 1) TABELA GLOBAL ---
         t_glob = self.global_compare_table
         t_glob.clear()
-        
+
         headers_glob = ["Métrica"] + [name for _, name in checked_models]
         t_glob.setColumnCount(len(headers_glob))
         t_glob.setHorizontalHeaderLabels(headers_glob)
-        
+
         metrics_list = [
             ("NTG", "ntg", "{:.3f}"),
             ("Células Totais", "total_cells", "{:d}"),
@@ -2828,45 +2828,31 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Conectividade", "connected_fraction", "{:.3f}"),
             ("Clusters", "n_clusters", "{:d}"),
             ("Maior Cluster", "largest_size", "{:d}"),
-            ("Vol. Res (m3)", "reservoir_volume", "{:.2e}")
+            ("Vol. Res (m3)", "reservoir_volume", "{:.2e}"),
         ]
-        
+
         t_glob.setRowCount(len(metrics_list))
+
         for r, (label, key, fmt) in enumerate(metrics_list):
             t_glob.setItem(r, 0, QtWidgets.QTableWidgetItem(label))
-            for c, (m_key, _) in enumerate(checked_models):
-                data = self.cached_metrics.get(m_key)
-                val_str = "-"
-                if data and "metrics" in data and data["metrics"]:
-                    val = data["metrics"].get(key, 0)
-                    try: val_str = fmt.format(val)
-                    except: val_str = str(val)
-                t_glob.setItem(r, c + 1, QtWidgets.QTableWidgetItem(val_str))
-        t_glob.resizeColumnsToContents()
 
-        # --- PREPARAÇÃO DADOS POR FÁCIES ---
-        # Coleta união de todas as fácies presentes nos modelos selecionados
-        all_facies = set()
-        model_stats = {} # Cache local de estatísticas {key: stats_dict}
-        
-        for m_key, _ in checked_models:
-            # Recupera estatísticas já calculadas ou calcula agora se necessário
-            # (Geralmente calculamos no load, mas vamos garantir)
-            if m_key == "base":
-                stats = getattr(self, "base_facies_stats", {})
-            elif hasattr(self, "compare_facies_stats") and m_key == self.active_compare_id:
-                 stats = self.compare_facies_stats
-            else:
-                # Fallback: Recalcula se não achar pronto (para N modelos)
-                from analysis import facies_distribution_array
-                f_arr = self.models[m_key]["facies"]
-                stats, _ = facies_distribution_array(f_arr)
-            
-            model_stats[m_key] = stats
-            if stats:
-                all_facies.update(stats.keys())
-        
-        sorted_facies = sorted(list(all_facies))
+            for c, (m_key, _) in enumerate(checked_models):
+                data = self.cached_metrics.get(m_key) or {}
+                # ✅ suporta os dois formatos (novo e antigo)
+                m = data.get("metrics") or data.get("global") or {}
+
+                if not m:
+                    val_str = "-"
+                else:
+                    val = m.get(key, 0)
+                    try:
+                        val_str = fmt.format(val)
+                    except Exception:
+                        val_str = str(val)
+
+                t_glob.setItem(r, c + 1, QtWidgets.QTableWidgetItem(val_str))
+
+        t_glob.resizeColumnsToContents()
 
         # --- 2. TABELA POR FÁCIES ---
         t_fac = self.facies_compare_table
@@ -3112,49 +3098,38 @@ class MainWindow(QtWidgets.QMainWindow):
         table.blockSignals(False)
 
     def on_multi_model_filter_changed(self, item):
-        """Callback ao clicar num checkbox da tabela matriz."""
-        if item is None:
-            return
-
-        # Se não é checkable (fácies não existe naquele modelo), ignora
-        if not (item.flags() & QtCore.Qt.ItemIsUserCheckable):
+        if getattr(self, "_block_multi_model_filter", False):
             return
 
         data = item.data(QtCore.Qt.UserRole)
-        if not data or not isinstance(data, tuple) or len(data) != 2:
+        if not data:
             return
 
         model_key, fac = data
-        model_key = "base" if str(model_key).lower() == "base" else model_key
-        try:
-            fac = int(fac)
-        except Exception:
-            fac = 0
-
-        if not hasattr(self, "models") or model_key not in self.models:
+        model_data = self.models.get(model_key)
+        if not model_data:
             return
 
-        # Garante set de reservoir_facies
-        if self.models[model_key].get("reservoir_facies") is None:
-            self.models[model_key]["reservoir_facies"] = set()
+        fac = int(fac)
+        target_set = model_data.setdefault("reservoir_facies", set())
 
-        target_set = self.models[model_key]["reservoir_facies"]
-
-        is_checked = (item.checkState() == QtCore.Qt.Checked)
-        if is_checked:
+        if item.checkState() == QtCore.Qt.Checked:
             target_set.add(fac)
         else:
             target_set.discard(fac)
 
-        # Atualiza o(s) estados ativos daquele modelo (3D ou 2D)
-        if hasattr(self, "active_comp_states"):
-            for state in self.active_comp_states:
-                if state.get("model_key") == model_key:
-                    if "update_reservoir_fields" in state:
-                        # passa uma cópia (evita efeitos colaterais)
-                        state["update_reservoir_fields"](set(int(x) for x in target_set))
-                    if "refresh" in state:
-                        state["refresh"]()
+        # ✅ Recalcula métricas do modelo (ESSENCIAL pro compare)
+        facies_arr = model_data.get("facies")
+        if facies_arr is not None:
+            m, p = compute_global_metrics_for_array(facies_arr, target_set)
+            cache = self.cached_metrics.setdefault(model_key, {"metrics": None, "perc": None, "df": None})
+            cache["metrics"] = m
+            cache["perc"] = p
+
+        # Atualiza views
+        self.refresh_comparison_active_view()
+        self.update_sidebar_metrics_text(self.state.get("active_model_key", "base"))
+
 
     
     def on_comp_view_changed(self, index):
@@ -3226,97 +3201,68 @@ class MainWindow(QtWidgets.QMainWindow):
 
     
     def update_dynamic_comparison_2d(self, checked_models):
-        from visualize import run
-
-        checked_non_base = [m for m in checked_models if str(m).lower() != "base"]
-        models_to_show = ["base"] + checked_non_base
-
-        self.update_multi_model_filter_table(models_to_show)
-
-        mode = self.state.get("mode", "facies")
-        z_exag = float(self.state.get("z_exag", 15.0))
-        show_scalar_bar = bool(self.state.get("show_scalar_bar", True))
-
-        if hasattr(self, "active_comp_plotters"):
-            for p in self.active_comp_plotters:
-                try: p.close()
-                except Exception: pass
+        if hasattr(self, 'active_comp_2d_plotters'):
+            for p in self.active_comp_2d_plotters:
+                try:
+                    p.close()
+                except:
+                    pass
+        self.active_comp_2d_plotters = []
 
         while self.comp_2d_layout.count():
-            child = self.comp_2d_layout.takeAt(0)
-            if child.widget(): child.widget().deleteLater()
+            item = self.comp_2d_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        self.active_comp_plotters = []
-        self.active_comp_states = []
+        if not checked_models:
+            self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
+            return
 
-        grid_layout = QtWidgets.QGridLayout()
+        presets = self.state.get("thickness_presets") or {}
+        thick_mode = self.state.get("thickness_mode", "Espessura")
+        if thick_mode not in presets:
+            thick_mode = "Espessura"
+        scalar, title = presets[thick_mode]
+
+        n_models = len(checked_models)
+        cols = 2 if n_models > 1 else 1
+
+        grid_container = QtWidgets.QWidget()
+        grid_layout = QtWidgets.QGridLayout(grid_container)
         grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setSpacing(6)
+        grid_layout.setSpacing(2)
+        self.comp_2d_layout.addWidget(grid_container)
 
-        n = len(models_to_show)
-        cols = 3 if n >= 3 else n
+        from load_data import grid as base_grid
 
-        for idx, model_key in enumerate(models_to_show):
-            row = idx // cols
-            col = idx % cols
+        for idx, (model_key, model_name) in enumerate(checked_models):
+            row, col = idx // cols, idx % cols
+            model_data = self.models[model_key]
+
+            p2d = BackgroundPlotter(show=False)
+            self.active_comp_2d_plotters.append(p2d)
+
+            # ✅ usa o grid do próprio modelo
+            src_grid = model_data.get("grid") or base_grid
+            temp_grid = src_grid.copy(deep=True)
+
+            temp_grid.cell_data["Facies"] = model_data["facies"]
+
+            self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
+            self._draw_2d_map_local(p2d, temp_grid, scalar, f"{model_name} - {title}")
 
             w = QtWidgets.QWidget()
-            v = QtWidgets.QVBoxLayout(w)
-            v.setContentsMargins(0, 0, 0, 0)
-            v.setSpacing(2)
+            vl = QtWidgets.QVBoxLayout(w)
+            vl.setContentsMargins(0, 0, 0, 0)
+            vl.setSpacing(0)
 
-            display_name = "Base" if str(model_key).lower() == "base" else str(model_key)
-            if hasattr(self, "models") and model_key in self.models and self.models[model_key].get("name"):
-                display_name = self.models[model_key]["name"]
+            lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
+            lbl.setStyleSheet("background: #ddd; font-weight: bold;")
+            vl.addWidget(lbl)
+            vl.addWidget(p2d.interactor)
 
-            lbl = QtWidgets.QLabel(display_name)
-            lbl.setAlignment(QtCore.Qt.AlignCenter)
-
-            plotter, plotter_widget = self._make_embedded_plotter(parent=w)
-            try: plotter.set_background("white")
-            except Exception: pass
-
-            v.addWidget(lbl)
-            v.addWidget(plotter_widget)
             grid_layout.addWidget(w, row, col)
 
-            grid, facies = self._get_model_payload(model_key)
-            if grid is None or facies is None:
-                try: plotter.add_text("Grid não carregado", font_size=10)
-                except Exception: pass
-                self.active_comp_plotters.append(plotter)
-                continue
-
-            local_state = {}
-            _, local_state = run(
-                mode=mode,
-                z_exag=z_exag,
-                show_scalar_bar=show_scalar_bar,
-                external_plotter=plotter,
-                external_state=local_state,
-                target_grid=grid,
-                target_facies=facies,
-            )
-
-            local_state["model_key"] = model_key
-
-            rf = set()
-            if hasattr(self, "models") and model_key in self.models:
-                rf = self.models[model_key].get("reservoir_facies", set()) or set()
-            if "update_reservoir_fields" in local_state:
-                local_state["update_reservoir_fields"](rf)
-
-            self.active_comp_plotters.append(plotter)
-            self.active_comp_states.append(local_state)
-
-        container = QtWidgets.QWidget()
-        container.setLayout(grid_layout)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
-
-        self.comp_2d_layout.addWidget(scroll)
 
 
     def on_tree_item_changed(self, item, column):
@@ -3456,73 +3402,62 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
-        """Recalcula métricas verticais COMPLETAS para o grid ativo."""
-        # Prepara dados
         fac_3d = facies_array.reshape((nx, ny, nz), order="F")
-        
-        # Recupera Z (Assume geometria constante)
-        from load_data import grid as global_grid
-        centers = global_grid.cell_centers().points
+
+        centers = target_grid.cell_centers().points
         z_vals = centers[:, 2].reshape((nx, ny, nz), order="F")
-        
-        # Inicializa TODOS os arrays necessários
+
         keys = [
             "vert_Ttot_reservoir", "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
-            "vert_n_packages_reservoir", "vert_Tpack_max_reservoir", 
+            "vert_n_packages_reservoir", "vert_Tpack_max_reservoir",
             "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"
         ]
         data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
-        
+
         res_list = list(reservoir_set)
-        res_set_fast = set(res_list) # Lookup O(1)
-        
+
         for ix in range(nx):
             for iy in range(ny):
                 col_fac = fac_3d[ix, iy, :]
                 mask = np.isin(col_fac, res_list)
-                
-                if not np.any(mask): continue
-                
+                if not np.any(mask):
+                    continue
+
                 col_z = z_vals[ix, iy, :]
                 z_min, z_max = np.nanmin(col_z), np.nanmax(col_z)
                 T_col = abs(z_max - z_min)
-                if T_col == 0: continue
-                
+                if T_col == 0:
+                    continue
+
                 dz = T_col / nz
-                
+
                 idx = np.where(mask)[0]
                 n_res = len(idx)
                 T_tot = n_res * dz
-                
-                # Envelope
-                if n_res > 0:
-                    T_env = (idx[-1] - idx[0] + 1) * dz
-                else: T_env = 0.0
-                    
+
+                T_env = (idx[-1] - idx[0] + 1) * dz if n_res > 0 else 0.0
+
                 NTG_col = T_tot / T_col
                 NTG_env = T_tot / T_env if T_env > 0 else 0.0
-                
-                # Pacotes
+
                 packages = []
-                if n_res > 0:
-                    start = idx[0]
-                    prev = idx[0]
-                    for k in idx[1:]:
-                        if k == prev + 1: prev = k
-                        else:
-                            packages.append(prev - start + 1)
-                            start = prev = k
-                    packages.append(prev - start + 1)
-                
+                start = idx[0]
+                prev = idx[0]
+                for k in idx[1:]:
+                    if k == prev + 1:
+                        prev = k
+                    else:
+                        packages.append(prev - start + 1)
+                        start = prev = k
+                packages.append(prev - start + 1)
+
                 T_pack_max = max(packages) * dz if packages else 0.0
                 n_packages = len(packages)
-                
-                # ICV e Qv
+
                 ICV = T_pack_max / T_env if T_env > 0 else 0.0
                 Qv = NTG_col * ICV
                 Qv_abs = ICV * (T_pack_max / T_col)
 
-                # Preenchimento (apenas nas células de reservatório para visualização 3D correta)
                 data_map["vert_Ttot_reservoir"][ix, iy, mask] = T_tot
                 data_map["vert_NTG_col_reservoir"][ix, iy, mask] = NTG_col
                 data_map["vert_NTG_env_reservoir"][ix, iy, mask] = NTG_env
@@ -3532,9 +3467,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 data_map["vert_Qv_reservoir"][ix, iy, mask] = Qv
                 data_map["vert_Qv_abs_reservoir"][ix, iy, mask] = Qv_abs
 
-        # Salva no grid
         for k, v in data_map.items():
             target_grid.cell_data[k] = v.reshape(-1, order="F")
+
 
 
     def _open_matplotlib_report(self, well_name, sim_model_name, real_depth, real_fac, base_depth, base_fac, sim_depth, sim_fac):
