@@ -231,23 +231,21 @@ def run(
 
     # Grid Base para visualização (Geometry Only)
     grid_base = use_grid.copy()
+    
+    # Inicializa com as fácies corretas
     grid_base.cell_data["Facies"] = use_facies
 
     # Aplica exagero Z
-    # x_min, x_max, y_min, y_max, z_min, z_max = grid_base.bounds
-    # grid_base.points[:, 1] = y_max - (grid_base.points[:, 1] - y_min)
     grid_base.points[:, 2] *= z_exag
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
     
-    # --- NOVOS ESTADOS DE CORTE (Min e Max para cada eixo) ---
+    # --- ESTADOS DE CORTE ---
     state.setdefault("k_min", 0)
     state.setdefault("k_max", nz - 1)
-    
     state.setdefault("i_min", 0)
     state.setdefault("i_max", nx - 1)
-    
     state.setdefault("j_min", 0)
     state.setdefault("j_max", ny - 1)
     
@@ -271,11 +269,24 @@ def run(
         return clipped
 
     def update_reservoir_fields(reservoir_facies):
-        current_f = state["current_facies"]
+        # Pega o grid e facies que estão ATIVOS no momento
+        current_g = state.get("current_grid_source", use_grid)
+        current_f = state.get("current_facies", use_facies)
+        
+        # --- CORREÇÃO CRÍTICA ---
+        # Garante que o grid de cálculo tenha as Fácies corretas antes de calcular qualquer coisa.
+        # Isso evita que ele use dados antigos/errados que estavam salvos dentro do objeto grid.
+        if current_f is not None:
+            current_g.cell_data["Facies"] = current_f
+
         rf_list = list(reservoir_facies) if reservoir_facies else []
         is_res = np.isin(current_f, rf_list).astype(np.int8)
         
-        arr_xyz = is_res.reshape((nx, ny, nz), order="F")
+        try:
+            arr_xyz = is_res.reshape((nx, ny, nz), order="F")
+        except ValueError:
+            return 
+
         structure = generate_binary_structure(3, 1)
         is_res_3d = arr_xyz.transpose(2, 1, 0) 
         labeled_3d, _ = nd_label(is_res_3d, structure=structure)
@@ -286,17 +297,20 @@ def run(
         largest_label = counts.argmax() if counts.size > 0 else 0
         largest_mask_1d = (clusters_1d == largest_label).astype(np.uint8)
 
-        use_grid.cell_data["Reservoir"] = is_res.astype(np.uint8)
-        use_grid.cell_data["Clusters"] = clusters_1d
-        use_grid.cell_data["LargestCluster"] = largest_mask_1d
+        # Grava os dados calculados no grid ATUAL
+        current_g.cell_data["Reservoir"] = is_res.astype(np.uint8)
+        current_g.cell_data["Clusters"] = clusters_1d
+        current_g.cell_data["LargestCluster"] = largest_mask_1d
         
-        _calc_vertical_metrics(use_grid, current_f, rf_list) 
+        # Recalcula métricas verticais
+        _calc_vertical_metrics(current_g, current_f, rf_list) 
 
         # Sincroniza campos calculados com o grid base de visualização
         sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies", "i_index", "j_index", "k_index"]
-        for key in use_grid.cell_data.keys():
+        
+        for key in current_g.cell_data.keys():
             if key.startswith("vert_") or key in sync_names:
-                grid_base.cell_data[key] = use_grid.cell_data[key].copy()
+                grid_base.cell_data[key] = current_g.cell_data[key]
 
         state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(clusters_1d)
         state["clusters_sizes"] = compute_cluster_sizes(clusters_1d)
@@ -310,15 +324,13 @@ def run(
         
         if mode_label in presets:
             s_name, s_title = presets[mode_label]
-            
-            # --- CORREÇÃO: Salva no STATE, não na global ---
             state["current_thickness_scalar"] = s_name
             state["current_thickness_title"] = s_title
             
             if s_name in grid_base.cell_data:
                 arr = grid_base.cell_data[s_name]
                 vmin = 1e-6
-                vmax = float(np.nanmax(arr)) # Usa nanmax para segurança
+                vmax = float(np.nanmax(arr)) 
                 if np.isnan(vmax): vmax = 1.0
                 state["thickness_clim"] = (vmin, vmax if vmax > vmin else vmin + 1)
 
@@ -342,22 +354,14 @@ def run(
             jmin == 0 and jmax == ny-1):
             return mesh
 
-        # Se o mesh está vazio, não tenta cortar
         try:
-            if mesh is None or mesh.n_cells == 0:
-                return mesh
-        except Exception:
-            return mesh
+            if mesh is None or mesh.n_cells == 0: return mesh
+        except Exception: return mesh
 
-        # --- GARANTIR QUE EXISTEM ÍNDICES ---
-        # (isso resolve exatamente o seu erro ao carregar modelos novos)
         if not ("i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data):
-            try:
-                prepare_grid_indices(mesh)
-            except Exception:
-                pass
+            try: prepare_grid_indices(mesh)
+            except Exception: pass
 
-        # Preferir corte por máscara (mais rápido e não depende do threshold)
         if "i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data:
             try:
                 i = mesh.cell_data["i_index"]
@@ -368,14 +372,9 @@ def run(
                        (k >= kmin) & (k <= kmax)
                 out = mesh.extract_cells(mask)
                 return out
-            except Exception:
-                # cai pro fallback abaixo
-                pass
+            except Exception: pass
 
-        # --- FALLBACK: threshold (só se os arrays existirem) ---
         out = mesh
-
-        # Se não tiver arrays, não tenta threshold (evita ValueError)
         if (len(getattr(out, "cell_data", {})) == 0) and (len(getattr(out, "point_data", {})) == 0):
             return out
 
@@ -387,18 +386,6 @@ def run(
             out = out.threshold([jmin, jmax], scalars="j_index")
 
         return out
-
-
-    def _update_mapper_generic(actor, mesh, scalar_name=None, cmap=None, clim=None, lut=None, show_scalar=True):
-        mapper = actor.mapper
-        mapper.SetInputData(mesh)
-        if scalar_name:
-            mapper.SetScalarModeToUseCellFieldData()
-            mapper.SelectColorArray(scalar_name)
-            mapper.SetScalarVisibility(show_scalar)
-        if lut: mapper.lookup_table = lut
-        if clim: mapper.scalar_range = clim
-        mapper.Update()
 
     def _clean_all_bars(plotter):
         try:
@@ -413,13 +400,11 @@ def run(
 
         mesh = attach_cell_data_from_original(mesh, grid_base)
 
-        # GARANTE índices antes de qualquer corte (evita crash ao carregar modelos novos)
         try:
             if mesh is not None and mesh.n_cells > 0:
                 if not ("i_index" in mesh.cell_data and "j_index" in mesh.cell_data and "k_index" in mesh.cell_data):
                     prepare_grid_indices(mesh)
-        except Exception:
-            pass
+        except Exception: pass
 
         mesh = apply_slices_filter(mesh)
 
@@ -468,13 +453,11 @@ def run(
 
         elif mode == "thickness_local":
             _update_thickness_from_state()
-            # --- CORREÇÃO: Lê do STATE local, com fallback global seguro ---
             s_name = state.get("current_thickness_scalar", THICKNESS_SCALAR_NAME)
             bar_title = state.get("current_thickness_title", THICKNESS_SCALAR_TITLE)
             
             if s_name in mesh.cell_data:
                 try:
-                    # Tenta filtrar valores zero para limpar visualização
                     mesh_bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
                     mesh_main = mesh.threshold(1e-6, scalars=s_name)
                 except: mesh_bg, mesh_main = mesh, None
@@ -490,21 +473,16 @@ def run(
                 else:
                     clim = (0.0, 1.0)
 
-        # Sincronia de Atores
         def sync_actor(actor_key, mesh_data, is_bg=False):
             actor = state.get(actor_key)
-            
-            # Se não tem malha, esconde o ator
             if mesh_data is None or mesh_data.n_cells == 0:
                 if actor: actor.SetVisibility(False)
                 return actor
 
-            # Define qual escalar está ativo na malha antes de passar pro mapper
             if show_scalar and scalar_name:
                 if scalar_name in mesh_data.cell_data:
                     mesh_data.set_active_scalars(scalar_name, preference="cell")
             
-            # Cria o ator se ainda não existir
             if actor is None:
                 if is_bg:
                     actor = plotter.add_mesh(mesh_data, color=(0.8,0.8,0.8), opacity=0.02, show_edges=False, reset_camera=False)
@@ -512,32 +490,24 @@ def run(
                     actor = plotter.add_mesh(mesh_data, show_edges=True, reset_camera=False, show_scalar_bar=False)
                 state[actor_key] = actor
             
-            # Atualiza dados e visibilidade
             actor.SetVisibility(True)
             actor.mapper.SetInputData(mesh_data)
             
             if is_bg: return actor
 
-            # Lógica de Cores
             if show_scalar and scalar_name and scalar_name in mesh_data.cell_data:
                 actor.mapper.SetScalarVisibility(True)
                 actor.mapper.SetScalarModeToUseCellFieldData()
                 actor.mapper.SelectColorArray(scalar_name)
                 
                 if lut:
-                    # Modo Fácies/Clusters (LUT Discreta)
                     actor.mapper.SetLookupTable(lut)
                     if clim: actor.mapper.SetScalarRange(clim)
                 elif cmap:
-                    # --- CORREÇÃO AQUI ---
-                    # Modo Espessura (Colormap Contínuo)
-                    # Cria a LookupTable explicitamente usando o helper do PyVista
                     new_lut = pv.LookupTable(cmap, n_values=256)
-                    if clim: 
-                        new_lut.SetRange(clim)
+                    if clim: new_lut.SetRange(clim)
                     actor.mapper.SetLookupTable(new_lut)
-                    if clim: 
-                        actor.mapper.SetScalarRange(clim)
+                    if clim: actor.mapper.SetScalarRange(clim)
             else:
                 actor.mapper.SetScalarVisibility(False)
                 if color_main: actor.prop.color = color_main
@@ -563,6 +533,8 @@ def run(
         nonlocal grid_base
         if new_source is not None:
             grid_base = new_source
+            rf = state.get("reservoir_facies", set())
+            update_reservoir_fields(rf)
         show_mesh(grid_base)
 
     def set_slice(axis, mode, value):
@@ -579,7 +551,6 @@ def run(
 
     state["set_slice"] = set_slice
 
-    # CONTROLE DE TECLADO
     def key_change_slice(axis, mode, delta):
         key = f"{axis}_{mode}"
         curr = state.get(key, 0)
@@ -589,7 +560,6 @@ def run(
         elif axis == "j": limit = ny-1
         
         new_val = int(np.clip(curr + delta, 0, limit))
-        
         if mode == "min":
             max_val = state.get(f"{axis}_max", limit)
             if new_val > max_val: new_val = max_val
@@ -625,10 +595,6 @@ def run(
     plotter.add_key_event("8", lambda: key_change_slice("j", "max", +1))
 
     if "box_widget" in state: del state["box_widget"]
-
-    # logo = plotter.add_logo_widget("assets/forward_PNG.png", position=(0.02, 0.85), size=(0.12, 0.12))
-    # logo.SetProcessEvents(False)
-    # plotter.set_background("white", top="lightblue")
 
     plotter.enable_lightkit()
     plotter.add_axes()
