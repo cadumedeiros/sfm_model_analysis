@@ -238,9 +238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in well_names:
             self.show_well_comparison_report(w, selected_model_key)
 
-
-
-        
+ 
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
 
@@ -321,15 +319,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.details_tab = QtWidgets.QWidget()
         l_det = QtWidgets.QVBoxLayout(self.details_tab)
+        l_det.setContentsMargins(8, 8, 8, 8)
+        l_det.setSpacing(8)
+
         self.central_metrics_text = QtWidgets.QTextEdit()
         self.central_metrics_text.setReadOnly(True)
-        self.central_metrics_text.setMaximumHeight(150)
+        self.central_metrics_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
         l_det.addWidget(QtWidgets.QLabel("Resumo Global"))
-        l_det.addWidget(self.central_metrics_text)
+        l_det.addWidget(self.central_metrics_text, 2)
+
         self.facies_table = QtWidgets.QTableWidget()
+        self.facies_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
         l_det.addWidget(QtWidgets.QLabel("Detalhamento por Fácies"))
-        l_det.addWidget(self.facies_table)
+        l_det.addWidget(self.facies_table, 3)
+
         self.viz_container.addWidget(self.details_tab)
+
 
         self.central_stack.addWidget(self.viz_container)
 
@@ -476,78 +483,86 @@ class MainWindow(QtWidgets.QMainWindow):
         val = self.slider_z.value()
         new_z = val / 10.0
         self.lbl_z_val.setText(f"{new_z:.1f}x")
-        
-        old_z = self.state.get("z_exag", 1.0)
+
         self.state["z_exag"] = new_z
-        
-        # 1. Atualiza Grid (escala)
-        if self.state["current_grid_source"]:
-            self.state["current_grid_source"].points[:, 2] /= old_z
-            self.state["current_grid_source"].points[:, 2] *= new_z
-            
-        # 2. Atualiza Poços (Redesenha)
-        self.update_wells_3d()
+
+        # Refresh do 3D (actor scale)
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
+
+        # poços precisam ser redesenhados porque a trajetória depende do z_exag
+        self._schedule_wells_update()
+
 
     def update_wells_3d(self):
-        if not hasattr(self, 'plotter'):
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        if not getattr(self, "wells", None):
             return
 
-        # Decide quais poços estão visíveis via árvore (checkbox)
-        visible = set(self.wells.keys())
-        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
-            visible = set()
-            for i in range(self.wells_root_item.childCount()):
-                it = self.wells_root_item.child(i)
-                if it.data(0, QtCore.Qt.UserRole) == "well_item":
-                    name = it.data(0, QtCore.Qt.UserRole + 1)
-                    if it.checkState(0) == QtCore.Qt.Checked:
-                        visible.add(name)
+        z_exag = float(self.state.get("z_exag", 1.0))
 
-        # Limpa poços antigos
-        for name in list(self.wells.keys()):
-            self.plotter.remove_actor(f"well_{name}")
-            self.plotter.remove_actor(f"marker_{name}")
-        self.plotter.remove_actor("well_labels")
+        # poços marcados
+        checked = set()
+        it = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
+        while it.value():
+            item = it.value()
+            role = item.data(0, QtCore.Qt.UserRole)
+            if role == "well_item" and item.checkState(0) == QtCore.Qt.Checked:
+                wn = item.data(0, QtCore.Qt.UserRole + 1) or item.text(0)
+                if wn:
+                    checked.add(str(wn))
+            it += 1
 
-        z_exag = self.state.get("z_exag", 1.0)
-        lbl_pos, lbl_txt = [], []
+        state_key = (tuple(sorted(checked)), z_exag)
+        if getattr(self, "_wells_draw_state", None) == state_key:
+            return
+        self._wells_draw_state = state_key
 
-        for name, well in self.wells.items():
-            if name not in visible:
+        if not hasattr(self, "_well_actors"):
+            self._well_actors = {}
+
+        # remove atores que não estão mais selecionados
+        for wn in list(self._well_actors.keys()):
+            if wn not in checked:
+                try:
+                    self.plotter.remove_actor(self._well_actors.pop(wn))
+                except Exception:
+                    pass
+
+        markers_list = getattr(self, "well_markers", None)
+
+        for well_name in sorted(checked):
+            if well_name in self._well_actors:
                 continue
 
-            tube = well.get_vtk_polydata(z_exag=z_exag)
-            if tube:
-                self.plotter.add_mesh(
-                    tube,
-                    scalars="Facies_Real",
-                    cmap=self.pv_cmap,
-                    clim=self.clim,
-                    name=f"well_{name}",
-                    smooth_shading=False,
-                    show_scalar_bar=False,
-                    interpolate_before_map=False
+            well = self.wells.get(well_name)
+            if well is None:
+                continue
+
+            try:
+                mesh = well.get_trajectory_mesh(z_exag)
+                self._well_actors[well_name] = self.plotter.add_mesh(
+                    mesh,
+                    color="black",
+                    line_width=3,
+                    name=f"well_{well_name}",
+                    reset_camera=False,
                 )
+            except Exception as e:
+                print(f"[WARN] Falha ao desenhar poço {well_name}: {e}")
 
-                min_md_idx = np.argmin(well.data["DEPT"].values)
-                top = well.data.iloc[min_md_idx][["X", "Y", "Z"]].values.copy()
-                top[2] *= z_exag
-                top[2] -= (50 * z_exag)
-                lbl_pos.append(top)
-                lbl_txt.append(name)
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
 
-            if name in self.markers_db:
-                glyphs, _ = well.get_markers_mesh(self.markers_db[name], z_exag=z_exag)
-                if glyphs:
-                    self.plotter.add_mesh(glyphs, color="red", name=f"marker_{name}")
 
-        if lbl_pos:
-            self.plotter.add_point_labels(
-                lbl_pos, lbl_txt,
-                font_size=16, text_color="black",
-                point_size=0, always_visible=True,
-                name="well_labels"
-            )
+
 
 
     def _pick_reference_xy_for_well_report(self, well, markers):
@@ -1016,6 +1031,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ribbon_tabs.setMovable(False)
         self.ribbon_tabs.setUsesScrollButtons(True)
 
+        self.ribbon = self.ribbon_tabs
+
         # Container pra “separador” e altura consistente
         self.ribbon_container = QtWidgets.QWidget()
         vroot = QtWidgets.QVBoxLayout(self.ribbon_container)
@@ -1089,9 +1106,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         g_vista, g_vista_row = make_group("Vista")
 
-        self.act_view_3d = QtWidgets.QAction("3D", self, checkable=True)
-        self.act_view_2d = QtWidgets.QAction("Mapas 2D", self, checkable=True)
-        self.act_view_metrics = QtWidgets.QAction("Métricas", self, checkable=True)
+        ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+        ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
+        icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
+
+        self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self)
+        self.act_view_3d.setCheckable(True)
+
+        self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self)
+        self.act_view_2d.setCheckable(True)
+
+        self.act_view_metrics = QtWidgets.QAction(icomet, "Métricas", self)
+        self.act_view_metrics.setCheckable(True)
+
         grp = QtWidgets.QActionGroup(self)
         grp.setExclusive(True)
         grp.addAction(self.act_view_3d)
@@ -1106,27 +1133,25 @@ class MainWindow(QtWidgets.QMainWindow):
         b3d = QtWidgets.QToolButton()
         b3d.setDefaultAction(self.act_view_3d)
         b3d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        b3d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
         b3d.setIconSize(QtCore.QSize(28, 28))
         b3d.setAutoRaise(True)
 
         b2d = QtWidgets.QToolButton()
         b2d.setDefaultAction(self.act_view_2d)
         b2d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        b2d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
         b2d.setIconSize(QtCore.QSize(28, 28))
         b2d.setAutoRaise(True)
 
         bmet = QtWidgets.QToolButton()
         bmet.setDefaultAction(self.act_view_metrics)
         bmet.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        bmet.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView))
         bmet.setIconSize(QtCore.QSize(28, 28))
         bmet.setAutoRaise(True)
 
         g_vista_row.addWidget(b3d)
         g_vista_row.addWidget(b2d)
         g_vista_row.addWidget(bmet)
+
 
         g_modo, g_modo_row = make_group("Modo")
         self.btn_mode = QtWidgets.QToolButton(self)
@@ -1205,17 +1230,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.ribbon_tabs.addTab(tab_cmp, "Compare")
 
-        # ---------- REPORTS (placeholder) ----------
+        # ---------- REPORTS ----------
         tab_rep, rep_lay = make_tab()
+
         g_rep, g_rep_row = make_group("Relatórios")
-        lbl = QtWidgets.QLabel("Em breve: atalhos de relatórios aqui.")
-        lbl.setStyleSheet("color: rgba(0,0,0,150);")
-        g_rep_row.addWidget(lbl)
+
+        btn_rep_open = make_tool_btn(
+            "Abrir\nRelatório",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+        )
+        btn_rep_open.clicked.connect(self.open_reports_dialog)
+
+        btn_rep_selected = make_tool_btn(
+            "Poços\nSelecionados",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView),
+        )
+        btn_rep_selected.clicked.connect(self.open_selected_well_reports)
+
+        btn_rank = make_tool_btn(
+            "Ranking\nModelos",
+            self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp),
+        )
+        btn_rank.clicked.connect(self.show_models_well_fit_ranking)
+
+        g_rep_row.addWidget(btn_rep_open)
+        g_rep_row.addWidget(btn_rep_selected)
+        g_rep_row.addWidget(btn_rank)
+
         rep_lay.addWidget(g_rep)
         rep_lay.addStretch(1)
         self.ribbon_tabs.addTab(tab_rep, "Reports")
-        # Compat com setup_ui (que usa self.ribbon)
         self.ribbon = self.ribbon_tabs
+
 
 
 
@@ -1298,6 +1344,16 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _wrap_expanding(self, widget):
+            """Helper: força o widget a ocupar toda a área do dock."""
+            container = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(container)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            lay.addWidget(widget, 1)  # stretch = 1
+            container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            return container
 
 
     def setup_docks(self, nx, ny, nz):
@@ -1374,15 +1430,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clusters_legend_table.setVisible(False)
         lgl.addWidget(self.clusters_legend_table)
 
-        pp_layout.addWidget(self.legend_group)
-        pp_layout.addStretch(1)
+        self.facies_legend_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.legend_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        pp_layout.addWidget(self.legend_group, 1)
+
         self.inspector_tabs.addTab(self.page_props, "Propriedades")
 
         # ----- Comparação -----
         self.page_compare = self.setup_comparison_dock_content()
         self.inspector_tabs.addTab(self.page_compare, "Comparação")
+        
+        self.inspector_tabs.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
-        self.dock_props.setWidget(self.inspector_tabs)
+        # IMPORTANTE: também força as tabelas internas a expandirem
+        for tbl in self.inspector_tabs.findChildren(QtWidgets.QTableWidget):
+            tbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+        self.dock_props.setWidget(self._wrap_expanding(self.inspector_tabs))
+        self.dock_props.setMinimumWidth(420)
+
+
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
 
         # Ajuste inicial de larguras
@@ -1403,6 +1470,56 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_toggle_props.setDefaultAction(act)
             self.btn_toggle_props.setEnabled(True)
 
+    def _apply_reservoir_filter_and_refresh(self):
+        """Aplica filtro (Reservatório) e atualiza 3D/2D/Métricas sem precisar trocar de vista."""
+        model_key = self.state.get("active_model_key", "base")
+        if model_key not in self.models:
+            model_key = "base"
+
+        rf = self.models[model_key].get("reservoir_facies", set())
+        if not isinstance(rf, set):
+            rf = set(rf)
+
+        # Atualiza campo Reservoir/Clusters no state do visualize.run
+        if "update_reservoir_fields" in self.state:
+            try:
+                self.state["update_reservoir_fields"](rf)
+            except Exception as e:
+                print(f"[apply_reservoir_filter] update_reservoir_fields erro: {e}")
+
+        # Refresh do 3D
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as e:
+                print(f"[apply_reservoir_filter] refresh erro: {e}")
+
+        # Atualiza 2D se estiver na aba 2D
+        if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 1:
+            try:
+                self.update_2d_map()
+            except Exception as e:
+                print(f"[apply_reservoir_filter] update_2d_map erro: {e}")
+
+        # Atualiza texto/tabela se estiver em métricas
+        if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 2:
+            try:
+                self.update_sidebar_metrics_text(model_key)
+            except Exception:
+                pass
+            try:
+                # Se você tiver uma função específica pra montar as métricas do centro
+                if hasattr(self, "update_metrics_view_content"):
+                    self.update_metrics_view_content(model_key)
+            except Exception:
+                pass
+
+        # Atualiza legenda (N e Res)
+        try:
+            self.populate_facies_legend()
+        except Exception:
+            pass
 
 
     def add_model_to_tree(self, model_key, model_name):
@@ -1453,78 +1570,107 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
 
-
-
     def switch_main_view_to_model(self, model_key):
-        """Carrega grid, restaura filtros e modo de visualização específicos do modelo."""
-        if model_key not in self.models:
-            return
+        """
+        Troca o modelo ativo na vista principal SEM reconstruir o plotter (sem run()).
+        Mantém câmera/zoom e NÃO redesenha poços automaticamente.
+        """
+        import numpy as np
+        from load_data import grid as base_grid, facies as base_facies
 
-        target_facies = self.models[model_key]["facies"]
-        if target_facies is None:
-            return
-
-        from load_data import grid as global_grid
-        from scipy.ndimage import label, generate_binary_structure
-
-        saved_mode = self.models[model_key].get("view_mode", "facies")
-        current_res_set = self.models[model_key]["reservoir_facies"]
-
-        self.state["current_facies"] = target_facies
-        self.state["reservoir_facies"] = current_res_set
-        self.state["mode"] = saved_mode
-
-        if hasattr(self, "btn_mode"):
-            labels = {
-                "facies": "Fácies",
-                "reservoir": "Reservatório",
-                "clusters": "Clusters",
-                "largest": "Maior Cluster",
-                "thickness_local": "Espessura Local",
-            }
-            self.btn_mode.setText(f"Modo: {labels.get(saved_mode, saved_mode)}")
-
-        # >>> CORREÇÃO: usa a GEOMETRIA do modelo, não o global_grid do Base
-        source_grid = self.models[model_key].get("grid", global_grid)
-        active_grid = source_grid.copy(deep=True)
-        active_grid.cell_data["Facies"] = target_facies
-
-        # Recalcula propriedades
-        is_res = np.isin(target_facies, list(current_res_set)).astype(np.uint8)
-        active_grid.cell_data["Reservoir"] = is_res
-
-        arr_3d = is_res.reshape((nx, ny, nz), order="F")
-        structure = generate_binary_structure(3, 1)
-        labeled, _ = label(arr_3d.transpose(2, 1, 0), structure=structure)
-        clusters_1d = labeled.transpose(2, 1, 0).reshape(-1, order="F").astype(np.int32)
-        active_grid.cell_data["Clusters"] = clusters_1d
-
-        counts = np.bincount(clusters_1d.ravel())
-        if counts.size > 0:
-            counts[0] = 0
-        largest_lbl = counts.argmax() if counts.size > 0 else 0
-        active_grid.cell_data["LargestCluster"] = (clusters_1d == largest_lbl).astype(np.uint8)
-
-        # Recalcula espessuras/verticais no grid correto
-        self.recalc_vertical_metrics(active_grid, target_facies, current_res_set)
-
-        # Atualiza estado/legendas
-        lut, rng = make_clusters_lut(clusters_1d)
-        self.state["clusters_lut"] = lut
-        self.state["clusters_rng"] = rng
-        self.state["clusters_sizes"] = compute_cluster_sizes(clusters_1d)
-
-        self.state["current_grid_source"] = active_grid
-        self.state["refresh"]()
-
-        if saved_mode == "clusters":
-            self.populate_clusters_legend()
+        # --- pega grid/facies do modelo escolhido ---
+        if model_key in ("base", "Base", "Modelo Base"):
+            source_grid = base_grid
+            target_facies = base_facies
+            model_key_norm = "base"
         else:
-            self.populate_facies_legend()
+            model = self.models.get(model_key)
+            if not model:
+                print(f"[WARN] Modelo '{model_key}' não encontrado.")
+                return
+            source_grid = model.get("grid", None)
+            target_facies = model.get("facies", None)
+            model_key_norm = model_key
 
-        self.update_sidebar_metrics_text(model_key)
-        self.update_2d_map()
-        
+            if source_grid is None:
+                # fallback (evita crash)
+                source_grid = base_grid
+            if target_facies is None:
+                target_facies = base_facies
+
+        # --- normaliza facies ---
+        try:
+            target_facies = np.asarray(target_facies).ravel().astype(np.int32)
+        except Exception:
+            target_facies = np.asarray(base_facies).ravel().astype(np.int32)
+
+        # --- preserva modo global ---
+        desired_mode = self.state.get("mode", "facies")
+
+        # --- atualiza state ---
+        self.active_model_key = model_key_norm
+        self.state["active_model_key"] = model_key_norm
+        self.state["current_grid_source"] = source_grid
+        self.state["current_facies"] = target_facies
+        self.state["mode"] = desired_mode
+
+        # garante Facies no grid atual (se possível)
+        try:
+            source_grid.cell_data["Facies"] = target_facies
+        except Exception:
+            pass
+
+        # --- atualiza campos derivados (reservatório/clusters/thickness) no grid atual ---
+        rf_raw = self.state.get("reservoir_facies", set()) or set()
+        rf_set = set()
+        for x in rf_raw:
+            try:
+                rf_set.add(int(x))
+            except Exception:
+                # caso raro de set aninhado
+                if isinstance(x, (set, list, tuple, np.ndarray)):
+                    for y in x:
+                        try:
+                            rf_set.add(int(y))
+                        except Exception:
+                            pass
+
+        upd = self.state.get("update_reservoir_fields")
+        if callable(upd):
+            try:
+                upd(rf_set)
+            except Exception as e:
+                print("[switch_main_view_to_model] update_reservoir_fields falhou:", e)
+
+        # --- refresh sem resetar câmera (o refresh do visualize não deveria resetar) ---
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as e:
+                print("[switch_main_view_to_model] refresh falhou:", e)
+
+        # --- atualiza UI lateral (sem recriar plotter) ---
+        try:
+            self.update_sidebar_metrics_text(model_key_norm)
+        except Exception:
+            pass
+
+        # se estiver na aba métricas/2D, atualiza conteúdo sem trocar de vista
+        try:
+            if hasattr(self, "viz_container"):
+                idx = self.viz_container.currentIndex()
+                if idx == 1 and hasattr(self, "update_2d_map"):
+                    self.update_2d_map()
+                elif idx == 2 and hasattr(self, "update_metrics_view_content"):
+                    self.update_metrics_view_content(model_key_norm)
+        except Exception:
+            pass
+
+        # IMPORTANTE: não redesenha poços aqui (pra não “resetar” seu contexto de comparação)
+        # Se quiser atualizar poços por z_exag, isso deve ficar só em update_z_exaggeration.
+
+
 
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
@@ -1664,21 +1810,27 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- LÓGICA DE CÁLCULO E DADOS ---
 
     def set_metrics(self, metrics, perc):
-        """Salva métricas globais no cache do modelo Base."""
-        self.cached_metrics["base"]["metrics"] = metrics
-        self.cached_metrics["base"]["perc"] = perc
-        
-        # Se estivermos vendo as métricas do base, atualiza a tela agora
-        if self.tabs.currentIndex() == 2:
-            sel = self.project_tree.selectedItems()
-            if sel and sel[0].data(0, QtCore.Qt.UserRole + 1) == "base":
-                self.update_metrics_view_content("base")
+        """Salva métricas globais no cache do modelo ativo (não só base)."""
+        model_key = self.state.get("active_model_key", "base")
+        if model_key not in self.cached_metrics:
+            self.cached_metrics[model_key] = {"metrics": None, "perc": None, "df": None}
+
+        self.cached_metrics[model_key]["metrics"] = metrics
+        self.cached_metrics[model_key]["perc"] = perc
+
+        # Se estiver na aba métricas, atualiza o painel central
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 2:
+            self.update_metrics_view_content(model_key)
+
 
     def set_facies_metrics(self, df):
-        """Salva o DataFrame no cache Base e preenche tabela se necessário."""
-        # --- CORREÇÃO: Salva no cache para persistir ao navegar na árvore ---
-        self.cached_metrics["base"]["df"] = df
-        
+        """Salva DataFrame detalhado no cache do modelo ativo (não só base) e preenche tabela."""
+        model_key = self.state.get("active_model_key", "base")
+        if model_key not in self.cached_metrics:
+            self.cached_metrics[model_key] = {"metrics": None, "perc": None, "df": None}
+
+        self.cached_metrics[model_key]["df"] = df
+
         if df is None or df.empty:
             self.facies_table.setRowCount(0)
             return
@@ -1691,105 +1843,233 @@ class MainWindow(QtWidgets.QMainWindow):
             "thickness_largest_cluster": "Espessura Maior",
             "Perc_X": "Perc X", "Perc_Y": "Perc Y", "Perc_Z": "Perc Z"
         }
+
         self.facies_table.setRowCount(len(df))
         self.facies_table.setColumnCount(len(df.columns))
-        self.facies_table.setHorizontalHeaderLabels([pretty.get(c,c) for c in df.columns])
-        
+        self.facies_table.setHorizontalHeaderLabels([pretty.get(c, c) for c in df.columns])
+
         for i in range(len(df)):
             for j, col in enumerate(df.columns):
                 val = df.iloc[i][col]
                 if isinstance(val, (float, np.floating)):
-                    if col in ["fraction", "connected_fraction", "Perc_X", "Perc_Y", "Perc_Z"]: txt = f"{val:.3f}"
-                    elif "volume" in col: txt = f"{val:.2e}"
-                    else: txt = f"{val:.2f}"
-                else: txt = str(val)
+                    if col in ["fraction", "connected_fraction", "Perc_X", "Perc_Y", "Perc_Z"]:
+                        txt = f"{val:.3f}"
+                    elif "volume" in col:
+                        txt = f"{val:.2e}"
+                    else:
+                        txt = f"{val:.2f}"
+                else:
+                    txt = str(val)
                 self.facies_table.setItem(i, j, QtWidgets.QTableWidgetItem(txt))
+
         self.facies_table.resizeColumnsToContents()
 
-    def change_reservoir_facies(self, reservoir_set):
-        if not isinstance(reservoir_set, set): return
-        
-        # Identifica modelo ativo
-        current_model_key = "base"
-        sel = self.project_tree.selectedItems()
-        if sel:
-            key = sel[0].data(0, QtCore.Qt.UserRole + 1)
-            if key in self.models:
-                current_model_key = key
 
-        # Salva
-        self.models[current_model_key]["reservoir_facies"] = reservoir_set
-        self.state["reservoir_facies"] = reservoir_set
-        
-        # Recalcula Visualização
-        self.switch_main_view_to_model(current_model_key)
-        
-        # Recalcula Métricas
-        target_facies = self.models[current_model_key]["facies"]
-        m, p = compute_global_metrics_for_array(target_facies, reservoir_set)
-        self.cached_metrics[current_model_key]["metrics"] = m
-        self.cached_metrics[current_model_key]["perc"] = p
-        
-        # Atualiza Texto Lateral
-        self.update_sidebar_metrics_text(current_model_key)
-        
-        # Sincroniza Comparação se for o caso
-        if self.compare_facies is not None:
-            self.update_comparison_tables()
-            if hasattr(self, 'update_compare_3d_mode_single'):
-                self.update_compare_3d_mode_single("base")
-                self.update_compare_3d_mode_single("compare")
+    def change_reservoir_facies(self, reservoir_set):
+        import numpy as np
+        from load_data import facies as base_facies
+
+        # Normaliza entrada (GLOBAL)
+        rf_global = set(int(x) for x in (reservoir_set or []))
+        self.state["reservoir_facies"] = set(rf_global)
+
+        # Atualiza "reservoir_facies" de cada modelo como interseção
+        for mk, m in (self.models or {}).items():
+            f = m.get("facies")
+            if f is None and mk == "base":
+                f = base_facies
+            if f is None:
+                m["reservoir_facies"] = set()
+                continue
+
+            present = set(int(v) for v in np.unique(np.asarray(f).astype(int)))
+            m["reservoir_facies"] = set(rf_global & present)
+
+        # --- facies do modelo ativo (SEM usar 'or' com numpy) ---
+        active_key = self.state.get("active_model_key", "base")
+
+        active_f = None
+        md = self.models.get(active_key, {})
+        if isinstance(md, dict):
+            active_f = md.get("facies")
+
+        if active_f is None:
+            active_f = self.state.get("current_facies")
+        if active_f is None:
+            active_f = base_facies
+
+        self.state["current_facies"] = active_f
+
+        present_active = set(int(v) for v in np.unique(np.asarray(active_f).astype(int)))
+        rf_active = rf_global & present_active
+
+        # Aplica no state do visualize (Reservoir/Clusters)
+        upd = self.state.get("update_reservoir_fields")
+        if callable(upd):
+            try:
+                upd(set(rf_active))
+            except Exception as e:
+                print("[change_reservoir_facies] update_reservoir_fields falhou:", e)
+
+        # Refresh principal
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as e:
+                print("[change_reservoir_facies] refresh falhou:", e)
+
+        # Atualiza a vista atual sem trocar aba
+        try:
+            if hasattr(self, "viz_container"):
+                idx = self.viz_container.currentIndex()
+                if idx == 1 and hasattr(self, "update_2d_map"):
+                    self.update_2d_map()
+                elif idx == 2 and hasattr(self, "update_metrics_view_content"):
+                    self.update_metrics_view_content(active_key)
+        except Exception as e:
+            print("[change_reservoir_facies] update vista falhou:", e)
+
+        # Sidebar
+        try:
+            self.update_sidebar_metrics_text(active_key)
+        except Exception:
+            pass
+
+        # Atualiza legenda sem recursão
+        try:
+            self._block_facies_legend_signal = True
+            if hasattr(self, "populate_facies_legend"):
+                self.populate_facies_legend()
+        finally:
+            self._block_facies_legend_signal = False
+
+        # Se estiver em comparação, refaz também
+        try:
+            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
+                self.refresh_comparison_active_view()
+        except Exception:
+            pass
+
+
+
+
+    def build_reports_ribbon_panel(self):
+        """Painel do tab Reports (para colocar no ribbon)."""
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(w)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(12)
+
+        def make_btn(text, icon, slot):
+            b = QtWidgets.QToolButton()
+            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            b.setText(text)
+            b.setIcon(icon)
+            b.setIconSize(QtCore.QSize(28, 28))
+            b.setAutoRaise(True)
+            b.clicked.connect(slot)
+            return b
+
+        ico = self.style()
+        lay.addWidget(make_btn("Relatório\nPoços", ico.standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView), self.open_reports_dialog))
+        lay.addWidget(make_btn("Relatórios\nSelecionados", ico.standardIcon(QtWidgets.QStyle.SP_DirOpenIcon), self.open_selected_well_reports))
+        lay.addWidget(make_btn("Ranking\nModelos", ico.standardIcon(QtWidgets.QStyle.SP_ArrowUp), self.show_models_well_fit_ranking))
+        lay.addStretch(1)
+
+        return w
+    
+    def _schedule_wells_update(self):
+        """Evita travar/piscar: agrupa várias chamadas num único redraw."""
+        if getattr(self, "_wells_update_pending", False):
+            return
+        self._wells_update_pending = True
+        QtCore.QTimer.singleShot(40, self._run_wells_update)
+
+    def _run_wells_update(self):
+        self._wells_update_pending = False
+        try:
+            self.update_wells_3d()
+        except Exception as e:
+            print("[wells] update_wells_3d falhou:", e)
+
+
 
     def load_compare_model(self, grdecl_path):
-        # >>> CORREÇÃO PRINCIPAL: carregar GEOMETRIA (grid) + facies do modelo
+        import os, time
+        import numpy as np
+        from PyQt5 import QtWidgets
+
+        # Carrega geometria + facies do modelo
         try:
-            from load_data import load_grid_from_grdecl
+            from load_data import load_grid_from_grdecl, nx, ny, nz
             grid_compare, fac_compare = load_grid_from_grdecl(grdecl_path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erro", str(e))
+            QtWidgets.QMessageBox.critical(self, "Erro ao carregar modelo", str(e))
             return
 
-        # Confere compatibilidade básica
+        # Compatibilidade
         if fac_compare.size != nx * ny * nz:
-            QtWidgets.QMessageBox.warning(self, "Erro", "Grid incompatível")
+            QtWidgets.QMessageBox.warning(self, "Grid incompatível", "O grid carregado não bate com nx,ny,nz do projeto.")
             return
 
-        import time
         model_id = f"compare_{int(time.time() * 1000)}"
         model_name = os.path.basename(grdecl_path)
 
-        # Independente do base
-        rf = set()
+        # ---------- Reservoir GLOBAL (flatten + interseção) ----------
+        rf_raw = self.state.get("reservoir_facies", set()) or set()
+        rf_global = set()
 
-        # >>> Agora guardamos também o GRID (geometria própria)
+        # flatten defensivo (se vier set dentro de set)
+        for x in rf_raw:
+            if isinstance(x, (set, list, tuple, np.ndarray)):
+                for y in x:
+                    try:
+                        rf_global.add(int(y))
+                    except Exception:
+                        pass
+            else:
+                try:
+                    rf_global.add(int(x))
+                except Exception:
+                    pass
+
+        present = set(int(v) for v in np.unique(np.asarray(fac_compare).astype(int)))
+        rf = rf_global & present
+
+        # Guarda modelo
         self.models[model_id] = {
             "name": model_name,
             "facies": fac_compare,
-            "grid": grid_compare,              # <<< ESSENCIAL
-            "reservoir_facies": rf,
-            "view_mode": "facies"
+            "grid": grid_compare,
+            "reservoir_facies": set(rf),
+            "view_mode": self.state.get("mode", "facies"),
         }
 
-        # Estatísticas e Métricas
-        stats, _ = facies_distribution_array(fac_compare)
-        cm, cp = compute_global_metrics_for_array(fac_compare, rf)
-        df_detail = self.generate_detailed_metrics_df(fac_compare)
+        # Estatísticas e métricas
+        try:
+            from analysis import facies_distribution_array, compute_global_metrics_for_array, reservoir_facies_distribution_array
+            stats, _ = facies_distribution_array(fac_compare)
+            cm, cp = compute_global_metrics_for_array(fac_compare, rf)
+            df_detail = self.generate_detailed_metrics_df(fac_compare)
 
-        self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
+            self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
 
-        self.compare_facies = fac_compare
-        self.compare_facies_stats = stats
-        self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
+            self.compare_facies = fac_compare
+            self.compare_facies_stats = stats
+            self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
+        except Exception as e:
+            # Não derruba o app — mostra erro e segue (modelo ainda carrega)
+            QtWidgets.QMessageBox.warning(self, "Aviso", f"Modelo carregado, mas falhou ao calcular métricas:\n\n{e}")
 
         self.active_compare_id = model_id
-
         self.add_model_to_tree(model_id, f"Comparado: {model_name}")
 
+        # Atualiza UI de comparação
         self.update_comparison_tables()
-
-        # Força atualização se estiver na aba de comparação
         if self.central_stack.currentIndex() == 1:
-            self.update_dynamic_comparison_view()
+            self.refresh_comparison_active_view()
+
 
         
 
@@ -2402,13 +2682,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if file: self.plotter.screenshot(file)
 
     def on_legend_item_changed(self, item):
-        if item.column() != 3: return
-        fac = item.data(QtCore.Qt.UserRole)
-        if self.state.get("mode") == "clusters": return
-        current = self.state["reservoir_facies"]
-        if item.checkState() == QtCore.Qt.Checked: current.add(fac)
-        else: current.discard(fac)
-        self.change_reservoir_facies(current)
+        from PyQt5 import QtCore
+
+        if getattr(self, "_block_facies_legend_signal", False):
+            return
+        if not item:
+            return
+        if item.column() != 3:
+            return
+
+        table = self.facies_legend_table
+        if table is None:
+            return
+
+        new_set = set()
+        for r in range(table.rowCount()):
+            it = table.item(r, 3)
+            if it and it.checkState() == QtCore.Qt.Checked:
+                fid = it.data(QtCore.Qt.UserRole)
+                if fid is None:
+                    try:
+                        fid = int(table.item(r, 1).text())
+                    except Exception:
+                        continue
+                new_set.add(int(fid))
+
+        self.change_reservoir_facies(new_set)
+
+
+    def refresh_wells_in_view(self):
+        self._schedule_wells_update()
+
+
+
 
     def populate_facies_legend(self):
         """Preenche a legenda lateral com as estatísticas do GRID ATIVO na visualização."""
@@ -2497,69 +2803,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clusters_legend_table.blockSignals(False)
 
     def change_mode(self, new_mode):
-        # 1. Atualiza preferência em TODOS os modelos (Sincronização Global)
-        for key in self.models:
-            self.models[key]["view_mode"] = new_mode
+        import numpy as np
+        from load_data import facies as base_facies
 
-        # 2. Atualiza visualização principal (Active Grid)
+        # Atualiza modo
         self.state["mode"] = new_mode
-        self.current_mode = new_mode
+        for k in self.models.keys():
+            self.models[k]["view_mode"] = new_mode
 
-        refresh_main = self.state.get("refresh")
-        if not callable(refresh_main):
-            # Ainda inicializando: setup_toolbar_controls chama isso antes do visualize.run(...)
-            return
+        # Facies atual (SEM usar `or` com numpy)
+        current_f = self.state.get("current_facies")
+        if current_f is None:
+            current_f = base_facies
 
-        refresh_main()
+        # Reservatório global
+        rf_global = set(self.state.get("reservoir_facies", set()) or [])
+        present = set(int(v) for v in np.unique(np.asarray(current_f).astype(int)))
+        rf_active = rf_global & present
 
-        # 3. Atualiza estados de Comparação (se existirem e estiverem prontos)
-        st_base = self.compare_states.get("base")
-        if isinstance(st_base, dict) and callable(st_base.get("refresh")):
-            st_base["mode"] = new_mode
-            if new_mode == "clusters":
-                rf = self.models["base"]["reservoir_facies"]
-                upd = st_base.get("update_reservoir_fields")
-                if callable(upd):
-                    upd(rf)
-            st_base["refresh"]()
+        # Só recalcula campos derivados nos modos que precisam
+        if new_mode in ("reservoir", "clusters", "largest"):
+            upd = self.state.get("update_reservoir_fields")
+            if callable(upd):
+                try:
+                    upd(set(rf_active))
+                except Exception as e:
+                    print("[change_mode] update_reservoir_fields falhou:", e)
 
-        st_cmp = self.compare_states.get("compare")
-        if isinstance(st_cmp, dict) and callable(st_cmp.get("refresh")):
-            st_cmp["mode"] = new_mode
-            if new_mode == "clusters":
-                # Pega o ID correto do modelo comparado ativo
-                target_id = getattr(self, "active_compare_id", "compare")
-                if target_id not in self.models:
-                    target_id = "compare"
-                rf = self.models[target_id]["reservoir_facies"]
-                upd = st_cmp.get("update_reservoir_fields")
-                if callable(upd):
-                    upd(rf)
-            st_cmp["refresh"]()
+        # Refresh do grid
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as e:
+                print("[change_mode] refresh falhou:", e)
 
-        # 4. Se estiver na visualização dinâmica (Aba Comparação), atualiza tudo
-        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
-            self.update_dynamic_comparison_view()
+        # Atualiza legenda (facies x clusters)
+        try:
+            if new_mode in ("clusters", "largest"):
+                if hasattr(self, "facies_legend_table"):
+                    self.facies_legend_table.setVisible(False)
+                if hasattr(self, "clusters_legend_table"):
+                    self.clusters_legend_table.setVisible(True)
+                if hasattr(self, "populate_clusters_legend"):
+                    self.populate_clusters_legend()
+            else:
+                if hasattr(self, "clusters_legend_table"):
+                    self.clusters_legend_table.setVisible(False)
+                if hasattr(self, "facies_legend_table"):
+                    self.facies_legend_table.setVisible(True)
+                if hasattr(self, "populate_facies_legend"):
+                    self.populate_facies_legend()
+        except Exception:
+            pass
 
-        # 5. Interface Lateral (Toggle de Tabelas)
-        if new_mode == "clusters":
-            self.legend_group.setTitle("Filtro (Fácies) & Legenda (Clusters)")
-            # Mostra AMBAS: Fácies (para filtrar) e Clusters (para ver cores)
-            self.facies_legend_table.setVisible(True)
-            self.clusters_legend_table.setVisible(True)
+        # Atualiza 2D/métricas se estiver nessas abas
+        try:
+            if hasattr(self, "viz_container"):
+                idx = self.viz_container.currentIndex()
+                active_key = self.state.get("active_model_key", "base")
+                if idx == 1 and hasattr(self, "update_2d_map"):
+                    self.update_2d_map()
+                elif idx == 2 and hasattr(self, "update_metrics_view_content"):
+                    self.update_metrics_view_content(active_key)
+        except Exception:
+            pass
 
-            self.populate_facies_legend()    # Garante que filtro esteja atualizado
-            self.populate_clusters_legend()  # Preenche cores dos clusters
-        else:
-            self.legend_group.setTitle("Legenda & Filtro")
-            self.facies_legend_table.setVisible(True)
-            self.clusters_legend_table.setVisible(False)
-            self.populate_facies_legend()
+        # Poços: agenda redraw (não trava)
+        self._schedule_wells_update()
 
-        if hasattr(self, "comp_plotter_base"):
-            self.comp_plotter_base.render()
-        if hasattr(self, "comp_plotter_comp"):
-            self.comp_plotter_comp.render()
+
 
 
     def change_thickness_mode(self, label):
@@ -3133,13 +3446,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     
     def on_comp_view_changed(self, index):
-        """Muda a página do Stack de Comparação baseado no ComboBox."""
-        if not hasattr(self, 'compare_stack'):
+        """Callback do combo do ribbon: troca aba da comparação."""
+        if not hasattr(self, "compare_stack"):
             return
-        # O índice 0 é 3D, 1 é Métricas, 2 é Mapas 2D
-        if index < self.compare_stack.count():
-            self.compare_stack.setCurrentIndex(index)
-            self.refresh_comparison_active_view()
+
+        # 0=3D, 1=Métricas, 2=2D (mesmo order do stack)
+        if index < 0:
+            index = 0
+        if index > 2:
+            index = 2
+
+        self.compare_stack.setCurrentIndex(index)
+        self.refresh_comparison_active_view()
+
     
     def get_checked_models(self):
         """Retorna a lista de model_keys marcados (checkbox) na árvore."""
@@ -3160,53 +3479,101 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return checked
 
-
-
     def refresh_comparison_active_view(self):
-        if not hasattr(self, "combo_comp_view"):
+        """Atualiza 3D / Métricas / 2D conforme a aba ativa da comparação."""
+        if not hasattr(self, "central_stack") or self.central_stack.currentIndex() != 1:
+            return
+        if not hasattr(self, "compare_stack"):
             return
 
-        checked_models = self.get_checked_models() if hasattr(self, "get_checked_models") else []
+        # Coleta modelos marcados no tree
+        checked_models = []
+        it = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
+        while it.value():
+            item = it.value()
+            if item.data(0, QtCore.Qt.UserRole) == "model_root":
+                if item.checkState(0) == QtCore.Qt.Checked:
+                    checked_models.append((item.data(0, QtCore.Qt.UserRole + 1), item.text(0)))
+            it += 1
 
-        # Não tentar renderizar se ainda não tem pelo menos Base + 1 modelo
-        checked_non_base = [m for m in checked_models if str(m).lower() != "base"]
-        if self.combo_comp_view.currentIndex() in (0, 2) and len(checked_non_base) == 0:
-            # Página 3D
-            if self.combo_comp_view.currentIndex() == 0:
-                while self.comp_layout_3d.count():
-                    child = self.comp_layout_3d.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
-                label = QtWidgets.QLabel("Marque 1+ modelos no Project Explorer para comparar.")
-                label.setAlignment(QtCore.Qt.AlignCenter)
-                self.comp_layout_3d.addWidget(label)
-            # Página 2D
-            if self.combo_comp_view.currentIndex() == 2:
-                while self.comp_2d_layout.count():
-                    child = self.comp_2d_layout.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
-                label = QtWidgets.QLabel("Marque 1+ modelos no Project Explorer para comparar.")
-                label.setAlignment(QtCore.Qt.AlignCenter)
-                self.comp_2d_layout.addWidget(label)
-            return
+        page = self.compare_stack.currentIndex()
 
-        # Render normal
-        if self.combo_comp_view.currentIndex() == 0:
+        if page == 0:
             self.update_dynamic_comparison_view(checked_models)
-        elif self.combo_comp_view.currentIndex() == 1:
-            self.update_comparison_tables()
-        elif self.combo_comp_view.currentIndex() == 2:
+        elif page == 1:
+            # Se você já tiver update_dynamic_comparison_metrics, use:
+            if hasattr(self, "update_dynamic_comparison_metrics"):
+                self.update_dynamic_comparison_metrics(checked_models)
+            else:
+                # fallback: tenta manter o que existia
+                self.update_comparison_tables()
+        elif page == 2:
             self.update_dynamic_comparison_2d(checked_models)
+
+
+    
+    def update_dynamic_comparison_metrics(self, checked_models):
+        """Monta a tabela de métricas para N modelos marcados."""
+        # normaliza
+        normalized = []
+        for m in (checked_models or []):
+            if isinstance(m, (tuple, list)):
+                key = m[0]
+                name = m[1] if len(m) > 1 else self.models.get(key, {}).get("name", str(key))
+            else:
+                key = m
+                name = self.models.get(key, {}).get("name", str(key))
+            if key in self.models:
+                normalized.append((key, name))
+
+        if not normalized:
+            self.global_compare_table.setRowCount(0)
+            self.facies_compare_table.setRowCount(0)
+            self.reservoir_facies_compare_table.setRowCount(0)
+            return
+
+        # GLOBAL
+        headers = ["Métrica"] + [name for _, name in normalized]
+        self.global_compare_table.clear()
+        self.global_compare_table.setColumnCount(len(headers))
+        self.global_compare_table.setHorizontalHeaderLabels(headers)
+
+        metrics_rows = [
+            ("NTG", "ntg", "{:.3f}"),
+            ("Total Células", "total_cells", "{:d}"),
+            ("Células Res", "res_cells", "{:d}"),
+            ("Conectividade", "connected_fraction", "{:.3f}"),
+            ("Nº Clusters", "n_clusters", "{:d}"),
+            ("Maior Cluster", "largest_size", "{:d}"),
+        ]
+
+        self.global_compare_table.setRowCount(len(metrics_rows))
+
+        for r, (lbl, key, fmt) in enumerate(metrics_rows):
+            self.global_compare_table.setItem(r, 0, QtWidgets.QTableWidgetItem(lbl))
+            for c, (mk, _) in enumerate(normalized):
+                data = self.cached_metrics.get(mk, {})
+                m = data.get("metrics") or {}
+                val = m.get(key, None)
+                if val is None:
+                    txt = "-"
+                else:
+                    try: txt = fmt.format(val)
+                    except: txt = str(val)
+                self.global_compare_table.setItem(r, c+1, QtWidgets.QTableWidgetItem(txt))
+
+        self.global_compare_table.resizeColumnsToContents()
+
 
     
     def update_dynamic_comparison_2d(self, checked_models):
+        """Reconstrói a visualização de Mapas 2D."""
+
+        # --- LIMPEZA ---
         if hasattr(self, 'active_comp_2d_plotters'):
             for p in self.active_comp_2d_plotters:
-                try:
-                    p.close()
-                except:
-                    pass
+                try: p.close()
+                except: pass
         self.active_comp_2d_plotters = []
 
         while self.comp_2d_layout.count():
@@ -3214,46 +3581,70 @@ class MainWindow(QtWidgets.QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        if not checked_models:
+        # --- NORMALIZA checked_models (aceita tuplas longas, tuplas curtas e strings) ---
+        normalized = []
+        for m in (checked_models or []):
+            if isinstance(m, (tuple, list)):
+                model_key = m[0]
+                model_name = m[1] if len(m) > 1 else self.models.get(model_key, {}).get("name", str(model_key))
+            else:
+                model_key = m
+                model_name = self.models.get(model_key, {}).get("name", str(model_key))
+
+            if model_key in self.models:
+                normalized.append((model_key, model_name))
+
+        if not normalized:
             self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
             return
 
-        presets = self.state.get("thickness_presets") or {}
-        thick_mode = self.state.get("thickness_mode", "Espessura")
-        if thick_mode not in presets:
-            thick_mode = "Espessura"
-        scalar, title = presets[thick_mode]
-
-        n_models = len(checked_models)
+        # --- GRID LAYOUT ---
+        n_models = len(normalized)
         cols = 2 if n_models > 1 else 1
 
         grid_container = QtWidgets.QWidget()
         grid_layout = QtWidgets.QGridLayout(grid_container)
-        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setContentsMargins(0,0,0,0)
         grid_layout.setSpacing(2)
         self.comp_2d_layout.addWidget(grid_container)
 
-        from load_data import grid as base_grid
+        # Recupera configuração de espessura
+        presets = self.state.get("thickness_presets") or {}
+        thick_mode = self.state.get("thickness_mode", "Espessura")
+        if thick_mode not in presets and presets:
+            thick_mode = list(presets.keys())[0]
+        if thick_mode not in presets:
+            thick_mode = "Espessura"
 
-        for idx, (model_key, model_name) in enumerate(checked_models):
+        scalar, title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
+
+        # ✅ grid base seguro: usa o grid já carregado no estado, se existir
+        from load_data import grid as global_grid
+        base_grid = self.models.get("base", {}).get("grid") or self.state.get("current_grid_source") or global_grid
+
+        for idx, (model_key, model_name) in enumerate(normalized):
             row, col = idx // cols, idx % cols
             model_data = self.models[model_key]
 
             p2d = BackgroundPlotter(show=False)
             self.active_comp_2d_plotters.append(p2d)
 
-            # ✅ usa o grid do próprio modelo
             src_grid = model_data.get("grid") or base_grid
-            temp_grid = src_grid.copy(deep=True)
+            if src_grid is None:
+                continue
 
+            temp_grid = src_grid.copy(deep=True)
             temp_grid.cell_data["Facies"] = model_data["facies"]
 
+            # Recalcula métricas verticais para este modelo
             self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
+
+            # Desenha
             self._draw_2d_map_local(p2d, temp_grid, scalar, f"{model_name} - {title}")
 
             w = QtWidgets.QWidget()
             vl = QtWidgets.QVBoxLayout(w)
-            vl.setContentsMargins(0, 0, 0, 0)
+            vl.setContentsMargins(0,0,0,0)
             vl.setSpacing(0)
 
             lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
@@ -3263,15 +3654,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
             grid_layout.addWidget(w, row, col)
 
+        # Atualiza filtro matriz (multi-model)
+        self._build_multi_model_filter_table(normalized)
 
 
     def on_tree_item_changed(self, item, column):
-        if not hasattr(self, 'central_stack'): return
-        
-        if item.data(0, QtCore.Qt.UserRole) == "model_root":
-            if self.central_stack.currentIndex() == 1:
-                # Chama a atualização da view ATIVA (3D, 2D ou Métricas)
+        if not item:
+            return
+
+        role = item.data(0, QtCore.Qt.UserRole)
+
+        # poços
+        if role in ("well_item", "wells_root"):
+            self._schedule_wells_update()
+            return
+
+        # modelos na comparação (mantém seu comportamento existente)
+        if role in ("compare_model", "model_root"):
+            try:
                 self.refresh_comparison_active_view()
+            except Exception:
+                pass
+
+
+
 
     def sync_multi_cameras(self, plotters):
         """Sincroniza N plotters."""
@@ -3402,6 +3808,10 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
+        """Recalcula métricas verticais usando a geometria do grid do próprio modelo."""
+        if target_grid is None or target_grid.n_cells != nx * ny * nz:
+            return
+
         fac_3d = facies_array.reshape((nx, ny, nz), order="F")
 
         centers = target_grid.cell_centers().points
@@ -3413,7 +3823,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"
         ]
         data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
-
         res_list = list(reservoir_set)
 
         for ix in range(nx):
@@ -3430,11 +3839,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     continue
 
                 dz = T_col / nz
-
                 idx = np.where(mask)[0]
                 n_res = len(idx)
                 T_tot = n_res * dz
-
                 T_env = (idx[-1] - idx[0] + 1) * dz if n_res > 0 else 0.0
 
                 NTG_col = T_tot / T_col
@@ -3469,6 +3876,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for k, v in data_map.items():
             target_grid.cell_data[k] = v.reshape(-1, order="F")
+
 
 
 
