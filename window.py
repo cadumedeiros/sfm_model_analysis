@@ -303,6 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viz_container = QtWidgets.QStackedWidget()
         self.tabs = self.viz_container
 
+        # Pag 0: 3D
         self.viz_tab = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(self.viz_tab)
         vl.setContentsMargins(0, 0, 0, 0)
@@ -310,6 +311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vl.addWidget(plotter_widget)
         self.viz_container.addWidget(self.viz_tab)
 
+        # Pag 1: Mapas 2D
         self.map2d_tab = QtWidgets.QWidget()
         ml = QtWidgets.QVBoxLayout(self.map2d_tab)
         ml.setContentsMargins(0, 0, 0, 0)
@@ -317,6 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ml.addWidget(plotter_2d_widget)
         self.viz_container.addWidget(self.map2d_tab)
 
+        # Pag 2: Métricas
         self.details_tab = QtWidgets.QWidget()
         l_det = QtWidgets.QVBoxLayout(self.details_tab)
         l_det.setContentsMargins(8, 8, 8, 8)
@@ -336,6 +339,41 @@ class MainWindow(QtWidgets.QMainWindow):
         l_det.addWidget(self.facies_table, 3)
 
         self.viz_container.addWidget(self.details_tab)
+        
+        # Pag 3: Ranking (NOVO)
+        self.ranking_tab = QtWidgets.QWidget()
+        l_rank = QtWidgets.QVBoxLayout(self.ranking_tab)
+        l_rank.setContentsMargins(8, 8, 8, 8)
+        
+        # Splitter vertical para as tabelas do Ranking
+        self.ranking_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        
+        # Tabela Modelos
+        self.tbl_models = QtWidgets.QTableWidget()
+        self.tbl_models.setColumnCount(6)
+        self.tbl_models.setHorizontalHeaderLabels(["Rank", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"])
+        self.tbl_models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_models.setSortingEnabled(True)
+        self.tbl_models.itemSelectionChanged.connect(self._on_models_table_selection_changed)
+        
+        # Tabela Detalhe Poços
+        self.tbl_wells = QtWidgets.QTableWidget()
+        self.tbl_wells.setColumnCount(7) # Ajustado (sem a coluna de ações antiga se necessário, ou mantendo)
+        self.tbl_wells.setHorizontalHeaderLabels(["Poço", "Score", "Fácies (acc)", "Fácies (kappa)", "Espessura", "T_real", "T_sim", "Ações"])
+        self.tbl_wells.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_wells.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_wells.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_wells.setSortingEnabled(True)
+        
+        self.ranking_splitter.addWidget(self.tbl_models)
+        self.ranking_splitter.addWidget(self.tbl_wells)
+        
+        l_rank.addWidget(QtWidgets.QLabel("Ranking Global de Modelos (Baseado na Janela selecionada)"))
+        l_rank.addWidget(self.ranking_splitter)
+        
+        self.viz_container.addWidget(self.ranking_tab)
 
 
         self.central_stack.addWidget(self.viz_container)
@@ -919,10 +957,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_well_comparison_report(self, well_name, model_key="base"):
         """
         Relatório BASE vs SIM vs REAL.
-
-        - REAL: limitado pelos marcadores (quando compatíveis).
-        - BASE e SIM: pegam a coluna (i,j) mais próxima do (X,Y) de referência do poço
-        e constroem o perfil topo->base usando StratigraphicThickness.
+        Calcula o 'Melhor da Janela' baseado na seleção da Ribbon e passa para o relatório.
         """
         import numpy as np
         from PyQt5 import QtWidgets, QtCore
@@ -992,15 +1027,38 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         xref, yref = xy
+        
+        # Base (sempre 1x1 no local)
         base_depth, base_facies, _ = self._column_profile_from_grid(base_grid, xref, yref)
-        window_size = getattr(self, "well_compare_window_size", 1)
+        
+        # --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
+        try:
+            txt = self.cmb_debug_win.currentText()
+            w_size = int(txt.split("x")[0])
+        except:
+            w_size = 1
 
-        sim_depth, sim_facies, _, i_best, j_best, fit_best = self._best_profile_score_in_window(
+        # 1. Simulado Original (1x1 no local exato - usado na Correlação Padrão)
+        sim_depth, sim_facies, _, i_orig, j_orig, _ = self._best_profile_score_in_window(
             grid_sim_source,
             xref, yref,
             real_depth=real_depth0,
             real_fac=np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int),
-            window_size=window_size,
+            window_size=1, # Força 1x1
+            n_bins=200,
+            w_strat=0.7,
+            w_thick=0.3,
+            ignore_real_zeros=True,
+            use_kappa=True,
+        )
+
+        # 2. Simulado Melhor (Na Janela selecionada - usado no Ranking Detail)
+        best_depth, best_facies, _, i_best, j_best, fit_best = self._best_profile_score_in_window(
+            grid_sim_source,
+            xref, yref,
+            real_depth=real_depth0,
+            real_fac=np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int),
+            window_size=w_size, # Usa a janela da UI
             n_bins=200,
             w_strat=0.7,
             w_thick=0.3,
@@ -1012,20 +1070,20 @@ class MainWindow(QtWidgets.QMainWindow):
         real_depth = real_depth0
         real_facies = np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int)
 
-        # --- cria dialog não-modal (permite vários abertos) ---
+        # --- Cria dialog ---
         report_dialog = self._open_matplotlib_report(
             well_name=well_name,
             sim_model_name=sim_model_name,
             real_depth=real_depth, real_fac=real_facies,
             base_depth=base_depth, base_fac=base_facies,
-            sim_depth=sim_depth, sim_fac=sim_facies
+            sim_depth=sim_depth, sim_fac=sim_facies,
+            best_depth=best_depth, best_fac=best_facies, # Dados do melhor
+            window_size_str=f"{w_size}x{w_size}"         # Info visual
         )
 
-        # importante: não modal + auto-destruir ao fechar
         report_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         report_dialog.show()
 
-        # guarda referência (evita GC + você pode gerenciar janelas abertas)
         self.open_reports.append(report_dialog)
 
         def _cleanup():
@@ -1049,7 +1107,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setup_toolbar_controls(self):
         """
-        Cria o Ribbon simplificado com a nova ferramenta de Inspeção de Poços.
+        Cria o Ribbon simplificado com a nova estrutura solicitada.
         """
         # Remove toolbar antiga
         for tb in self.findChildren(QtWidgets.QToolBar):
@@ -1149,25 +1207,28 @@ class MainWindow(QtWidgets.QMainWindow):
         # ==================== ABA VIEW ====================
         tab_view, view_lay = make_tab()
 
-        # Vista (Botões Restaurados)
+        # Vista 
         g_vista, g_vista_row = make_group("Vista")
         
         ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
         ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
         icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
+        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp) # Ícone para Ranking
 
         self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self); self.act_view_3d.setCheckable(True)
         self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self); self.act_view_2d.setCheckable(True)
         self.act_view_metrics = QtWidgets.QAction(icomet, "Métricas", self); self.act_view_metrics.setCheckable(True)
+        self.act_view_ranking = QtWidgets.QAction(icorank, "Ranking", self); self.act_view_ranking.setCheckable(True)
 
         grp = QtWidgets.QActionGroup(self); grp.setExclusive(True)
-        grp.addAction(self.act_view_3d); grp.addAction(self.act_view_2d); grp.addAction(self.act_view_metrics)
+        grp.addAction(self.act_view_3d); grp.addAction(self.act_view_2d); grp.addAction(self.act_view_metrics); grp.addAction(self.act_view_ranking)
         self.act_view_3d.setChecked(True)
 
         # Conecta aos métodos unificados
         self.act_view_3d.triggered.connect(self.show_main_3d_view)
         self.act_view_2d.triggered.connect(self.show_map2d_view)
         self.act_view_metrics.triggered.connect(self.show_metrics_view)
+        self.act_view_ranking.triggered.connect(self.show_ranking_view) # Novo slot
 
         b3d = QtWidgets.QToolButton(); b3d.setDefaultAction(self.act_view_3d)
         b3d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); b3d.setIconSize(QtCore.QSize(28, 28)); b3d.setAutoRaise(True)
@@ -1178,7 +1239,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bmet = QtWidgets.QToolButton(); bmet.setDefaultAction(self.act_view_metrics)
         bmet.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); bmet.setIconSize(QtCore.QSize(28, 28)); bmet.setAutoRaise(True)
 
-        g_vista_row.addWidget(b3d); g_vista_row.addWidget(b2d); g_vista_row.addWidget(bmet)
+        brank = QtWidgets.QToolButton(); brank.setDefaultAction(self.act_view_ranking)
+        brank.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); brank.setIconSize(QtCore.QSize(28, 28)); brank.setAutoRaise(True)
+
+        g_vista_row.addWidget(b3d); g_vista_row.addWidget(b2d); g_vista_row.addWidget(bmet); g_vista_row.addWidget(brank)
 
         # Modo
         g_modo, g_modo_row = make_group("Modo")
@@ -1216,7 +1280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_thick_btn("Espessura")
         g_esp_row.addWidget(self.btn_thick)
 
-        # --- NOVO GRUPO: INSPEÇÃO DE POÇOS (ADICIONADO AQUI) ---
+        # Inspeção de Poços
         g_wells, g_wells_row = make_group("Inspeção")
         
         # Combo Janela
@@ -1230,8 +1294,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_debug_all = make_tool_btn("Destacar\nTodos", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView), checkable=True)
         self.btn_debug_all.clicked.connect(self.toggle_global_well_debug)
         
-        # Conecta mudança do combo para atualizar em tempo real se o botão estiver ligado
-        self.cmb_debug_win.currentIndexChanged.connect(lambda: self.toggle_global_well_debug() if self.btn_debug_all.isChecked() else None)
+        # Conecta mudança do combo para atualizar em tempo real:
+        # 1. Se "Destacar Todos" estiver ligado (3D).
+        # 2. Se a visualização atual for "Ranking" (Recalcula tabela).
+        self.cmb_debug_win.currentIndexChanged.connect(self._on_global_window_size_changed)
 
         # Layout vertical para o combo
         v_box_combo = QtWidgets.QVBoxLayout()
@@ -1242,22 +1308,8 @@ class MainWindow(QtWidgets.QMainWindow):
         
         g_wells_row.addLayout(v_box_combo)
         g_wells_row.addWidget(self.btn_debug_all)
-        
-        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp)
-        view_lay.addWidget(g_wells) # <--- Insere o novo grupo
-        
-        # Janelas
-        g_windows, g_windows_row = make_group("Janelas")
-        self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
-        self.btn_toggle_props = make_tool_btn("Inspector", self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon), checkable=True)
-        self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
-        g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
 
-        view_lay.addWidget(g_windows); view_lay.addStretch(1)
-        self.ribbon_tabs.addTab(tab_view, "View")
-
-        # ==================== ABA REPORTS ====================
-        tab_rep, rep_lay = make_tab()
+        # --- GRUPO RELATÓRIOS (Movido para View) ---
         g_rep, g_rep_row = make_group("Relatórios")
         
         btn_rep_open = make_tool_btn("Abrir\nRelatório", self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
@@ -1266,12 +1318,121 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_rep_selected = make_tool_btn("Poços\nSelecionados", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
         btn_rep_selected.clicked.connect(self.open_selected_well_reports)
         
-        btn_rank = make_tool_btn("Ranking\nModelos", self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp))
-        btn_rank.clicked.connect(self.show_models_well_fit_ranking)
+        g_rep_row.addWidget(btn_rep_open)
+        g_rep_row.addWidget(btn_rep_selected)
         
-        g_rep_row.addWidget(btn_rep_open); g_rep_row.addWidget(btn_rep_selected); g_rep_row.addWidget(btn_rank)
-        rep_lay.addWidget(g_rep); rep_lay.addStretch(1)
-        self.ribbon_tabs.addTab(tab_rep, "Reports")
+        # Janelas
+        g_windows, g_windows_row = make_group("Janelas")
+        self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
+        self.btn_toggle_props = make_tool_btn("Inspector", self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon), checkable=True)
+        self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
+        g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
+
+        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp)
+        view_lay.addWidget(g_wells); view_lay.addWidget(g_rep); view_lay.addWidget(g_windows) # Inserido g_rep
+        view_lay.addStretch(1)
+        
+        self.ribbon_tabs.addTab(tab_view, "View")
+    
+    def show_ranking_view(self):
+        """Alterna para a visão de Ranking (Seja no modo Visualização ou Comparação)."""
+        is_comparison = (self.central_stack.currentIndex() == 1)
+        
+        if is_comparison:
+            # Ranking não disponível no modo comparação lado a lado por enquanto
+            QtWidgets.QMessageBox.information(self, "Modo Comparação", "Volte para o modo Visualização para ver o Ranking detalhado.")
+            return
+
+        # Na visualização simples, o Ranking é o índice 3
+        if hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(3)
+            # Atualiza o conteúdo do ranking
+            self.update_ranking_view_content()
+
+    def _on_global_window_size_changed(self):
+        """Callback quando o tamanho da janela global (Ribbon) é alterado."""
+        # 1. Se estiver visualizando Ranking, recalcula a tabela
+        if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 3:
+            self.update_ranking_view_content()
+        
+        # 2. Se a visualização de debug 3D estiver ativa, atualiza os atores
+        if self.btn_debug_all.isChecked():
+            self.toggle_global_well_debug()
+
+    def update_ranking_view_content(self):
+        """
+        Calcula o ranking baseado na janela global e preenche as tabelas na aba Ranking.
+        """
+        # Pega o tamanho da janela do Ribbon
+        try:
+            txt = self.cmb_debug_win.currentText()
+            ws = int(txt.split("x")[0])
+        except: ws = 1
+        
+        # Guarda no self para reuso
+        self.well_rank_window_size = ws
+        
+        # Calcula Ranking
+        ranking = self.evaluate_models_against_wells(
+            window_size=ws,
+            n_bins=200,
+            w_strat=0.7,
+            w_thick=0.3,
+            ignore_real_zeros=True,
+            use_kappa=True,
+        )
+
+        if not ranking:
+            self.tbl_models.setRowCount(0)
+            self.tbl_wells.setRowCount(0)
+            return
+
+        # Armazena o ranking atual
+        self._current_ranking_data = ranking
+
+        # Popula Tabela de Modelos
+        self.tbl_models.setRowCount(0)
+        for i, r in enumerate(ranking, start=1):
+            row = self.tbl_models.rowCount()
+            self.tbl_models.insertRow(row)
+
+            # Rank
+            it_rank = QtWidgets.QTableWidgetItem(f"{i:02d}")
+            it_rank.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            it_rank.setData(QtCore.Qt.UserRole, r.get("model_key"))
+            self.tbl_models.setItem(row, 0, it_rank)
+
+            # Modelo
+            self.tbl_models.setItem(row, 1, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+
+            # Score
+            it_score = QtWidgets.QTableWidgetItem(f"{r.get('score', 0.0):.3f}")
+            it_score.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_models.setItem(row, 2, it_score)
+
+            # Médias
+            details = r.get("details", {}) or {}
+            accs = [float(s.get("strat_acc", 0.0)) for s in details.values()]
+            kappas = [float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0))) for s in details.values()]
+            
+            mean_acc = sum(accs) / len(accs) if accs else 0.0
+            mean_kap = sum(kappas) / len(kappas) if kappas else 0.0
+
+            it_acc = QtWidgets.QTableWidgetItem(f"{mean_acc:.3f}")
+            it_acc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_models.setItem(row, 3, it_acc)
+
+            it_kap = QtWidgets.QTableWidgetItem(f"{mean_kap:.3f}")
+            it_kap.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_models.setItem(row, 4, it_kap)
+
+            self.tbl_models.setItem(row, 5, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
+        
+        self.tbl_models.resizeColumnsToContents()
+        
+        # Seleciona o primeiro automaticamente se houver linhas
+        if self.tbl_models.rowCount() > 0:
+            self.tbl_models.selectRow(0)
 
     def _create_well_debug_actors(self, grid, well_name, best_i, best_j, window_size, z_exag, scale_z):
         """
@@ -4161,7 +4322,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 
-    def _open_matplotlib_report(self, well_name, sim_model_name, real_depth, real_fac, base_depth, base_fac, sim_depth, sim_fac):
+    def _open_matplotlib_report(self, well_name, sim_model_name, real_depth, real_fac, base_depth, base_fac, sim_depth, sim_fac, best_depth=None, best_fac=None, window_size_str="1x1"):
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.patches import Rectangle
@@ -4183,7 +4344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Janela ---
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Relatório Poço: {well_name}")
-        dialog.resize(1500, 850)
+        dialog.resize(1600, 850) 
         dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.WindowMinMaxButtonsHint)
         
         main_layout = QtWidgets.QVBoxLayout(dialog)
@@ -4191,7 +4352,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(tabs)
 
         # =================================================================
-        # ABA 1: LOGS + VOLUME (Com Porcentagens Restauradas)
+        # ABA 1: LOGS + VOLUME
         # =================================================================
         tab1 = QtWidgets.QWidget()
         l1 = QtWidgets.QVBoxLayout(tab1)
@@ -4199,21 +4360,16 @@ class MainWindow(QtWidgets.QMainWindow):
         fig1, (ax1, ax2, ax3, ax4) = plt.subplots(nrows=1, ncols=4, figsize=(14, 7), 
                                                 gridspec_kw={'width_ratios': [0.2, 0.2, 0.2, 3]})
         
-        # --- Cálculo de Geometria Independente ---
-        # Real
-        r_thick = real_depth - real_depth[0]
-        r_total = r_thick[-1] if len(r_thick) > 0 else 0
-        
-        # Base (Pode ser diferente do Simulado agora)
-        b_thick = base_depth - base_depth[0] if len(base_depth) > 0 else np.array([])
-        b_total = b_thick[-1] if len(b_thick) > 0 else 0
-        
-        # Simulado
-        s_thick = sim_depth - sim_depth[0] if len(sim_depth) > 0 else np.array([])
-        s_total = s_thick[-1] if len(s_thick) > 0 else 0
-        
+        # Dados de espessura (zero-based)
+        r_thick_arr = real_depth - real_depth[0]
+        r_total = r_thick_arr[-1] if len(r_thick_arr) > 0 else 0
+        b_thick_arr = base_depth - base_depth[0] if len(base_depth) > 0 else np.array([])
+        b_total = b_thick_arr[-1] if len(b_thick_arr) > 0 else 0
+        s_thick_arr = sim_depth - sim_depth[0] if len(sim_depth) > 0 else np.array([])
+        s_total = s_thick_arr[-1] if len(s_thick_arr) > 0 else 0
         g_max = max(r_total, b_total, s_total)
 
+        # Helper para desenhar logs simples
         def draw_log(ax, d_arr, f_arr, title):
             patches = []
             colors = []
@@ -4238,7 +4394,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     curr = f_arr[i]
                     top = base
             
-            # Último
             base = d_arr[-1]
             h = base - top
             if h > 0:
@@ -4254,18 +4409,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ax.set_title(title, fontsize=9)
             ax.set_xticks([]); ax.set_yticks([])
 
-        # 1. BASE
-        draw_log(ax1, b_thick, base_fac, f"Base\n{b_total:.1f}m")
+        draw_log(ax1, b_thick_arr, base_fac, f"Base\n{b_total:.1f}m")
         ax1.set_ylabel("Espessura (m)")
         ax1.set_yticks(np.linspace(0, g_max, 10))
-        
-        # 2. SIMULADO
-        draw_log(ax2, s_thick, sim_fac, f"Simul\n{s_total:.1f}m")
-        
-        # 3. REAL
-        draw_log(ax3, r_thick, real_fac, f"Real\n{r_total:.1f}m")
+        draw_log(ax2, s_thick_arr, sim_fac, f"Simul\n{s_total:.1f}m")
+        draw_log(ax3, r_thick_arr, real_fac, f"Real\n{r_total:.1f}m")
 
-        # --- GRÁFICO DE VOLUME (Com Porcentagens Restauradas) ---
+        # Gráfico Volume
         def calc_net(d, f):
             if len(d) < 2: return {}
             dz = np.diff(d, prepend=d[0]); dz[0]=0
@@ -4281,7 +4431,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         y_pos = np.arange(len(all_facies))
         h = 0.25
-        
         vals_b = [net_base.get(f,0) for f in all_facies]
         vals_s = [net_sim.get(f,0) for f in all_facies]
         vals_r = [net_real.get(f,0) for f in all_facies]
@@ -4289,15 +4438,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ax4.barh(y_pos + h, vals_b, h, label='Base', color='#999999')
         ax4.barh(y_pos,     vals_s, h, label='Simulado', color='#007acc')
         ax4.barh(y_pos - h, vals_r, h, label='Real', color='#444444')
-        
         ax4.set_yticks(y_pos)
         ax4.set_yticklabels([str(f) for f in all_facies])
-        ax4.set_title("Balanço Volumétrico por Fácies")
+        ax4.set_title("Balanço Volumétrico")
         ax4.legend()
         ax4.grid(axis='x', linestyle='--', alpha=0.5)
         
-        # --- Loop de Texto de Porcentagem (RESTAURADO) ---
-        # Compara Simulado vs Real (que é o objetivo da calibração)
         for i, (vr, vs) in enumerate(zip(vals_r, vals_s)):
             if vr > 0:
                 diff_perc = ((vs - vr) / vr) * 100
@@ -4306,8 +4452,6 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 txt = "Novo" if vs > 0 else ""
                 color = 'blue'
-            
-            # Posiciona o texto à direita da maior barra
             max_val = max(vr, vals_b[i], vs)
             if max_val > 0:
                 ax4.text(max_val, y_pos[i], f" {txt}", va='center', color=color, fontsize=8, fontweight='bold')
@@ -4318,17 +4462,15 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(tab1, "Logs & Volume")
 
         # =================================================================
-        # ABA 2: MATRIZ DE TROCAS + FAMÍLIAS (%)
+        # ABA 2: MATRIZ & FAMÍLIAS
         # =================================================================
         tab2 = QtWidgets.QWidget()
         l2 = QtWidgets.QVBoxLayout(tab2)
         fig2, (ax2a, ax2b) = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
 
-        # Matriz
         n_bins = 200
         r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
         s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
-        b_norm = resample_to_normalized_depth(base_depth, base_fac, n_bins)
         
         n_classes = len(all_facies)
         conf_matrix = np.zeros((n_classes, n_classes), dtype=int)
@@ -4345,31 +4487,26 @@ class MainWindow(QtWidgets.QMainWindow):
         ax2a.set_xticklabels([str(f) for f in all_facies], rotation=45)
         ax2a.set_yticklabels([str(f) for f in all_facies])
         ax2a.set_xlabel("Simulado"); ax2a.set_ylabel("Real")
-        # Título Limpo (Sem nome do modelo)
-        ax2a.set_title("Matriz de Trocas (Real vs Simulado)")
+        ax2a.set_title("Matriz de Trocas")
 
         for i in range(n_classes):
             for j in range(n_classes):
                 val = conf_matrix[i, j]
                 color = "white" if val > conf_matrix.max()/2 else "black"
                 if val > 0:
-                    fw = 'bold' if i == j else 'normal'
-                    ax2a.text(j, i, str(val), ha="center", va="center", color=color, fontweight=fw)
+                    ax2a.text(j, i, str(val), ha="center", va="center", color=color)
                 if i == j:
                     rect = Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor='gold', linewidth=3)
                     ax2a.add_patch(rect)
 
-        # --- Famílias (AGORA EM PORCENTAGEM) ---
+        # Famílias
         def get_family(f_code):
             s = str(f_code)
             if s.startswith('1'): return "Siliciclásticos"
             if s.startswith('2'): return "Carbonatos"
             return "Outros"
 
-        # Soma espessura total por família
         fam_stats = {"Real": {}, "Sim": {}, "Base": {}}
-        
-        # Totais para normalizar
         tot_r = sum(net_real.values()) if net_real else 1
         tot_s = sum(net_sim.values()) if net_sim else 1
         tot_b = sum(net_base.values()) if net_base else 1
@@ -4382,8 +4519,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         families = sorted(list(fam_stats["Real"].keys()))
         x_fam = np.arange(len(families))
-        
-        # Converte para %
         bars_b = [(fam_stats["Base"][fam] / tot_b)*100 for fam in families]
         bars_s = [(fam_stats["Sim"][fam] / tot_s)*100 for fam in families]
         bars_r = [(fam_stats["Real"][fam] / tot_r)*100 for fam in families]
@@ -4391,12 +4526,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ax2b.bar(x_fam - 0.2, bars_b, 0.2, label='Base', color='#999999')
         ax2b.bar(x_fam,       bars_s, 0.2, label='Simulado', color='#007acc')
         ax2b.bar(x_fam + 0.2, bars_r, 0.2, label='Real', color='#444444')
-        
         ax2b.set_xticks(x_fam); ax2b.set_xticklabels(families)
         ax2b.set_ylabel("Proporção (%)")
-        ax2b.set_title("Balanço por Família (Porcentagem)")
+        ax2b.set_title("Balanço por Família (%)")
         ax2b.legend()
-        ax2b.set_ylim(0, 100) # Fixa escala 0-100%
+        ax2b.set_ylim(0, 100)
 
         plt.tight_layout()
         canvas2 = FigureCanvas(fig2)
@@ -4417,7 +4551,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         for row, fac in enumerate(all_facies):
             vr = net_real.get(fac, 0); vb = net_base.get(fac, 0); vs = net_sim.get(fac, 0)
-            
             if vr > 0: err_perc = ((vs - vr) / vr) * 100
             else: err_perc = 100.0 if vs > 0 else 0.0
             
@@ -4430,7 +4563,6 @@ class MainWindow(QtWidgets.QMainWindow):
             table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{vr:.2f}"))
             table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{vb:.2f}"))
             table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{vs:.2f}"))
-            
             item_err = QtWidgets.QTableWidgetItem(f"{err_perc:+.1f}%")
             if abs(err_perc) > 20: item_err.setForeground(QColor("red"))
             elif abs(err_perc) < 5: item_err.setForeground(QColor("green"))
@@ -4441,22 +4573,23 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(tab3, "Tabela de Métricas")
 
         # =================================================================
-        # ABA 4: CORRELAÇÃO EM ESPESSURA REAL (links inclinados)
+        # ABA 4: CORRELAÇÃO & RANKING (Lado a Lado)
         # =================================================================
         tab4 = QtWidgets.QWidget()
-        l4 = QtWidgets.QVBoxLayout(tab4)
+        layout4 = QtWidgets.QHBoxLayout(tab4)
+        
+        layout4.addStretch(1)
 
-        fig4, ax4 = plt.subplots(figsize=(14, 7))
-        fig4.tight_layout(rect=[0, 0.06, 1, 0.95])
+        # --- ESQUERDA: Correlação ---
+        fig4a, ax4a = plt.subplots(figsize=(5, 8))
+        fig4a.subplots_adjust(left=0.15, right=0.95, top=0.90, bottom=0.05)
 
-        # bins normalizados (define "quem compara com quem")
-        n_bins = 200
         b_norm = resample_to_normalized_depth(base_depth, base_fac, n_bins)
         s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
         r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
 
         self._plot_strat_correlation_real_depth(
-            ax4,
+            ax4a,
             n_bins=n_bins,
             base_fac_bins=b_norm,
             sim_fac_bins=s_norm,
@@ -4465,14 +4598,113 @@ class MainWindow(QtWidgets.QMainWindow):
             s_total=s_total,
             r_total=r_total,
             get_color=get_color,
-            # title="Correlação Base → Simulado → Real (espessura real)",
             min_bins=1,
             link_alpha=0.18
         )
+        ax4a.set_title("Correlação Estratigráfica", fontsize=10, pad=10)
+        
+        canvas4a = FigureCanvas(fig4a)
+        
+        # --- [1] AJUSTE A LARGURA DA CORRELAÇÃO AQUI (px) ---
+        canvas4a.setMinimumWidth(450)
+        canvas4a.setMaximumWidth(550) 
+        
+        layout4.addWidget(canvas4a)
 
-        canvas4 = FigureCanvas(fig4)
-        l4.addWidget(canvas4)
-        tabs.addTab(tab4, "Correlação (m)")
+        # --- DIREITA: Ranking Detail Tracks ---
+        if best_depth is not None and len(best_depth) > 0:
+            best_thick_arr = best_depth - best_depth[0]
+            best_total = best_thick_arr[-1]
+        else:
+            best_depth, best_fac = sim_depth, sim_fac
+            best_thick_arr, best_total = s_thick_arr, s_total
+
+        fig4b, axs4b = plt.subplots(1, 4, figsize=(5, 8), sharey=True)
+        fig4b.subplots_adjust(left=0.12, right=0.95, top=0.88, bottom=0.05, wspace=0.3)
+
+        # [NOVA] Função para agrupar camadas adjacentes iguais (remove linhas)
+        def group_layers(depth, facies, is_grid_format=True):
+            if len(depth) == 0: return []
+            
+            # 1. Converte formato Grid (Pares Top/Base) para Blocos Brutos
+            raw_blocks = []
+            if is_grid_format:
+                for k in range(0, len(depth)-1, 2):
+                    raw_blocks.append((depth[k], depth[k+1], int(facies[k])))
+            else:
+                # Formato Log contínuo
+                curr = int(facies[0])
+                top = depth[0]
+                for k in range(1, len(facies)):
+                    if int(facies[k]) != curr:
+                        raw_blocks.append((top, depth[k], curr))
+                        top = depth[k]
+                        curr = int(facies[k])
+                raw_blocks.append((top, depth[-1], curr))
+
+            # 2. Funde blocos adjacentes iguais
+            if not raw_blocks: return []
+            
+            merged = []
+            curr_top, curr_base, curr_fac = raw_blocks[0]
+            
+            for i in range(1, len(raw_blocks)):
+                next_top, next_base, next_fac = raw_blocks[i]
+                
+                # Se for a mesma fácies e estiver "colado" (tolera gap mínimo de arredondamento)
+                if next_fac == curr_fac and abs(next_top - curr_base) < 0.05:
+                    curr_base = next_base # Estende a base
+                else:
+                    merged.append((curr_top, curr_base, curr_fac))
+                    curr_top, curr_base, curr_fac = next_top, next_base, next_fac
+            
+            merged.append((curr_top, curr_base, curr_fac))
+            return merged
+
+        def plot_track(ax, d, f, title, is_grid=True):
+            ax.set_title(title, fontsize=8, pad=8)
+            ax.set_xticks([])
+            ax.set_facecolor('white')
+            
+            d_rel = d - d[0] if len(d)>0 else []
+            
+            # [USANDO] A função que agrupa
+            layers = group_layers(d_rel, f, is_grid)
+            
+            max_y = max(b_total, s_total, best_total, r_total)
+            ax.set_ylim(max_y, 0)
+            
+            for top, base, fac in layers:
+                h = base - top
+                if h <= 0: continue
+                # [MODIFICADO] edgecolor='none' remove a linha preta entre blocos
+                rect = Rectangle((0, top), 1, h, facecolor=get_color(fac), edgecolor='none')
+                ax.add_patch(rect)
+                
+                if h > max_y * 0.03:
+                    lum = sum(get_color(fac)[:3])
+                    txt_c = 'white' if lum < 1.5 else 'black'
+                    ax.text(0.5, top + h/2, str(fac), ha='center', va='center', fontsize=6, color=txt_c, fontweight='bold')
+
+        plot_track(axs4b[0], base_depth, base_fac, f"BASE\n{b_total:.1f}m", True)
+        plot_track(axs4b[1], sim_depth, sim_fac, f"SIM (Orig)\n{s_total:.1f}m", True)
+        plot_track(axs4b[2], best_depth, best_fac, f"SIM ({window_size_str})\n{best_total:.1f}m", True)
+        plot_track(axs4b[3], real_depth, real_fac, f"REAL\n{r_total:.1f}m", False)
+
+        for ax in axs4b[1:]: ax.set_yticks([])
+        axs4b[0].set_ylabel("Espessura Relativa (m)", fontsize=9)
+
+        canvas4b = FigureCanvas(fig4b)
+        
+        # --- [2] AJUSTE A LARGURA DO BEST MATCH AQUI (px) ---
+        canvas4b.setMinimumWidth(450)
+        canvas4b.setMaximumWidth(550)
+        
+        layout4.addWidget(canvas4b)
+        
+        layout4.addStretch(1)
+
+        tabs.addTab(tab4, "Correlação & Best Match")
 
         return dialog
     
@@ -5373,52 +5605,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tbl.resizeColumnsToContents()
 
-    def _on_models_table_selection_changed(self, dlg):
-        from PyQt5 import QtCore
+    def _on_models_table_selection_changed(self):
+        """Callback quando o usuário clica num modelo na tabela de ranking."""
+        sel = self.tbl_models.selectedItems()
+        if not sel: return
 
-        tbl = dlg._tbl_models
-        sel = tbl.selectedItems()
-        if not sel:
-            return
-
-        # pega a linha selecionada
-        row = tbl.currentRow()
-        if row < 0:
-            return
+        row = self.tbl_models.currentRow()
+        if row < 0: return
 
         # model_key está no item Rank (col 0)
-        it_rank = tbl.item(row, 0)
+        it_rank = self.tbl_models.item(row, 0)
         model_key = it_rank.data(QtCore.Qt.UserRole)
 
-        # encontra o registro do ranking
-        ranking = getattr(dlg, "_ranking", [])
+        # Encontra dados no cache
+        ranking = getattr(self, "_current_ranking_data", [])
         rec = None
         for r in ranking:
             if str(r.get("model_key")) == str(model_key):
                 rec = r
                 break
 
-        if rec is None:
-            return
+        if rec:
+            self._populate_wells_detail_table(rec)
 
-        self._populate_wells_detail_table(dlg, rec)
-
-    def _populate_wells_detail_table(self, dlg, model_record):
-        from PyQt5 import QtWidgets, QtCore, QtGui
-
-        tbl = dlg._tbl_wells
-        tbl.setRowCount(0)
+    def _populate_wells_detail_table(self, model_record):
+        """Popula a tabela inferior de poços para o modelo selecionado."""
+        self.tbl_wells.setRowCount(0)
         
-        # Define colunas (8 colunas agora)
-        headers = ["Poço", "Score", "Acc", "Kappa", "Espessura", "T_real", "T_sim", "Ações"]
-        tbl.setColumnCount(len(headers))
-        tbl.setHorizontalHeaderLabels(headers)
-        
-        # Ajusta larguras
-        header = tbl.horizontalHeader()
-        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QtWidgets.QHeaderView.Stretch) # Ações estica
-
         model_key = model_record.get("model_key")
         details = model_record.get("details", {}) or {}
         
@@ -5426,17 +5639,17 @@ class MainWindow(QtWidgets.QMainWindow):
         items.sort(key=lambda kv: float(kv[1].get("score", 0.0)), reverse=True)
 
         for well_name, s in items:
-            row = tbl.rowCount()
-            tbl.insertRow(row)
+            row = self.tbl_wells.rowCount()
+            self.tbl_wells.insertRow(row)
 
             # Dados Numéricos
-            tbl.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
-            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{float(s.get('score',0)):.3f}"))
-            tbl.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_acc',0)):.3f}"))
-            tbl.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_kappa_norm',0)):.3f}"))
-            tbl.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{float(s.get('thick_score',0)):.3f}"))
-            tbl.setItem(row, 5, QtWidgets.QTableWidgetItem(f"{float(s.get('t_real',0)):.2f}"))
-            tbl.setItem(row, 6, QtWidgets.QTableWidgetItem(f"{float(s.get('t_sim',0)):.2f}"))
+            self.tbl_wells.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
+            self.tbl_wells.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{float(s.get('score',0)):.3f}"))
+            self.tbl_wells.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_acc',0)):.3f}"))
+            self.tbl_wells.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_kappa_norm',0)):.3f}"))
+            self.tbl_wells.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{float(s.get('thick_score',0)):.3f}"))
+            self.tbl_wells.setItem(row, 5, QtWidgets.QTableWidgetItem(f"{float(s.get('t_real',0)):.2f}"))
+            self.tbl_wells.setItem(row, 6, QtWidgets.QTableWidgetItem(f"{float(s.get('t_sim',0)):.2f}"))
 
             # --- COLUNA DE AÇÕES ---
             widget = QtWidgets.QWidget()
@@ -5444,36 +5657,23 @@ class MainWindow(QtWidgets.QMainWindow):
             h_lay.setContentsMargins(4, 2, 4, 2)
             h_lay.setSpacing(6)
             
-            # Dados para callbacks
             best_i = s.get("best_i")
             best_j = s.get("best_j")
             
-            try:
-                txt = dlg._cmb_rank_window.currentText()
-                ws = int(txt.split("x")[0])
-            except: ws = 1
-
-            # Botão 3D (Cubo)
-            btn_3d = QtWidgets.QPushButton()
-            btn_3d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
-            btn_3d.setToolTip("Ver Janela e Melhor Coluna no 3D")
-            btn_3d.setFixedSize(30, 24)
-            btn_3d.clicked.connect(lambda _, mk=model_key, wn=well_name, bi=best_i, bj=best_j, wsize=ws: 
-                self.draw_search_window_3d(mk, wn, -1, -1, bi, bj, wsize))
-            
-            # Botão Gráfico (Lupa/Lista)
+            # Botão Gráfico (Lupa/Lista) - Abre relatório detalhado
             btn_graph = QtWidgets.QPushButton()
             btn_graph.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
-            btn_graph.setToolTip("Relatório Comparativo (Base vs Origem vs Melhor)")
+            btn_graph.setToolTip("Relatório Comparativo (Base vs Origem vs Melhor da Janela)")
             btn_graph.setFixedSize(30, 24)
             btn_graph.clicked.connect(lambda _, mk=model_key, wn=well_name, bi=best_i, bj=best_j: 
                 self.open_advanced_rank_report(mk, wn, bi, bj))
 
-            h_lay.addWidget(btn_3d)
             h_lay.addWidget(btn_graph)
-            h_lay.addStretch(1) # Empurra pra esquerda
+            h_lay.addStretch(1) 
             
-            tbl.setCellWidget(row, 7, widget)
+            self.tbl_wells.setCellWidget(row, 7, widget)
+        
+        self.tbl_wells.resizeColumnsToContents()
 
     def _best_profile_score_in_window(
         self,
