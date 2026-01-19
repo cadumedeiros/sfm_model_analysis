@@ -1049,7 +1049,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setup_toolbar_controls(self):
         """
-        Cria o Ribbon simplificado com Botões de Vista unificados.
+        Cria o Ribbon simplificado com a nova ferramenta de Inspeção de Poços.
         """
         # Remove toolbar antiga
         for tb in self.findChildren(QtWidgets.QToolBar):
@@ -1216,6 +1216,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_thick_btn("Espessura")
         g_esp_row.addWidget(self.btn_thick)
 
+        # --- NOVO GRUPO: INSPEÇÃO DE POÇOS (ADICIONADO AQUI) ---
+        g_wells, g_wells_row = make_group("Inspeção")
+        
+        # Combo Janela
+        self.cmb_debug_win = QtWidgets.QComboBox()
+        self.cmb_debug_win.addItems(["1x1", "3x3", "5x5", "7x7", "9x9"])
+        self.cmb_debug_win.setCurrentIndex(1) # Default 3x3
+        self.cmb_debug_win.setToolTip("Tamanho da Janela de Busca")
+        self.cmb_debug_win.setFixedWidth(60)
+        
+        # Botão Toggle
+        self.btn_debug_all = make_tool_btn("Destacar\nTodos", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView), checkable=True)
+        self.btn_debug_all.clicked.connect(self.toggle_global_well_debug)
+        
+        # Conecta mudança do combo para atualizar em tempo real se o botão estiver ligado
+        self.cmb_debug_win.currentIndexChanged.connect(lambda: self.toggle_global_well_debug() if self.btn_debug_all.isChecked() else None)
+
+        # Layout vertical para o combo
+        v_box_combo = QtWidgets.QVBoxLayout()
+        v_box_combo.setSpacing(0)
+        v_box_combo.setContentsMargins(0, 0, 0, 0)
+        v_box_combo.addWidget(QtWidgets.QLabel("Janela:"))
+        v_box_combo.addWidget(self.cmb_debug_win)
+        
+        g_wells_row.addLayout(v_box_combo)
+        g_wells_row.addWidget(self.btn_debug_all)
+        
+        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp)
+        view_lay.addWidget(g_wells) # <--- Insere o novo grupo
+        
         # Janelas
         g_windows, g_windows_row = make_group("Janelas")
         self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
@@ -1223,7 +1253,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
         g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
 
-        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp); view_lay.addWidget(g_windows); view_lay.addStretch(1)
+        view_lay.addWidget(g_windows); view_lay.addStretch(1)
         self.ribbon_tabs.addTab(tab_view, "View")
 
         # ==================== ABA REPORTS ====================
@@ -1243,7 +1273,163 @@ class MainWindow(QtWidgets.QMainWindow):
         rep_lay.addWidget(g_rep); rep_lay.addStretch(1)
         self.ribbon_tabs.addTab(tab_rep, "Reports")
 
+    def _create_well_debug_actors(self, grid, well_name, best_i, best_j, window_size, z_exag, scale_z):
+        """
+        Gera a lista de atores (janela sólida com cores manuais e destaque) para um poço.
+        """
+        import numpy as np
+        from config import load_facies_colors
 
+        actors = []
+        well = self.wells.get(well_name)
+        if well is None: return actors
+
+        # Localiza centro
+        wx = float(well.data["X"].mean())
+        wy = float(well.data["Y"].mean())
+        center_i, center_j = self._get_ij_from_xy(grid, wx, wy)
+        if center_i is None: return actors
+
+        i_idx = grid.cell_data.get("i_index")
+        
+        if i_idx is not None:
+            half = window_size // 2
+            i_min, i_max = center_i - half, center_i + half
+            j_min, j_max = center_j - half, center_j + half
+
+            # --- A. JANELA SÓLIDA ---
+            mask_win = (i_idx >= i_min) & (i_idx <= i_max) & \
+                       (grid.cell_data["j_index"] >= j_min) & (grid.cell_data["j_index"] <= j_max)
+            window_grid = grid.extract_cells(mask_win)
+
+            if window_grid.n_cells > 0:
+                pts = window_grid.points.copy()
+                if scale_z > 1.0: pts[:, 2] *= z_exag
+                window_grid.points = pts
+
+                # PINTURA MANUAL (CORREÇÃO DE CORES)
+                if "Facies" in window_grid.cell_data:
+                    f_colors = load_facies_colors()
+                    facies_vals = window_grid.cell_data["Facies"]
+                    n_cells = len(facies_vals)
+                    rgba_colors = np.zeros((n_cells, 4), dtype=np.uint8)
+                    
+                    for i in range(n_cells):
+                        f_val = int(facies_vals[i])
+                        rgb_norm = f_colors.get(f_val, (0.7, 0.7, 0.7))
+                        rgba_colors[i, 0] = int(rgb_norm[0] * 255)
+                        rgba_colors[i, 1] = int(rgb_norm[1] * 255)
+                        rgba_colors[i, 2] = int(rgb_norm[2] * 255)
+                        rgba_colors[i, 3] = 255 # Opacidade total
+
+                    window_grid.cell_data["ManualColors"] = rgba_colors
+                    window_grid.set_active_scalars("ManualColors")
+
+                    act_win = self.plotter.add_mesh(
+                        window_grid,
+                        rgb=True, # Usa a cor direta do array
+                        show_edges=True, edge_color="black", line_width=1.0,
+                        reset_camera=False, show_scalar_bar=False,
+                        name=f"debug_solid_win_{well_name}"
+                    )
+                    actors.append(act_win)
+
+            # --- B. DESTAQUE (WIRE AMARELO) ---
+            if best_i is not None:
+                mask_best = (i_idx == best_i) & (grid.cell_data["j_index"] == best_j)
+                best_grid = grid.extract_cells(mask_best)
+
+                if best_grid.n_cells > 0:
+                    pts_b = best_grid.points.copy()
+                    if scale_z > 1.0: pts_b[:, 2] *= z_exag
+                    best_grid.points = pts_b
+
+                    outline = best_grid.outline()
+                    act_high = self.plotter.add_mesh(
+                        outline,
+                        color="yellow", style="wireframe", line_width=4,
+                        name=f"debug_high_{well_name}", reset_camera=False
+                    )
+                    actors.append(act_high)
+
+                    # Label
+                    top_z = np.max(best_grid.bounds[4:6])
+                    top_pt = [best_grid.center[0], best_grid.center[1], top_z]
+                    # lbl = self.plotter.add_point_labels(
+                    #     [top_pt], [f"{well_name}\nMelhor"],
+                    #     font_size=16, text_color="yellow", always_visible=True,
+                    #     shape_opacity=0.4, name=f"debug_lbl_{well_name}"
+                    # )
+                    # actors.append(lbl)
+        
+        return actors
+    
+    def toggle_global_well_debug(self):
+        """
+        Liga/Desliga a visualização de janelas para TODOS os poços do modelo ativo.
+        """
+        # 1. Limpa tudo primeiro
+        if hasattr(self, "_debug_actors"):
+            for a in self._debug_actors:
+                try: self.plotter.remove_actor(a)
+                except: pass
+        self._debug_actors = []
+
+        # Se o botão estiver desligado (ou não existir), restaura e sai
+        if not getattr(self, "btn_debug_all", None) or not self.btn_debug_all.isChecked():
+            main_actor = self.state.get("main_actor")
+            if main_actor: main_actor.GetProperty().SetOpacity(1.0)
+            self.plotter.render()
+            return
+
+        # 2. Prepara Modelo
+        model_key = self.state.get("active_model_key")
+        if not model_key or model_key not in self.models: return
+        
+        self.switch_main_view_to_model(model_key)
+        if hasattr(self, "viz_container"): self.viz_container.setCurrentIndex(0)
+
+        grid = self.state.get("current_grid_source")
+        if grid is None: return
+
+        # Parâmetros de Visualização
+        z_exag = float(self.state.get("z_exag", 15.0))
+        main_actor = self.state.get("main_actor")
+        scale_z = main_actor.GetScale()[2] if main_actor else 1.0
+
+        # Tamanho da Janela do Combo
+        try:
+            txt = self.cmb_debug_win.currentText()
+            w_size = int(txt.split("x")[0])
+        except: w_size = 3
+
+        # Efeito Fantasma no Grid
+        if main_actor: main_actor.GetProperty().SetOpacity(0.001)
+
+        # 3. Calcula e Desenha para CADA poço
+        # Usa evaluate para obter os Best Matches (best_i, best_j)
+        results = self.evaluate_models_against_wells(
+            model_keys=[model_key], 
+            window_size=w_size, 
+            ignore_real_zeros=True
+        )
+
+        if not results: return
+
+        rec = results[0]
+        details = rec.get("details", {})
+
+        for well_name, s in details.items():
+            best_i = s.get("best_i")
+            best_j = s.get("best_j")
+            
+            # Chama a auxiliar e acumula os atores
+            new_actors = self._create_well_debug_actors(
+                grid, well_name, best_i, best_j, w_size, z_exag, scale_z
+            )
+            self._debug_actors.extend(new_actors)
+
+        self.plotter.render()
 
 
     def toggle_comparison_view_type(self):
@@ -4810,50 +4996,40 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         well_names=None,
         model_keys=None,
-        window_size=1,   # <-- NOVO: 1,3,5,7...
+        window_size=1,
         n_bins=200,
         w_strat=0.7,
         w_thick=0.3,
         ignore_real_zeros=True,
         use_kappa=True,
     ):
-        """
-        Retorna lista ranqueada:
-        [{"model_key","model_name","score","details","n_wells_used"}, ...]
-        """
         import numpy as np
         from analysis import compute_well_match_score
 
-        if not self.wells:
-            return []
+        if not self.wells: return []
 
-        # poços a avaliar
-        if well_names is None:
-            well_names = list(self.wells.keys())
-        else:
-            well_names = [w for w in well_names if w in self.wells]
+        # 1. Prepara Poços
+        if well_names is None: well_names = list(self.wells.keys())
+        else: well_names = [w for w in well_names if w in self.wells]
+        if not well_names: return []
 
-        if not well_names:
-            return []
-
-        # modelos a avaliar
+        # 2. Prepara Modelos (INCLUINDO BASE OBRIGATORIAMENTE)
         if model_keys is None:
             model_keys = list(self.models.keys())
-        else:
-            model_keys = [k for k in model_keys if k in self.models]
+        
+        # --- CORREÇÃO: Força a inclusão da string 'base' se ela existir nos modelos ---
+        if "base" in self.models and "base" not in model_keys:
+            model_keys.append("base")
+            
+        # Filtra chaves válidas
+        model_keys = [k for k in model_keys if k in self.models]
+        if not model_keys: return []
 
-        if not model_keys:
-            return []
-
-        # garante ímpar >= 1
-        try:
-            window_size = int(window_size)
-        except Exception:
-            window_size = 1
-        if window_size < 1:
-            window_size = 1
-        if window_size % 2 == 0:
-            window_size += 1
+        # Garante window_size ímpar
+        try: window_size = int(window_size)
+        except: window_size = 1
+        if window_size < 1: window_size = 1
+        if window_size % 2 == 0: window_size += 1
 
         results = []
 
@@ -5228,14 +5404,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_wells_detail_table(dlg, rec)
 
     def _populate_wells_detail_table(self, dlg, model_record):
-        from PyQt5 import QtWidgets, QtCore
+        from PyQt5 import QtWidgets, QtCore, QtGui
 
         tbl = dlg._tbl_wells
         tbl.setRowCount(0)
+        
+        # Define colunas (8 colunas agora)
+        headers = ["Poço", "Score", "Acc", "Kappa", "Espessura", "T_real", "T_sim", "Ações"]
+        tbl.setColumnCount(len(headers))
+        tbl.setHorizontalHeaderLabels(headers)
+        
+        # Ajusta larguras
+        header = tbl.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QtWidgets.QHeaderView.Stretch) # Ações estica
 
+        model_key = model_record.get("model_key")
         details = model_record.get("details", {}) or {}
-
-        # ordena por score do poço (desc)
+        
         items = list(details.items())
         items.sort(key=lambda kv: float(kv[1].get("score", 0.0)), reverse=True)
 
@@ -5243,33 +5429,51 @@ class MainWindow(QtWidgets.QMainWindow):
             row = tbl.rowCount()
             tbl.insertRow(row)
 
-            score = float(s.get("score", 0.0))
-            acc = float(s.get("strat_acc", 0.0))
-            kap = float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0)))
-            thk = float(s.get("thick_score", 0.0))
-            t_real = float(s.get("t_real", 0.0))
-            t_sim = float(s.get("t_sim", 0.0))
-
-            def ritem(v):
-                it = QtWidgets.QTableWidgetItem(f"{v:.3f}")
-                it.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-                return it
-
+            # Dados Numéricos
             tbl.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
-            tbl.setItem(row, 1, ritem(score))
-            tbl.setItem(row, 2, ritem(acc))
-            tbl.setItem(row, 3, ritem(kap))
-            tbl.setItem(row, 4, ritem(thk))
+            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{float(s.get('score',0)):.3f}"))
+            tbl.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_acc',0)):.3f}"))
+            tbl.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_kappa_norm',0)):.3f}"))
+            tbl.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{float(s.get('thick_score',0)):.3f}"))
+            tbl.setItem(row, 5, QtWidgets.QTableWidgetItem(f"{float(s.get('t_real',0)):.2f}"))
+            tbl.setItem(row, 6, QtWidgets.QTableWidgetItem(f"{float(s.get('t_sim',0)):.2f}"))
 
-            it_tr = QtWidgets.QTableWidgetItem(f"{t_real:.2f}")
-            it_tr.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            tbl.setItem(row, 5, it_tr)
+            # --- COLUNA DE AÇÕES ---
+            widget = QtWidgets.QWidget()
+            h_lay = QtWidgets.QHBoxLayout(widget)
+            h_lay.setContentsMargins(4, 2, 4, 2)
+            h_lay.setSpacing(6)
+            
+            # Dados para callbacks
+            best_i = s.get("best_i")
+            best_j = s.get("best_j")
+            
+            try:
+                txt = dlg._cmb_rank_window.currentText()
+                ws = int(txt.split("x")[0])
+            except: ws = 1
 
-            it_ts = QtWidgets.QTableWidgetItem(f"{t_sim:.2f}")
-            it_ts.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            tbl.setItem(row, 6, it_ts)
+            # Botão 3D (Cubo)
+            btn_3d = QtWidgets.QPushButton()
+            btn_3d.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
+            btn_3d.setToolTip("Ver Janela e Melhor Coluna no 3D")
+            btn_3d.setFixedSize(30, 24)
+            btn_3d.clicked.connect(lambda _, mk=model_key, wn=well_name, bi=best_i, bj=best_j, wsize=ws: 
+                self.draw_search_window_3d(mk, wn, -1, -1, bi, bj, wsize))
+            
+            # Botão Gráfico (Lupa/Lista)
+            btn_graph = QtWidgets.QPushButton()
+            btn_graph.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
+            btn_graph.setToolTip("Relatório Comparativo (Base vs Origem vs Melhor)")
+            btn_graph.setFixedSize(30, 24)
+            btn_graph.clicked.connect(lambda _, mk=model_key, wn=well_name, bi=best_i, bj=best_j: 
+                self.open_advanced_rank_report(mk, wn, bi, bj))
 
-        tbl.resizeColumnsToContents()
+            h_lay.addWidget(btn_3d)
+            h_lay.addWidget(btn_graph)
+            h_lay.addStretch(1) # Empurra pra esquerda
+            
+            tbl.setCellWidget(row, 7, widget)
 
     def _best_profile_score_in_window(
         self,
@@ -5435,19 +5639,201 @@ class MainWindow(QtWidgets.QMainWindow):
             return np.array([]), np.array([]), 0.0, ic, jc, {"score": 0.0}
 
         return best
-
     
+    def draw_search_window_3d(self, model_key, well_name, _unused_i, _unused_j, best_i, best_j, window_size):
+        """
+        Visualização 3D Individual (Ranking Report).
+        """
+        # Desmarca o botão global para evitar conflito visual
+        if hasattr(self, "btn_debug_all"):
+            self.btn_debug_all.setChecked(False)
 
+        # Toggle Lógica
+        current_debug_key = (model_key, well_name)
+        last_debug_key = getattr(self, "_last_debug_key", None)
+        
+        if hasattr(self, "_debug_actors"):
+            for a in self._debug_actors:
+                try: self.plotter.remove_actor(a)
+                except: pass
+        self._debug_actors = []
+        
+        main_actor = self.state.get("main_actor")
+        if main_actor: main_actor.GetProperty().SetOpacity(1.0)
+        self.plotter.render()
 
+        if last_debug_key == current_debug_key:
+            self._last_debug_key = None
+            return
 
+        self._last_debug_key = current_debug_key
 
+        # Setup
+        self.switch_main_view_to_model(model_key)
+        if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1:
+            self.compare_stack.setCurrentIndex(0)
+        elif hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(0)
 
+        grid = self.state.get("current_grid_source")
+        if grid is None: return
+        z_exag = float(self.state.get("z_exag", 15.0))
+        
+        main_actor = self.state.get("main_actor")
+        scale_z = main_actor.GetScale()[2] if main_actor else 1.0
+        if main_actor: main_actor.GetProperty().SetOpacity(0.001)
 
+        # Chama a auxiliar
+        new_actors = self._create_well_debug_actors(
+            grid, well_name, best_i, best_j, window_size, z_exag, scale_z
+        )
+        self._debug_actors.extend(new_actors)
+        
+        self.plotter.render()
 
+    def open_advanced_rank_report(self, model_key, well_name, best_i, best_j):
+        """
+        Relatório de Ranking Detalhado - Design 'Slim'.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.patches import Rectangle
+        from config import load_facies_colors
+        import numpy as np
 
+        # --- COLETA DE DADOS (Mantida igual) ---
+        well = self.wells.get(well_name)
+        if not well: return
+        if "DEPT" not in well.data.columns: return
+        
+        col_real = "fac" if "fac" in well.data.columns else "lito_upscaled"
+        raw_depth = well.data["DEPT"].to_numpy()
+        raw_fac = well.data[col_real].fillna(0).to_numpy()
 
+        markers = self.markers_db.get(well_name, [])
+        mds = sorted([m['md'] for m in markers if 'md' in m])
+        if len(mds) >= 2:
+            top_md, base_md = mds[0], mds[-1]
+            mask = (raw_depth >= top_md) & (raw_depth <= base_md)
+            if mask.any():
+                real_depth = raw_depth[mask]; real_fac = raw_fac[mask]
+            else: real_depth, real_fac = raw_depth, raw_fac
+        else:
+            valid_mask = (raw_fac > 0)
+            if valid_mask.any():
+                start = np.argmax(valid_mask)
+                end = len(valid_mask) - np.argmax(valid_mask[::-1])
+                real_depth = raw_depth[start:end]; real_fac = raw_fac[start:end]
+            else: real_depth, real_fac = raw_depth, raw_fac
 
+        if len(real_depth) == 0: return
 
+        ref_top = real_depth[0]
+        ref_base = real_depth[-1]
+        total_thick = ref_base - ref_top
 
+        grid_base = self.models.get("base", {}).get("grid")
+        if not grid_base: from load_data import grid as grid_base
+        grid_sim = self.models[model_key].get("grid")
+        if not grid_sim: return
 
+        wx = float(well.data["X"].mean())
+        wy = float(well.data["Y"].mean())
 
+        def extract_and_align(g, i=None, j=None):
+            d, f, _ = self._column_profile_from_grid(g, wx, wy, i0=i, j0=j)
+            if len(d) == 0: return [], []
+            return d + ref_top, f
+
+        db_d, db_f = extract_and_align(grid_base)
+        dso_d, dso_f = extract_and_align(grid_sim)
+        dsb_d, dsb_f = extract_and_align(grid_sim, i=best_i, j=best_j)
+
+        max_d = ref_base
+        if len(db_d) > 0: max_d = max(max_d, db_d[-1])
+        if len(dso_d) > 0: max_d = max(max_d, dso_d[-1])
+        if len(dsb_d) > 0: max_d = max(max_d, dsb_d[-1])
+
+        # --- PLOTAGEM (AJUSTES DE TAMANHO AQUI) ---
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Ranking Detalhado: {well_name}")
+        
+        # 1. TAMANHO DA JANELA (LARGURA, ALTURA) em Pixels
+        # Mude o 550 para menos se quiser a janela mais fina, ou mais se quiser larga
+        dialog.resize(550, 850) 
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # 2. PROPORÇÃO DO GRÁFICO (LARGURA, ALTURA) em Polegadas
+        # figsize=(4, 9) cria colunas bem estreitas. 
+        # Se quiser poços mais gordos, aumente o 4 para 6 ou 8.
+        fig, axs = plt.subplots(1, 4, figsize=(4, 9), sharey=True)
+        
+        # Ajuste de margens internas (wspace=0.6 separa os poços)
+        fig.subplots_adjust(left=0.15, right=0.95, top=0.92, bottom=0.03, wspace=0.6)
+
+        colors = load_facies_colors()
+        def get_c(c): return colors.get(int(c), (0.8,0.8,0.8,1.0))
+
+        def group_layers(depth, facies, is_grid_format=True):
+            if len(depth) == 0: return []
+            layers = []
+            if is_grid_format:
+                for k in range(0, len(depth)-1, 2):
+                    layers.append((depth[k], depth[k+1], int(facies[k])))
+            else:
+                current_top = depth[0]
+                current_fac = int(facies[0])
+                for k in range(1, len(facies)):
+                    if int(facies[k]) != current_fac:
+                        layers.append((current_top, depth[k], current_fac))
+                        current_top = depth[k]
+                        current_fac = int(facies[k])
+                layers.append((current_top, depth[-1], current_fac))
+            
+            merged = []
+            if not layers: return []
+            curr_top, curr_base, curr_fac = layers[0]
+            for i in range(1, len(layers)):
+                next_top, next_base, next_fac = layers[i]
+                if next_fac == curr_fac and abs(next_top - curr_base) < 0.1:
+                    curr_base = next_base
+                else:
+                    merged.append((curr_top, curr_base, curr_fac))
+                    curr_top, curr_base, curr_fac = next_top, next_base, next_fac
+            merged.append((curr_top, curr_base, curr_fac))
+            return merged
+
+        def plot_track(ax, d, f, title, is_grid=True):
+            ax.set_title(title, fontsize=8, pad=6)
+            ax.set_xticks([])
+            ax.set_xlim(0, 1)
+            ax.set_facecolor('white')
+            
+            layers = group_layers(d, f, is_grid)
+            
+            for top, base, fac in layers:
+                h = base - top
+                if h <= 0: continue
+                rect = Rectangle((0, top), 1, h, facecolor=get_c(fac), edgecolor='black', linewidth=0.5)
+                ax.add_patch(rect)
+                
+                if h > (max_d - ref_top) * 0.025:
+                    lum = sum(get_c(fac)[:3])
+                    txt_c = 'white' if lum < 1.5 else 'black'
+                    ax.text(0.5, top + h/2, str(fac), ha='center', va='center', fontsize=7, color=txt_c, fontweight='bold')
+
+        th_b = db_d[-1]-db_d[0] if len(db_d) else 0
+        th_so = dso_d[-1]-dso_d[0] if len(dso_d) else 0
+        th_sb = dsb_d[-1]-dsb_d[0] if len(dsb_d) else 0
+
+        plot_track(axs[0], db_d, db_f, f"BASE\n{th_b:.1f}m", True)
+        plot_track(axs[1], dso_d, dso_f, f"SIM (Orig)\n{th_so:.1f}m", True)
+        plot_track(axs[2], dsb_d, dsb_f, f"SIM (Melhor)\n{th_sb:.1f}m", True)
+        plot_track(axs[3], real_depth, real_fac, f"REAL\n{total_thick:.1f}m", False)
+
+        axs[0].set_ylabel("Profundidade (MD)", fontsize=9)
+        axs[0].set_ylim(max_d, ref_top)
+        
+        layout.addWidget(FigureCanvas(fig))
+        dialog.exec_()
