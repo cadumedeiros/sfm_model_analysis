@@ -261,10 +261,10 @@ class MainWindow(QtWidgets.QMainWindow):
         action_exit.triggered.connect(self.close)
         file_menu.addAction(action_exit)
 
-        # --- Exibir (para reabrir docks/toolbars) ---
+        # --- Exibir ---
         self.view_menu = menubar.addMenu("Exibir")
 
-        # Perspectivas (interno)
+        # Perspectivas
         self.act_persp_viz = QtWidgets.QAction("Visualização", self)
         self.act_persp_viz.setCheckable(True)
         self.act_persp_viz.setChecked(True)
@@ -274,10 +274,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_persp_comp.setCheckable(True)
         self.act_persp_comp.triggered.connect(lambda: self.switch_perspective("comparison"))
 
-        # Ribbon (cria o widget)
+        # Ribbon
         self.setup_toolbar_controls()
 
-        # >>> Ribbon em ToolBar (isso força docks abaixo do painel superior)
         self.ribbon_toolbar = QtWidgets.QToolBar("Ribbon")
         self.ribbon_toolbar.setMovable(False)
         self.ribbon_toolbar.setFloatable(False)
@@ -286,14 +285,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ribbon_toolbar.addWidget(self.ribbon)
         self.addToolBar(QtCore.Qt.TopToolBarArea, self.ribbon_toolbar)
 
-        # Central: somente o stack (sem ribbon dentro)
+        # Central
         self.central_stack = QtWidgets.QStackedWidget()
         self.setCentralWidget(self.central_stack)
 
-        # Docks (Explorer/Props)
+        # Docks
         self.setup_docks(nx, ny, nz)
 
-        # Ações do menu Exibir (toggle docks/toolbars)
         self.view_menu.addAction(self.dock_explorer.toggleViewAction())
         self.view_menu.addAction(self.dock_props.toggleViewAction())
         self.view_menu.addSeparator()
@@ -340,15 +338,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.viz_container.addWidget(self.details_tab)
         
-        # Pag 3: Ranking (NOVO)
+        # Pag 3: Ranking (ATUALIZADO COM BOTÕES DE COPIAR)
         self.ranking_tab = QtWidgets.QWidget()
         l_rank = QtWidgets.QVBoxLayout(self.ranking_tab)
         l_rank.setContentsMargins(8, 8, 8, 8)
         
-        # Splitter vertical para as tabelas do Ranking
         self.ranking_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         
-        # Tabela Modelos
+        # --- Container Superior: Tabela de Modelos ---
+        w_top = QtWidgets.QWidget()
+        l_top = QtWidgets.QVBoxLayout(w_top)
+        l_top.setContentsMargins(0, 0, 0, 0)
+        
+        h_top_bar = QtWidgets.QHBoxLayout()
+        h_top_bar.addWidget(QtWidgets.QLabel("Ranking Global de Modelos"))
+        h_top_bar.addStretch(1)
+        btn_copy_models = QtWidgets.QPushButton("Copiar Tabela")
+        btn_copy_models.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
+        btn_copy_models.clicked.connect(lambda: self._copy_table_to_clipboard(self.tbl_models))
+        h_top_bar.addWidget(btn_copy_models)
+        l_top.addLayout(h_top_bar)
+
         self.tbl_models = QtWidgets.QTableWidget()
         self.tbl_models.setColumnCount(6)
         self.tbl_models.setHorizontalHeaderLabels(["Rank", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"])
@@ -357,30 +367,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_models.setSortingEnabled(True)
         self.tbl_models.itemSelectionChanged.connect(self._on_models_table_selection_changed)
+        l_top.addWidget(self.tbl_models)
         
-        # Tabela Detalhe Poços
+        # --- Container Inferior: Tabela de Poços ---
+        w_bot = QtWidgets.QWidget()
+        l_bot = QtWidgets.QVBoxLayout(w_bot)
+        l_bot.setContentsMargins(0, 0, 0, 0)
+        
+        h_bot_bar = QtWidgets.QHBoxLayout()
+        h_bot_bar.addWidget(QtWidgets.QLabel("Detalhamento por Poço (Modelo Selecionado)"))
+        h_bot_bar.addStretch(1)
+        btn_copy_wells = QtWidgets.QPushButton("Copiar Tabela")
+        btn_copy_wells.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
+        btn_copy_wells.clicked.connect(lambda: self._copy_table_to_clipboard(self.tbl_wells))
+        h_bot_bar.addWidget(btn_copy_wells)
+        l_bot.addLayout(h_bot_bar)
+
         self.tbl_wells = QtWidgets.QTableWidget()
-        self.tbl_wells.setColumnCount(7) # Ajustado (sem a coluna de ações antiga se necessário, ou mantendo)
+        self.tbl_wells.setColumnCount(7) 
         self.tbl_wells.setHorizontalHeaderLabels(["Poço", "Score", "Fácies (acc)", "Fácies (kappa)", "Espessura", "T_real", "T_sim", "Ações"])
         self.tbl_wells.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tbl_wells.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_wells.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_wells.setSortingEnabled(True)
+        l_bot.addWidget(self.tbl_wells)
         
-        self.ranking_splitter.addWidget(self.tbl_models)
-        self.ranking_splitter.addWidget(self.tbl_wells)
+        self.ranking_splitter.addWidget(w_top)
+        self.ranking_splitter.addWidget(w_bot)
+        self.ranking_splitter.setStretchFactor(0, 1)
+        self.ranking_splitter.setStretchFactor(1, 2)
         
-        l_rank.addWidget(QtWidgets.QLabel("Ranking Global de Modelos (Baseado na Janela selecionada)"))
         l_rank.addWidget(self.ranking_splitter)
-        
         self.viz_container.addWidget(self.ranking_tab)
-
 
         self.central_stack.addWidget(self.viz_container)
 
-        # --- PERSPECTIVA 2: COMPARAÇÃO ---
+        # --- PERSPECTIVA 2: COMPARAÇÃO (Mantida igual) ---
         self.compare_stack = QtWidgets.QStackedWidget()
-
         self.comp_page_3d = QtWidgets.QWidget()
         self.comp_layout_3d = QtWidgets.QVBoxLayout(self.comp_page_3d)
         self.comp_layout_3d.setContentsMargins(0, 0, 0, 0)
@@ -389,21 +412,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_page_metrics = QtWidgets.QWidget()
         self.comp_metrics_layout = QtWidgets.QVBoxLayout(self.comp_page_metrics)
         self.comp_metrics_layout.setContentsMargins(6, 6, 6, 6)
-
         self.tabs_compare_metrics = QtWidgets.QTabWidget()
-
-        t_fa = QtWidgets.QWidget()
-        l_fa = QtWidgets.QVBoxLayout(t_fa)
-        self.facies_compare_table = QtWidgets.QTableWidget()
-        l_fa.addWidget(self.facies_compare_table)
+        t_fa = QtWidgets.QWidget(); l_fa = QtWidgets.QVBoxLayout(t_fa)
+        self.facies_compare_table = QtWidgets.QTableWidget(); l_fa.addWidget(self.facies_compare_table)
         self.tabs_compare_metrics.addTab(t_fa, "Fácies")
-
-        t_res = QtWidgets.QWidget()
-        l_res = QtWidgets.QVBoxLayout(t_res)
-        self.reservoir_facies_compare_table = QtWidgets.QTableWidget()
-        l_res.addWidget(self.reservoir_facies_compare_table)
+        t_res = QtWidgets.QWidget(); l_res = QtWidgets.QVBoxLayout(t_res)
+        self.reservoir_facies_compare_table = QtWidgets.QTableWidget(); l_res.addWidget(self.reservoir_facies_compare_table)
         self.tabs_compare_metrics.addTab(t_res, "Reservatório")
-
         self.comp_metrics_layout.addWidget(self.tabs_compare_metrics)
         self.compare_stack.addWidget(self.comp_page_metrics)
 
@@ -411,10 +426,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_2d_layout = QtWidgets.QVBoxLayout(self.comp_page_2d)
         self.comp_2d_layout.setContentsMargins(0, 0, 0, 0)
         self.compare_stack.addWidget(self.comp_page_2d)
-
         self.central_stack.addWidget(self.compare_stack)
 
+    def _copy_table_to_clipboard(self, table_widget):
+        """Copia o conteúdo de uma QTableWidget para o clipboard (formato CSV/Excel)."""
+        if table_widget.rowCount() == 0:
+            return
 
+        cols = table_widget.columnCount()
+        rows = table_widget.rowCount()
+
+        # 1. Cabeçalhos
+        headers = []
+        for c in range(cols):
+            it = table_widget.horizontalHeaderItem(c)
+            if it:
+                headers.append(it.text())
+            else:
+                headers.append("")
+        
+        # Junta com TABs
+        clipboard_text = "\t".join(headers) + "\n"
+
+        # 2. Linhas
+        for r in range(rows):
+            row_data = []
+            for c in range(cols):
+                # Se tiver widget na célula (ex: botões na última coluna), ignora ou põe placeholder
+                if table_widget.cellWidget(r, c):
+                    row_data.append("") # Deixa vazio no excel
+                else:
+                    it = table_widget.item(r, c)
+                    if it:
+                        # Substitui quebras de linha por espaço pra não quebrar o CSV
+                        txt = it.text().replace("\n", " ").replace("\t", " ")
+                        row_data.append(txt)
+                    else:
+                        row_data.append("")
+            
+            clipboard_text += "\t".join(row_data) + "\n"
+
+        # Envia para o Clipboard do SO
+        QtWidgets.QApplication.clipboard().setText(clipboard_text)
+        
+        # Feedback visual rápido na barra de status (se existir) ou print
+        print("Tabela copiada para a área de transferência.")
 
     def _make_embedded_plotter(self, parent=None):
         """Cria um plotter do PyVista adequado para EMBED dentro de layouts Qt.
@@ -1994,6 +2050,11 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 print("[switch_main_view_to_model] refresh falhou:", e)
 
+        # --- CORREÇÃO: Atualiza a legenda de Propriedades ---
+        # Isso garante que a tabela mostre as contagens do novo modelo imediatamente
+        if hasattr(self, "populate_facies_legend"):
+            self.populate_facies_legend()
+
         # --- atualiza UI lateral (sem recriar plotter) ---
         try:
             self.update_sidebar_metrics_text(model_key_norm)
@@ -2010,9 +2071,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.update_metrics_view_content(model_key_norm)
         except Exception:
             pass
-
-        # IMPORTANTE: não redesenha poços aqui (pra não “resetar” seu contexto de comparação)
-        # Se quiser atualizar poços por z_exag, isso deve ficar só em update_z_exaggeration.
 
 
 
@@ -2212,6 +2270,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def change_reservoir_facies(self, reservoir_set):
         import numpy as np
         from load_data import facies as base_facies
+        from analysis import compute_global_metrics_for_array, generate_detailed_metrics_df
 
         # Normaliza entrada (GLOBAL)
         rf_global = set(int(x) for x in (reservoir_set or []))
@@ -2227,43 +2286,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
 
             present = set(int(v) for v in np.unique(np.asarray(f).astype(int)))
-            m["reservoir_facies"] = set(rf_global & present)
+            # Interseção: Só mantém fácies que existem no modelo E foram selecionadas
+            rf_local = set(rf_global & present)
+            m["reservoir_facies"] = rf_local
+            
+            # --- CORREÇÃO: Recalcula Cache de Métricas para o modelo, passando o GRID correto ---
+            # Isso corrige o "Resumo Global: 0" e "Volumes Negativos"
+            grid_local = m.get("grid") # Pega o grid específico do modelo (pode ser Base ou Compare)
+            if grid_local is None and mk == "base": 
+                from load_data import grid as grid_local
+            
+            if f is not None:
+                # Agora passamos grid_local para calcular volumes corretos
+                met, perc = compute_global_metrics_for_array(f, rf_local, target_grid=grid_local)
+                df_det = generate_detailed_metrics_df(f, target_grid=grid_local)
+                
+                if mk not in self.cached_metrics:
+                    self.cached_metrics[mk] = {}
+                self.cached_metrics[mk]["metrics"] = met
+                self.cached_metrics[mk]["perc"] = perc
+                self.cached_metrics[mk]["df"] = df_det
 
-        # --- facies do modelo ativo (SEM usar 'or' com numpy) ---
+        # --- Atualiza UI para o modelo ATIVO ---
         active_key = self.state.get("active_model_key", "base")
-
-        active_f = None
-        md = self.models.get(active_key, {})
-        if isinstance(md, dict):
-            active_f = md.get("facies")
-
-        if active_f is None:
-            active_f = self.state.get("current_facies")
-        if active_f is None:
-            active_f = base_facies
-
-        self.state["current_facies"] = active_f
-
-        present_active = set(int(v) for v in np.unique(np.asarray(active_f).astype(int)))
-        rf_active = rf_global & present_active
-
-        # Aplica no state do visualize (Reservoir/Clusters)
+        
+        # Aplica no state do visualize (Visualização 3D)
         upd = self.state.get("update_reservoir_fields")
+        rf_active = self.models.get(active_key, {}).get("reservoir_facies", set())
+        
         if callable(upd):
             try:
                 upd(set(rf_active))
             except Exception as e:
                 print("[change_reservoir_facies] update_reservoir_fields falhou:", e)
 
-        # Refresh principal
+        # Refresh do Plotter
         refresh = self.state.get("refresh")
         if callable(refresh):
-            try:
-                refresh()
-            except Exception as e:
-                print("[change_reservoir_facies] refresh falhou:", e)
+            try: refresh()
+            except: pass
 
-        # Atualiza a vista atual sem trocar aba
+        # Atualiza a vista atual (Tabelas e Textos)
         try:
             if hasattr(self, "viz_container"):
                 idx = self.viz_container.currentIndex()
@@ -2271,14 +2334,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.update_2d_map()
                 elif idx == 2 and hasattr(self, "update_metrics_view_content"):
                     self.update_metrics_view_content(active_key)
-        except Exception as e:
-            print("[change_reservoir_facies] update vista falhou:", e)
+        except Exception: pass
 
         # Sidebar
-        try:
-            self.update_sidebar_metrics_text(active_key)
-        except Exception:
-            pass
+        try: self.update_sidebar_metrics_text(active_key)
+        except: pass
 
         # Atualiza legenda sem recursão
         try:
@@ -2287,16 +2347,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.populate_facies_legend()
         finally:
             self._block_facies_legend_signal = False
-
-        # Se estiver em comparação, refaz também
-        try:
-            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
-                self.refresh_comparison_active_view()
-        except Exception:
-            pass
-
-
-
 
     def build_reports_ribbon_panel(self):
         """Painel do tab Reports (para colocar no ribbon)."""

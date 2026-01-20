@@ -14,15 +14,15 @@ from scipy.ndimage import label as nd_label, generate_binary_structure
 # HELPERS DE GEOMETRIA
 # =============================================================================
 def _get_cell_volumes(target_grid=None):
-    """Retorna array de volumes das células. Calcula se não existir."""
+    """Retorna array de volumes das células (ABSOLUTO). Calcula se não existir."""
     g = target_grid if target_grid is not None else grid
     
     # 1) Tenta pegar cache
     for key in ("Volume", "Volume ", "volume", "Volume_"):
         if key in g.cell_data:
-            return g.cell_data[key]
+            return np.abs(g.cell_data[key]) # Garante positivo
 
-    # 2) Calcula
+    # 2) Calcula via PyVista
     tmp = g.compute_cell_sizes(length=False, area=False, volume=True)
     vol_arr = None
     for key in ("Volume", "Volume ", "volume", "Volume_"):
@@ -31,8 +31,12 @@ def _get_cell_volumes(target_grid=None):
             break
 
     if vol_arr is None:
+        # Fallback de segurança
         return np.ones(g.n_cells) 
 
+    # CORREÇÃO CRÍTICA: Volumes físicos devem ser positivos
+    vol_arr = np.abs(vol_arr)
+    
     g.cell_data["Volume"] = vol_arr
     return vol_arr
 
@@ -115,6 +119,7 @@ def facies_distribution_array(facies_array, target_grid=None):
     volumes = _get_cell_volumes(target_grid)
     z_coords = _get_cell_z_coords(target_grid)
     
+    # Segurança se tamanhos não baterem
     if volumes.size != total:
         volumes = np.ones(total) 
         z_coords = np.zeros(total)
@@ -139,6 +144,7 @@ def reservoir_facies_distribution_array(facies_array, reservoir_facies, target_g
 
     mask_res = np.isin(arr, list(fac_set))
     res_total = int(mask_res.sum())
+    
     if res_total == 0: return {}, 0
 
     volumes = _get_cell_volumes(target_grid)
@@ -159,6 +165,7 @@ def reservoir_facies_distribution_array(facies_array, reservoir_facies, target_g
         mask_local = (arr_res == fac)
         count = int(mask_local.sum())
         vol = float(vol_res[mask_local].sum())
+        
         zs = z_res[mask_local]
         thick = float(zs.max() - zs.min()) if count > 0 else 0.0
         
@@ -245,8 +252,13 @@ def compute_directional_percolation(reservoir_facies):
         "z_perc": bool(z_common), "z_clusters": z_common,
     }
 
-def compute_global_metrics_for_array(facies_array, reservoir_facies):
+def compute_global_metrics_for_array(facies_array, reservoir_facies, target_grid=None):
+    """
+    Calcula métricas globais para um array de fácies específico.
+    target_grid: Opcional. Usado para calcular volumes corretos do modelo.
+    """
     from load_data import nx, ny, nz
+    
     arr = np.asarray(facies_array).astype(int)
     total_cells = arr.size
 
@@ -258,50 +270,71 @@ def compute_global_metrics_for_array(facies_array, reservoir_facies):
     mask = np.isin(arr, list(fac_set))
     res_cells = int(mask.sum())
     ntg = res_cells / total_cells if total_cells else 0.0
+    
+    # --- CÁLCULO DE VOLUMES ---
+    volumes = _get_cell_volumes(target_grid)
+    
+    # Se os tamanhos baterem, calcula. Se não, zera (segurança).
+    if volumes.size == total_cells:
+        grid_volume = float(volumes.sum())
+        reservoir_volume = float(volumes[mask].sum())
+    else:
+        grid_volume = 0.0
+        reservoir_volume = 0.0
 
     if res_cells == 0:
         return ({
             "total_cells": int(total_cells), "res_cells": 0, "ntg": 0.0,
             "n_clusters": 0, "largest_label": 0, "largest_size": 0, "connected_fraction": 0.0,
+            "grid_volume": grid_volume, "reservoir_volume": 0.0
         }, {
             "x_perc": False, "x_clusters": set(), "y_perc": False, "y_clusters": set(), "z_perc": False, "z_clusters": set(),
         })
 
-    res_xyz = mask.reshape((nx, ny, nz), order="F")
-    structure = generate_binary_structure(3, 1)
-    labeled, _ = nd_label(res_xyz, structure=structure)
-    clusters_1d = labeled.reshape(-1, order="F")
+    # Análise de Clusters
+    try:
+        res_xyz = mask.reshape((nx, ny, nz), order="F")
+        structure = generate_binary_structure(3, 1)
+        labeled, _ = nd_label(res_xyz, structure=structure)
+        clusters_1d = labeled.reshape(-1, order="F")
 
-    counts = np.bincount(clusters_1d)
-    if counts.size > 0: counts[0] = 0
-    n_clusters = int((counts > 0).sum())
-    largest_label = int(counts.argmax()) if counts.size > 0 else 0
-    largest_size = int(counts[largest_label]) if counts.size > 0 else 0
-    connected_fraction = largest_size / res_cells if res_cells > 0 else 0.0
+        counts = np.bincount(clusters_1d)
+        if counts.size > 0: counts[0] = 0
+        n_clusters = int((counts > 0).sum())
+        largest_label = int(counts.argmax()) if counts.size > 0 else 0
+        largest_size = int(counts[largest_label]) if counts.size > 0 else 0
+        connected_fraction = largest_size / res_cells if res_cells > 0 else 0.0
 
-    clusters_xyz = labeled
-    left_ids = set(np.unique(clusters_xyz[0,:,:])); left_ids.discard(0)
-    right_ids = set(np.unique(clusters_xyz[-1,:,:])); right_ids.discard(0)
-    x_common = left_ids.intersection(right_ids)
+        # Percolação
+        clusters_xyz = labeled
+        left_ids = set(np.unique(clusters_xyz[0,:,:])); left_ids.discard(0)
+        right_ids = set(np.unique(clusters_xyz[-1,:,:])); right_ids.discard(0)
+        x_common = left_ids.intersection(right_ids)
 
-    f_ids = set(np.unique(clusters_xyz[:,0,:])); f_ids.discard(0)
-    b_ids = set(np.unique(clusters_xyz[:,-1,:])); b_ids.discard(0)
-    y_common = f_ids.intersection(b_ids)
+        f_ids = set(np.unique(clusters_xyz[:,0,:])); f_ids.discard(0)
+        b_ids = set(np.unique(clusters_xyz[:,-1,:])); b_ids.discard(0)
+        y_common = f_ids.intersection(b_ids)
 
-    t_ids = set(np.unique(clusters_xyz[:,:,0])); t_ids.discard(0)
-    bo_ids = set(np.unique(clusters_xyz[:,:,-1])); bo_ids.discard(0)
-    z_common = t_ids.intersection(bo_ids)
+        t_ids = set(np.unique(clusters_xyz[:,:,0])); t_ids.discard(0)
+        bo_ids = set(np.unique(clusters_xyz[:,:,-1])); bo_ids.discard(0)
+        z_common = t_ids.intersection(bo_ids)
+        
+        perc = {
+            "x_perc": bool(x_common), "x_clusters": x_common,
+            "y_perc": bool(y_common), "y_clusters": y_common,
+            "z_perc": bool(z_common), "z_clusters": z_common,
+        }
+    except Exception:
+        n_clusters = 0; largest_label=0; largest_size=0; connected_fraction=0.0
+        perc = {"x_perc": False, "x_clusters": set(), "y_perc": False, "y_clusters": set(), "z_perc": False, "z_clusters": set()}
 
     metrics = {
         "total_cells": int(total_cells), "res_cells": res_cells, "ntg": float(ntg),
         "n_clusters": n_clusters, "largest_label": largest_label,
         "largest_size": largest_size, "connected_fraction": float(connected_fraction),
+        "grid_volume": grid_volume, "reservoir_volume": reservoir_volume
     }
-    perc = {
-        "x_perc": bool(x_common), "x_clusters": x_common,
-        "y_perc": bool(y_common), "y_clusters": y_common,
-        "z_perc": bool(z_common), "z_clusters": z_common,
-    }
+    
     return metrics, perc
 
 def compute_facies_metrics():
@@ -948,3 +981,98 @@ def compute_well_fit_score(
         ignore_real_zeros=ignore_real_zeros,
         use_kappa=use_kappa,
     )
+
+
+def generate_detailed_metrics_df(facies_array, target_grid=None):
+    """Gera DataFrame detalhado com volumes baseados no grid fornecido."""
+    from load_data import nx, ny, nz
+    
+    arr = np.asarray(facies_array, dtype=int)
+    total_cells = arr.size
+    
+    volumes = _get_cell_volumes(target_grid)
+    z_vals = _get_cell_z_coords(target_grid)
+    
+    # Fallback se dimensão não bater (segurança)
+    if volumes.size != total_cells:
+        volumes = np.ones(total_cells)
+        z_vals = np.zeros(total_cells)
+        
+    unique_f = np.unique(arr)
+    data_list = []
+    
+    # Tenta criar estrutura para label 3D
+    try:
+        struct = generate_binary_structure(3, 1)
+    except: 
+        struct = None
+    
+    for f in unique_f:
+        mask = (arr == f)
+        count = int(mask.sum())
+        if count == 0: continue
+        
+        frac = count / total_cells
+        vol_tot = float(volumes[mask].sum())
+        
+        # Clusters e Conectividade
+        n_clus = 0; largest_size = 0; vol_largest = 0.0; thick = 0.0
+        conn = 0.0
+        perc_x = False; perc_y = False; perc_z = False
+        
+        if struct is not None:
+            try:
+                # Reshape para 3D (F-order = I, J, K do Eclipse)
+                mask_3d = mask.reshape((nx, ny, nz), order="F")
+                
+                # Labeling (scipy usa C-order, então transpomos)
+                lbl_3d, n_clus = nd_label(mask_3d.transpose(2,1,0), structure=struct)
+                
+                if n_clus > 0:
+                    lbl_flat = lbl_3d.transpose(2,1,0).reshape(-1, order="F")
+                    counts = np.bincount(lbl_flat)
+                    counts[0] = 0 # ignora background 0
+                    
+                    largest_idx = counts.argmax()
+                    largest_size = counts[largest_idx]
+                    
+                    mask_largest = (lbl_flat == largest_idx)
+                    vol_largest = float(volumes[mask_largest].sum())
+                    
+                    zs = z_vals[mask_largest]
+                    if zs.size > 0:
+                        thick = float(zs.max() - zs.min())
+                        
+                    # Percolação (usa o array 3D transposto lbl_3d [z,y,x])
+                    # X (última dimensão do lbl_3d)
+                    left = lbl_3d[:, :, 0]; right = lbl_3d[:, :, -1]
+                    perc_x = bool(np.intersect1d(left[left>0], right[right>0]).size > 0)
+                    
+                    # Y (dimensão do meio)
+                    front = lbl_3d[:, 0, :]; back = lbl_3d[:, -1, :]
+                    perc_y = bool(np.intersect1d(front[front>0], back[back>0]).size > 0)
+                    
+                    # Z (primeira dimensão)
+                    top = lbl_3d[0, :, :]; bottom = lbl_3d[-1, :, :]
+                    perc_z = bool(np.intersect1d(top[top>0], bottom[bottom>0]).size > 0)
+                
+                conn = largest_size / count
+            except Exception: 
+                pass
+            
+        data_list.append({
+            "facies": int(f),
+            "cells": count,
+            "fraction": frac,
+            "n_clusters": n_clus,
+            "largest_size": largest_size,
+            "connected_fraction": conn,
+            "volume_total": vol_tot,
+            "volume_largest_cluster": vol_largest,
+            "thickness_largest_cluster": thick,
+            "Perc_X": perc_x,
+            "Perc_Y": perc_y,
+            "Perc_Z": perc_z
+        })
+            
+    return pd.DataFrame(data_list)
