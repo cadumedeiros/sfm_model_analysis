@@ -1076,3 +1076,52 @@ def generate_detailed_metrics_df(facies_array, target_grid=None):
         })
             
     return pd.DataFrame(data_list)
+
+def compute_facies_entropy_map(list_of_facies_arrays, target_grid=None):
+    """
+    Calcula a entropia de Shannon célula a célula para uma lista de arrays de fácies.
+    H(x) = - sum(p * log(p))
+    Retorna array 1D com valores de entropia.
+    """
+    import numpy as np
+    
+    if not list_of_facies_arrays:
+        if target_grid: return np.zeros(target_grid.n_cells)
+        return np.array([])
+
+    # Empilha arrays: (N_modelos, N_celulas)
+    # Cuidado: Todos devem ter o mesmo tamanho. Filtre antes se necessário.
+    try:
+        stack = np.vstack(list_of_facies_arrays)
+    except ValueError:
+        # Se tamanhos forem diferentes, falha graciosamente
+        if target_grid: return np.zeros(target_grid.n_cells)
+        return np.array([])
+
+    n_models, n_cells = stack.shape
+    
+    if n_models < 1:
+        return np.zeros(n_cells)
+
+    # Identifica todas as fácies únicas presentes no conjunto
+    unique_facies = np.unique(stack)
+    
+    entropy_map = np.zeros(n_cells, dtype=float)
+    
+    # Cálculo Vetorizado
+    for f in unique_facies:
+        # Conta quantas vezes a fácies 'f' aparece em cada célula (ao longo dos modelos)
+        counts = (stack == f).sum(axis=0)
+        
+        # Probabilidade p(x)
+        probs = counts / n_models
+        
+        # Entropia: -p * log(p)
+        # Usamos máscara para evitar log(0)
+        mask = probs > 0
+        p_valid = probs[mask]
+        
+        term = -p_valid * np.log(p_valid)
+        entropy_map[mask] += term
+        
+    return entropy_map

@@ -1311,7 +1311,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mode.setAutoRaise(True)
         
         menu_mode = QtWidgets.QMenu(self.btn_mode)
-        modes = [("Fácies", "facies"), ("Reservatório", "reservoir"), ("Clusters", "clusters"), ("Maior Cluster", "largest"), ("Espessura Local", "thickness_local")]
+        
+        # --- ADICIONADO "Entropia" NA LISTA ---
+        modes = [
+            ("Fácies", "facies"), 
+            ("Reservatório", "reservoir"), 
+            ("Clusters", "clusters"), 
+            ("Maior Cluster", "largest"), 
+            ("Espessura Local", "thickness_local"),
+            ("Entropia (Incerteza)", "entropy") # <--- NOVO
+        ]
+        
         for text, data in modes:
             action = menu_mode.addAction(text)
             action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
@@ -3293,13 +3303,24 @@ class MainWindow(QtWidgets.QMainWindow):
         import numpy as np
         from load_data import facies as base_facies
 
-        # --- A. Atualiza Estado Global ---
+        # --- Tratamento Especial: Entropia ---
+        if new_mode == "entropy":
+            # Calcula e configura o visualizador para modo escalar
+            self.recalc_entropy_view()
+            # Atualiza botão do ribbon para refletir
+            if hasattr(self, "btn_mode") and self.btn_mode is not None:
+                self.btn_mode.setText("Modo\nEntropia")
+            # Não continuamos para a lógica padrão de Fácies/Reservatório
+            return
+
+        # --- Lógica Padrão (Fácies, Reservatório, Clusters...) ---
+        
+        # A. Atualiza Estado Global
         self.state["mode"] = new_mode
         for k in self.models.keys():
             self.models[k]["view_mode"] = new_mode
 
-        # --- B. Atualiza Visualização PRINCIPAL (Aba 0) ---
-        # Lógica padrão da aba de visualização única
+        # B. Atualiza Visualização PRINCIPAL (Aba 0)
         current_f = self.state.get("current_facies")
         if current_f is None: current_f = base_facies
         
@@ -3316,7 +3337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         refresh = self.state.get("refresh")
         if callable(refresh): refresh()
 
-        # Legendas da aba principal
+        # Legendas
         try:
             if new_mode in ("clusters", "largest"):
                 if hasattr(self, "facies_legend_table"): self.facies_legend_table.setVisible(False)
@@ -3334,33 +3355,30 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.viz_container.currentIndex()
             if idx == 1 and hasattr(self, "update_2d_map"): self.update_2d_map()
 
-        # --- C. ATUALIZAÇÃO DA COMPARAÇÃO (Aba 1) ---
-        # Atualiza todos os grids de comparação sem recriar janelas
+        # C. ATUALIZAÇÃO DA COMPARAÇÃO (Aba 1)
         if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
             if hasattr(self, "active_comp_states"):
                 for st in self.active_comp_states:
                     st["mode"] = new_mode
-                    
-                    # Pega filtro específico do modelo
                     m_key = st.get("model_key")
                     rf_local = set()
                     if m_key and m_key in self.models:
                         rf_local = self.models[m_key].get("reservoir_facies", set())
                     
-                    # Recalcula grids derivados se o modo exigir
                     if new_mode in ("reservoir", "clusters", "largest"):
                         if "update_reservoir_fields" in st:
                             st["update_reservoir_fields"](rf_local)
                     
-                    # Redesenha
-                    if "refresh" in st:
-                        st["refresh"]()
+                    if "refresh" in st: st["refresh"]()
 
-        # Poços (sempre agendados)
         self._schedule_wells_update()
 
     def change_thickness_mode(self, label):
         self.state["thickness_mode"] = label
+        
+        # Se saiu do modo Entropia, restaura o colormap padrão (plasma)
+        if label != "Entropy":
+            self.state["thickness_cmap"] = "plasma"
 
         # 1. Atualiza Visualização PRINCIPAL
         if "update_thickness" in self.state and callable(self.state["update_thickness"]):
@@ -3373,26 +3391,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "update_2d_map") and callable(self.update_2d_map):
             self.update_2d_map()
 
-        # 2. ATUALIZA COMPARAÇÃO (Modo Otimizado - Sem Rebuild)
+        # 2. ATUALIZA COMPARAÇÃO
         if hasattr(self, "active_comp_states"):
             for st in self.active_comp_states:
                 st["thickness_mode"] = label
+                if label != "Entropy": st["thickness_cmap"] = "plasma"
                 
-                # Atualiza a variável scalar no state local
-                if "update_thickness" in st: 
-                    st["update_thickness"]()
-                
-                # Redesenha o grid com o novo scalar
-                if "refresh" in st: 
-                    st["refresh"]()
-                
-                # Renderiza a tela
-                if "plotter_ref" in st:
-                    st["plotter_ref"].render()
+                if "update_thickness" in st: st["update_thickness"]()
+                if "refresh" in st: st["refresh"]()
+                if "plotter_ref" in st: st["plotter_ref"].render()
         
-        # Atualiza Mapas 2D da Comparação (se visível)
         self.update_compare_2d_maps()
-
 
 
     def toggle_tree_checkboxes(self, show):
@@ -4395,13 +4404,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_timer.start(200)
 
     def _perform_heavy_update(self):
-        """Executa a atualização pesada (Ranking e 3D) uma única vez."""
-        # Atualiza Comparação 3D se estiver visível
+        """Executa a atualização pesada (Ranking, 3D Entropia, Comparação) uma única vez."""
+        
+        # 1. Se estiver no modo Entropia, recalcula o mapa (pois a seleção de modelos mudou)
+        # Verificamos o texto do botão ou uma flag interna
+        is_entropy = False
+        if hasattr(self, "btn_mode") and "Entropia" in self.btn_mode.text():
+            is_entropy = True
+        
+        if is_entropy:
+            self.recalc_entropy_view()
+
+        # 2. Atualiza Comparação 3D se estiver visível (Aba Comparação)
         if hasattr(self, "refresh_comparison_active_view"):
             try: self.refresh_comparison_active_view()
             except: pass
             
-        # Atualiza Ranking se estiver visível
+        # 3. Atualiza Ranking se estiver visível (Aba Ranking)
         if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 3:
             if hasattr(self, "update_ranking_view_content"): 
                 self.update_ranking_view_content()
@@ -6360,3 +6379,64 @@ class MainWindow(QtWidgets.QMainWindow):
             
         study_item.setExpanded(True)
         return study_item
+    
+    def recalc_entropy_view(self):
+        """Coleta modelos marcados, calcula entropia e configura o visualizador."""
+        from analysis import compute_facies_entropy_map
+        import numpy as np
+
+        # 1. Identifica modelos marcados
+        checked_data = self.get_checked_models()
+        
+        arrays = []
+        for m_key, _ in checked_data:
+            if m_key in self.models:
+                arr = self.models[m_key].get("facies")
+                if arr is not None:
+                    arrays.append(arr)
+        
+        # 2. Define Grid Alvo (Base)
+        grid_target = self.models["base"].get("grid")
+        if grid_target is None:
+            grid_target = self.state.get("current_grid_source")
+        
+        if grid_target is None: return
+
+        # 3. Calcula Entropia
+        if not arrays:
+            ent_map = np.zeros(grid_target.n_cells)
+        else:
+            ent_map = compute_facies_entropy_map(arrays, target_grid=grid_target)
+
+        # 4. Injeta no Grid
+        scalar_name = "Entropy"
+        grid_target.cell_data[scalar_name] = ent_map
+        
+        # 5. --- CORREÇÃO: Registra Entropia como um Preset Válido ---
+        # Recupera os presets existentes (Espessura, NTG, etc)
+        presets = self.state.get("thickness_presets", {})
+        
+        # Adiciona/Atualiza o preset 'Entropy'
+        # Formato: "NomeModo": ("NomeArrayNoGrid", "Título do Gráfico")
+        presets["Entropy"] = (scalar_name, f"Entropia (Incerteza) - N={len(arrays)}")
+        self.state["thickness_presets"] = presets
+
+        # 6. Configura o Estado para usar esse Preset
+        self.state["current_grid_source"] = grid_target
+        self.state["thickness_mode"] = "Entropy"  # <--- Isso corrige o título e o array
+        
+        # Configurações visuais específicas para Entropia
+        vmax = np.max(ent_map) if len(ent_map) > 0 else 1.0
+        if vmax == 0: vmax = 0.1
+        
+        self.state["thickness_clim"] = (0.0, vmax)
+        self.state["thickness_cmap"] = "jet" # Mapa de cores mais intuitivo para calor/incerteza
+        
+        # 7. Força o modo de visualização escalar
+        self.state["mode"] = "thickness_local" 
+        
+        # 8. Atualiza UI
+        refresh = self.state.get("refresh")
+        if callable(refresh): refresh()
+        
+        if hasattr(self, "update_2d_map"): self.update_2d_map()
