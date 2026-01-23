@@ -338,7 +338,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.viz_container.addWidget(self.details_tab)
         
-        # Pag 3: Ranking (ATUALIZADO COM BOTÕES DE COPIAR)
+        # Pag 3: Ranking (ATUALIZADO COM BOTÕES DE COPIAR e COLUNA STUDY)
         self.ranking_tab = QtWidgets.QWidget()
         l_rank = QtWidgets.QVBoxLayout(self.ranking_tab)
         l_rank.setContentsMargins(8, 8, 8, 8)
@@ -360,8 +360,9 @@ class MainWindow(QtWidgets.QMainWindow):
         l_top.addLayout(h_top_bar)
 
         self.tbl_models = QtWidgets.QTableWidget()
-        self.tbl_models.setColumnCount(6)
-        self.tbl_models.setHorizontalHeaderLabels(["Rank", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"])
+        # Colunas: Rank, Study, Modelo, Score, Fácies(acc), Fácies(kappa), Poços
+        self.tbl_models.setColumnCount(7)
+        self.tbl_models.setHorizontalHeaderLabels(["Rank", "Study", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"])
         self.tbl_models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tbl_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -1417,19 +1418,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_ranking_view_content(self):
         """
-        Calcula o ranking baseado na janela global e preenche as tabelas na aba Ranking.
+        Calcula o ranking considerando MODELOS e POÇOS selecionados.
+        Preenche a tabela incluindo a coluna 'Study'.
         """
-        # Pega o tamanho da janela do Ribbon
+        # 1. Pega tamanho da janela
         try:
             txt = self.cmb_debug_win.currentText()
             ws = int(txt.split("x")[0])
         except: ws = 1
-        
-        # Guarda no self para reuso
         self.well_rank_window_size = ws
         
-        # Calcula Ranking
+        # 2. Pega MODELOS selecionados
+        checked_data = self.get_checked_models()
+        selected_keys = [k for k, name in checked_data]
+
+        # 3. Pega POÇOS selecionados
+        selected_wells = self.get_checked_wells()
+
+        # Se faltar modelo ou poço, limpa a tabela e sai
+        if not selected_keys or not selected_wells:
+            self.tbl_models.setRowCount(0)
+            self.tbl_wells.setRowCount(0)
+            return
+
+        # 4. Calcula Ranking com os filtros aplicados
         ranking = self.evaluate_models_against_wells(
+            model_keys=selected_keys,
+            well_names=selected_wells,
             window_size=ws,
             n_bins=200,
             w_strat=0.7,
@@ -1438,35 +1453,46 @@ class MainWindow(QtWidgets.QMainWindow):
             use_kappa=True,
         )
 
-        if not ranking:
-            self.tbl_models.setRowCount(0)
-            self.tbl_wells.setRowCount(0)
-            return
-
-        # Armazena o ranking atual
+        # 5. Atualiza Tabela
         self._current_ranking_data = ranking
-
-        # Popula Tabela de Modelos
         self.tbl_models.setRowCount(0)
+        
+        if not ranking: return
+
         for i, r in enumerate(ranking, start=1):
             row = self.tbl_models.rowCount()
             self.tbl_models.insertRow(row)
+            
+            # Chave do modelo
+            m_key = r.get("model_key")
 
-            # Rank
+            # --- Col 0: Rank ---
             it_rank = QtWidgets.QTableWidgetItem(f"{i:02d}")
             it_rank.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            it_rank.setData(QtCore.Qt.UserRole, r.get("model_key"))
+            it_rank.setData(QtCore.Qt.UserRole, m_key)
             self.tbl_models.setItem(row, 0, it_rank)
 
-            # Modelo
-            self.tbl_models.setItem(row, 1, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+            # --- Col 1: Study (NOVO) ---
+            study_name = "Geral"
+            if m_key in self.models:
+                study_name = self.models[m_key].get("study", "Geral")
+            
+            it_study = QtWidgets.QTableWidgetItem(str(study_name))
+            if m_key == "base": 
+                it_study.setBackground(QtGui.QBrush(QtGui.QColor(230, 240, 255)))
+            self.tbl_models.setItem(row, 1, it_study)
 
-            # Score
+            # --- Col 2: Modelo ---
+            self.tbl_models.setItem(row, 2, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+
+            # --- Col 3: Score ---
             it_score = QtWidgets.QTableWidgetItem(f"{r.get('score', 0.0):.3f}")
             it_score.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            self.tbl_models.setItem(row, 2, it_score)
+            if r.get("score", 0.0) > 0.5:
+                it_score.setFont(QtGui.QFont("Arial", weight=QtGui.QFont.Bold))
+            self.tbl_models.setItem(row, 3, it_score)
 
-            # Médias
+            # Detalhes médios
             details = r.get("details", {}) or {}
             accs = [float(s.get("strat_acc", 0.0)) for s in details.values()]
             kappas = [float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0))) for s in details.values()]
@@ -1476,17 +1502,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
             it_acc = QtWidgets.QTableWidgetItem(f"{mean_acc:.3f}")
             it_acc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            self.tbl_models.setItem(row, 3, it_acc)
+            self.tbl_models.setItem(row, 4, it_acc)
 
             it_kap = QtWidgets.QTableWidgetItem(f"{mean_kap:.3f}")
             it_kap.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            self.tbl_models.setItem(row, 4, it_kap)
+            self.tbl_models.setItem(row, 5, it_kap)
 
-            self.tbl_models.setItem(row, 5, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
+            self.tbl_models.setItem(row, 6, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
         
         self.tbl_models.resizeColumnsToContents()
         
-        # Seleciona o primeiro automaticamente se houver linhas
         if self.tbl_models.rowCount() > 0:
             self.tbl_models.selectRow(0)
 
@@ -1814,6 +1839,21 @@ class MainWindow(QtWidgets.QMainWindow):
         lgl = QtWidgets.QVBoxLayout(self.legend_group)
         lgl.setContentsMargins(2, 6, 2, 2)
 
+        # --- NOVO: Botões de Seleção ---
+        h_btn_leg = QtWidgets.QHBoxLayout()
+        btn_sel_all = QtWidgets.QPushButton("Todos")
+        btn_sel_all.setToolTip("Selecionar todas as fácies")
+        btn_sel_all.clicked.connect(lambda: self.toggle_all_facies_legend(True))
+        
+        btn_sel_none = QtWidgets.QPushButton("Nenhum")
+        btn_sel_none.setToolTip("Desmarcar todas as fácies")
+        btn_sel_none.clicked.connect(lambda: self.toggle_all_facies_legend(False))
+        
+        h_btn_leg.addWidget(btn_sel_all)
+        h_btn_leg.addWidget(btn_sel_none)
+        lgl.addLayout(h_btn_leg)
+        # -------------------------------
+
         self.facies_legend_table = QtWidgets.QTableWidget()
         self.facies_legend_table.setColumnCount(4)
         self.facies_legend_table.setHorizontalHeaderLabels(["Cor", "ID", "N", "Res"])
@@ -1848,7 +1888,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.dock_props.setWidget(self._wrap_expanding(self.inspector_tabs))
         self.dock_props.setMinimumWidth(420)
-
 
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
 
@@ -1922,29 +1961,35 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
 
-    def add_model_to_tree(self, model_key, model_name):
-        """Adiciona apenas o item do modelo (sem sub-itens) no Project Explorer."""
+    def add_model_to_tree(self, model_key, model_name, study_name=None):
+        """Adiciona o item do modelo na árvore, dentro de um Study se especificado."""
+        
+        # Cria o item do modelo
         item = QtWidgets.QTreeWidgetItem([model_name])
         item.setData(0, QtCore.Qt.UserRole, "model_root")
         item.setData(0, QtCore.Qt.UserRole + 1, model_key)
-        item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
+        item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
 
+        # Checkbox logic
         is_comparison = hasattr(self, "central_stack") and (self.central_stack.currentIndex() == 1)
+        initial_check = QtCore.Qt.Checked if is_comparison else QtCore.Qt.Unchecked
+        
+        # Habilita o checkbox
         item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-        item.setCheckState(0, QtCore.Qt.Checked if is_comparison else QtCore.Qt.Unchecked)
-        self._set_item_checkbox_visible(item, is_comparison)
+        item.setCheckState(0, initial_check)
+        self._set_item_checkbox_visible(item, True)
 
-        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
-            idx = self.project_tree.indexOfTopLevelItem(self.wells_root_item)
-            if idx < 0:
-                self.project_tree.addTopLevelItem(item)
-            else:
-                self.project_tree.insertTopLevelItem(idx, item)
+        if model_key == "base":
+            self.project_tree.insertTopLevelItem(0, item)
+            item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DriveHDIcon))
         else:
-            self.project_tree.addTopLevelItem(item)
+            target_study = study_name if study_name else "Geral"
+            parent = self._get_or_create_study_item(target_study)
+            parent.addChild(item)
+            # Expande a pasta ao adicionar
+            parent.setExpanded(True)
 
         return item
-
 
     # --- LÓGICA DE INTERAÇÃO TREE ---
 
@@ -2389,7 +2434,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 
-    def load_compare_model(self, grdecl_path):
+    def load_compare_model(self, grdecl_path, study_name="Geral"):
         import os, time
         import numpy as np
         from PyQt5 import QtWidgets
@@ -2399,34 +2444,24 @@ class MainWindow(QtWidgets.QMainWindow):
             from load_data import load_grid_from_grdecl, nx, ny, nz
             grid_compare, fac_compare = load_grid_from_grdecl(grdecl_path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erro ao carregar modelo", str(e))
+            print(f"Erro ao carregar {grdecl_path}: {e}")
             return
 
         # Compatibilidade
         if fac_compare.size != nx * ny * nz:
-            QtWidgets.QMessageBox.warning(self, "Grid incompatível", "O grid carregado não bate com nx,ny,nz do projeto.")
+            print(f"Grid incompatível: {grdecl_path}")
             return
 
-        model_id = f"compare_{int(time.time() * 1000)}"
+        model_id = f"compare_{int(time.time() * 1000)}_{os.path.basename(grdecl_path)}"
         model_name = os.path.basename(grdecl_path)
 
         # ---------- Reservoir GLOBAL (flatten + interseção) ----------
         rf_raw = self.state.get("reservoir_facies", set()) or set()
         rf_global = set()
-
-        # flatten defensivo (se vier set dentro de set)
         for x in rf_raw:
             if isinstance(x, (set, list, tuple, np.ndarray)):
-                for y in x:
-                    try:
-                        rf_global.add(int(y))
-                    except Exception:
-                        pass
-            else:
-                try:
-                    rf_global.add(int(x))
-                except Exception:
-                    pass
+                for y in x: rf_global.add(int(y))
+            else: rf_global.add(int(x))
 
         present = set(int(v) for v in np.unique(np.asarray(fac_compare).astype(int)))
         rf = rf_global & present
@@ -2438,34 +2473,30 @@ class MainWindow(QtWidgets.QMainWindow):
             "grid": grid_compare,
             "reservoir_facies": set(rf),
             "view_mode": self.state.get("mode", "facies"),
+            "study": study_name # Guarda metadado do study
         }
 
         # Estatísticas e métricas
         try:
             from analysis import facies_distribution_array, compute_global_metrics_for_array, reservoir_facies_distribution_array
-            stats, _ = facies_distribution_array(fac_compare)
-            cm, cp = compute_global_metrics_for_array(fac_compare, rf)
-            df_detail = self.generate_detailed_metrics_df(fac_compare)
+            stats, _ = facies_distribution_array(fac_compare, target_grid=grid_compare)
+            cm, cp = compute_global_metrics_for_array(fac_compare, rf, target_grid=grid_compare)
+            df_detail = self.generate_detailed_metrics_df(fac_compare, target_grid=grid_compare)
 
             self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
 
             self.compare_facies = fac_compare
             self.compare_facies_stats = stats
-            self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf)
+            self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf, target_grid=grid_compare)
         except Exception as e:
-            # Não derruba o app — mostra erro e segue (modelo ainda carrega)
-            QtWidgets.QMessageBox.warning(self, "Aviso", f"Modelo carregado, mas falhou ao calcular métricas:\n\n{e}")
+            print(f"Erro métricas {model_name}: {e}")
 
-        self.active_compare_id = model_id
-        self.add_model_to_tree(model_id, f"Comparado: {model_name}")
+        # Adiciona na árvore dentro do Study
+        self.add_model_to_tree(model_id, model_name, study_name=study_name)
 
-        # Atualiza UI de comparação
-        self.update_comparison_tables()
-        if self.central_stack.currentIndex() == 1:
-            self.refresh_comparison_active_view()
-
-
-        
+        # Atualiza UI
+        if hasattr(self, "update_comparison_tables"): self.update_comparison_tables()
+        if hasattr(self, "refresh_comparison_active_view"): self.refresh_comparison_active_view()
 
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
 
@@ -2925,8 +2956,28 @@ class MainWindow(QtWidgets.QMainWindow):
          self.update_compare_2d_maps()
 
     def open_compare_dialog(self):
+        """Carrega múltiplos modelos e os agrupa em um Study."""
+        # 1. Seleciona arquivos
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)")
-        for path in paths: self.load_compare_model(path)
+        if not paths: return
+
+        # 2. Pergunta o nome do Estudo (Grupo)
+        study_name, ok = QtWidgets.QInputDialog.getText(
+            self, "Novo Estudo", "Nome do Estudo / Grupo de Calibração:", 
+            text=f"Calibração {len(self.models)}"
+        )
+        
+        if not ok or not study_name.strip():
+            study_name = "Importação Recente"
+
+        # 3. Carrega
+        # Mostra um cursor de espera ou barra de progresso simples seria ideal, mas vamos direto
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for path in paths: 
+                self.load_compare_model(path, study_name=study_name)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
 
     def _create_legend_table(self, h):
         t = QtWidgets.QTableWidget(); t.setColumnCount(len(h)); t.setHorizontalHeaderLabels(h)
@@ -3345,13 +3396,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def toggle_tree_checkboxes(self, show):
-        """Habilita ou desabilita checkboxes em todos os modelos raiz."""
+        """Habilita ou desabilita checkboxes em todos os itens (Recursivo)."""
         root = self.project_tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            item = root.child(i)
-            # Verifica se é um item de modelo (segurança extra)
-            if item.data(0, QtCore.Qt.UserRole) == "model_root":
-                self._set_item_checkbox_visible(item, show)
+        
+        def set_visible_recursive(parent):
+            for i in range(parent.childCount()):
+                item = parent.child(i)
+                role = item.data(0, QtCore.Qt.UserRole)
+                
+                # Aplica para Modelos (Base/Filhos) E Pastas (Studies)
+                if role in ("model_root", "study_folder"):
+                    self._set_item_checkbox_visible(item, show)
+                
+                # Continua descendo na hierarquia (para pegar modelos dentro de pastas)
+                set_visible_recursive(item)
+
+        set_visible_recursive(root)
     
     def on_comp_slice_changed(self, axis, mode, value):
         """Recebe evento do Slicer da Comparação e aplica em TODOS os grids ativos."""
@@ -3387,9 +3447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(2, 2, 2, 2)
         
-        # 1. SLICER (Reutiliza a lógica, mas precisa comunicar com todos os modelos)
-        # Criamos um novo SlicerWidget específico para comparação ou reutilizamos
-        # Para simplificar, vamos criar um novo que aponta para o callback de sync
+        # 1. SLICER
         from load_data import nx, ny, nz
         self.comp_slicer = GridSlicerWidget(nx, ny, nz, self.on_comp_slice_changed)
         gb_slice = QtWidgets.QGroupBox("Cortes & Escala (Sincronizado)")
@@ -3401,6 +3459,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_filter_group = QtWidgets.QGroupBox("Filtro de Reservatório por Modelo")
         l_filt = QtWidgets.QVBoxLayout(self.comp_filter_group)
         
+        # --- NOVO: Botões de Seleção ---
+        h_btn_multi = QtWidgets.QHBoxLayout()
+        btn_all = QtWidgets.QPushButton("Todos")
+        btn_all.clicked.connect(lambda: self.toggle_all_multi_model(True))
+        
+        btn_none = QtWidgets.QPushButton("Nenhum")
+        btn_none.clicked.connect(lambda: self.toggle_all_multi_model(False))
+        
+        h_btn_multi.addWidget(btn_all)
+        h_btn_multi.addWidget(btn_none)
+        l_filt.addLayout(h_btn_multi)
+        # -------------------------------
+        
         self.multi_model_table = QtWidgets.QTableWidget()
         self.multi_model_table.verticalHeader().setVisible(False)
         self.multi_model_table.itemChanged.connect(self.on_multi_model_filter_changed)
@@ -3409,6 +3480,75 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.comp_filter_group)
         
         return container
+    
+    def toggle_all_facies_legend(self, check):
+        """Marca ou desmarca todas as fácies na legenda de Propriedades."""
+        self._block_facies_legend_signal = True
+        try:
+            state = QtCore.Qt.Checked if check else QtCore.Qt.Unchecked
+            rows = self.facies_legend_table.rowCount()
+            for r in range(rows):
+                item = self.facies_legend_table.item(r, 3) # Coluna do Checkbox
+                if item:
+                    item.setCheckState(state)
+        finally:
+            self._block_facies_legend_signal = False
+        
+        # Dispara atualização final (simula um clique na primeira linha válida)
+        if self.facies_legend_table.rowCount() > 0:
+            self.on_legend_item_changed(self.facies_legend_table.item(0, 3))
+
+    def toggle_all_multi_model(self, check):
+        """Marca ou desmarca tudo na tabela de filtro por modelo."""
+        self._block_multi_model_filter = True
+        try:
+            state = QtCore.Qt.Checked if check else QtCore.Qt.Unchecked
+            rows = self.multi_model_table.rowCount()
+            cols = self.multi_model_table.columnCount()
+            
+            # Atualiza visual da tabela e o set de dados interno
+            for c in range(2, cols): # Colunas de modelos começam no índice 2
+                # Tenta descobrir o model_key olhando para o UserRole da primeira célula válida da coluna
+                model_key = None
+                for r_chk in range(rows):
+                    it_chk = self.multi_model_table.item(r_chk, c)
+                    if it_chk and it_chk.data(QtCore.Qt.UserRole):
+                        # UserRole guarda (model_key, fac_id)
+                        model_key = it_chk.data(QtCore.Qt.UserRole)[0]
+                        break
+                
+                if not model_key or model_key not in self.models: continue
+                
+                target_set = self.models[model_key]["reservoir_facies"]
+                
+                for r in range(rows):
+                    it = self.multi_model_table.item(r, c)
+                    if it and (it.flags() & QtCore.Qt.ItemIsUserCheckable):
+                        it.setCheckState(state)
+                        # Atualiza o set de dados manualmente pois bloqueamos o sinal
+                        data_tuple = it.data(QtCore.Qt.UserRole)
+                        if data_tuple:
+                            fac_id = data_tuple[1]
+                            if check: target_set.add(fac_id)
+                            else: target_set.discard(fac_id)
+                        
+        finally:
+            self._block_multi_model_filter = False
+            
+        # Força refresh visual de comparação
+        if hasattr(self, "active_comp_states"):
+            for st in self.active_comp_states:
+                # Atualiza campo no state visual
+                mk = st.get("model_key")
+                if mk and mk in self.models:
+                    rf = self.models[mk]["reservoir_facies"]
+                    st["reservoir_facies"] = rf
+                    if "update_reservoir_fields" in st:
+                        st["update_reservoir_fields"](rf)
+                    if "refresh" in st: st["refresh"]()
+            
+            # Atualiza 2D maps
+            self.update_compare_2d_maps()
     
     def fill_unified_facies_table(self):
         """Preenche a tabela unificada com a união das fácies dos dois modelos."""
@@ -3536,8 +3676,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "inspector_tabs"):
                 self.inspector_tabs.setCurrentWidget(self.page_props)
 
-            self.toggle_tree_checkboxes(False)
-            self.project_tree.expandAll()
+            # --- CORREÇÃO: Checkboxes sempre VISÍVEIS (necessário para o Ranking) ---
+            self.toggle_tree_checkboxes(True)
+            
+            # Opcional: Expandir tudo para facilitar visualização
+            # self.project_tree.expandAll()
 
             if hasattr(self, "act_view_3d"):
                 self.act_view_3d.setChecked(True)
@@ -3551,14 +3694,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "inspector_tabs"):
                 self.inspector_tabs.setCurrentWidget(self.page_compare)
 
+            # Garante checkboxes visíveis
             self.toggle_tree_checkboxes(True)
-            self.project_tree.collapseAll()
-
+            
+            # Atualiza a vista de comparação
             checked_models = self.get_checked_models()
             self.update_dynamic_comparison_view(checked_models)
 
         self.current_perspective = mode
-
 
     
     def update_comparison_tables_multi(self, checked_models):
@@ -3950,25 +4093,47 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.compare_stack.setCurrentIndex(index)
         self.refresh_comparison_active_view()
+    
+    def get_checked_wells(self):
+        """Retorna a lista de nomes dos poços marcados (Checked) na árvore."""
+        checked = []
+        
+        # Se a pasta de poços não existir, retorna a lista completa (segurança)
+        if not hasattr(self, "wells_root_item") or self.wells_root_item is None:
+            return list(self.wells.keys())
 
+        # Varre os filhos da pasta Poços
+        for i in range(self.wells_root_item.childCount()):
+            item = self.wells_root_item.child(i)
+            if item.checkState(0) == QtCore.Qt.Checked:
+                # O nome do poço está salvo no UserRole+1 (conforme load_well_dialog)
+                well_name = item.data(0, QtCore.Qt.UserRole + 1)
+                if well_name:
+                    checked.append(well_name)
+        
+        return checked
     
     def get_checked_models(self):
-        """Retorna a lista de model_keys marcados (checkbox) na árvore."""
+        """Retorna EXATAMENTE o que está marcado com checkbox na árvore (Base + Filhos de Pastas)."""
         checked = []
         root = self.project_tree.invisibleRootItem()
 
-        for i in range(root.childCount()):
-            item = root.child(i)
-            if item.data(0, QtCore.Qt.UserRole) != "model_root":
-                continue
+        def traverse(parent_item):
+            for i in range(parent_item.childCount()):
+                item = parent_item.child(i)
+                role = item.data(0, QtCore.Qt.UserRole)
+                
+                # Se for modelo (pode ser o Base no topo ou filho de pasta)
+                if role == "model_root":
+                    if item.checkState(0) == QtCore.Qt.Checked:
+                        mk = item.data(0, QtCore.Qt.UserRole + 1)
+                        if mk: checked.append((mk, item.text(0)))
+                
+                # Se for pasta, entra nela
+                elif role == "study_folder":
+                    traverse(item)
 
-            # Só considera se o item é checkable e está marcado
-            if (item.flags() & QtCore.Qt.ItemIsUserCheckable) and item.checkState(0) == QtCore.Qt.Checked:
-                model_key = item.data(0, QtCore.Qt.UserRole + 1)
-                if model_key is None:
-                    model_key = item.text(0)
-                checked.append(model_key)
-
+        traverse(root)
         return checked
 
     def refresh_comparison_active_view(self):
@@ -4151,25 +4316,95 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def on_tree_item_changed(self, item, column):
-        if not item:
-            return
+        """Lida com alterações na árvore (Modelos, Studies e Poços) com lógica Pai/Filho manual."""
+        if not item: return
+        if getattr(self, "_block_tree_signals", False): return
 
         role = item.data(0, QtCore.Qt.UserRole)
 
-        # poços
-        if role in ("well_item", "wells_root"):
-            self._schedule_wells_update()
+        # ---------------------------------------------------------
+        # LÓGICA DE PASTAS (Studies ou Raiz de Poços)
+        # ---------------------------------------------------------
+        if role in ("study_folder", "wells_root"):
+            self._block_tree_signals = True
+            try:
+                new_state = item.checkState(0)
+                # Corrige estado parcial forçado pelo Qt
+                if new_state == QtCore.Qt.PartiallyChecked:
+                    new_state = QtCore.Qt.Checked
+                    item.setCheckState(0, QtCore.Qt.Checked)
+
+                # Aplica a todos os filhos
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    child.setCheckState(0, new_state)
+            finally:
+                self._block_tree_signals = False
+            
+            # Se for poço, atualiza 3D (tubos) E Ranking
+            if role == "wells_root":
+                self._schedule_wells_update()
+            
+            self._schedule_heavy_update()
             return
 
-        # modelos na comparação (mantém seu comportamento existente)
-        if role in ("compare_model", "model_root"):
-            try:
-                self.refresh_comparison_active_view()
-            except Exception:
-                pass
+        # ---------------------------------------------------------
+        # LÓGICA DE FILHOS (Modelos ou Poços Individuais)
+        # ---------------------------------------------------------
+        if role in ("model_root", "well_item"):
+            parent = item.parent()
+            
+            # Atualiza o Pai (se houver)
+            if parent:
+                parent_role = parent.data(0, QtCore.Qt.UserRole)
+                if parent_role in ("study_folder", "wells_root"):
+                    self._block_tree_signals = True
+                    try:
+                        checked_count = 0
+                        total_count = parent.childCount()
+                        for i in range(total_count):
+                            if parent.child(i).checkState(0) == QtCore.Qt.Checked:
+                                checked_count += 1
+                        
+                        if checked_count == 0:
+                            parent.setCheckState(0, QtCore.Qt.Unchecked)
+                        elif checked_count == total_count:
+                            parent.setCheckState(0, QtCore.Qt.Checked)
+                        else:
+                            parent.setCheckState(0, QtCore.Qt.PartiallyChecked)
+                    finally:
+                        self._block_tree_signals = False
 
+            # Dispara as atualizações necessárias
+            if role == "well_item":
+                self._schedule_wells_update() # Atualiza visualização 3D dos tubos
+            
+            self._schedule_heavy_update() # Atualiza Ranking e Comparação
+            return
 
+    def _schedule_heavy_update(self):
+        """Agrupa chamadas de atualização para evitar congelamento da UI."""
+        # Cancela timer anterior se existir
+        if hasattr(self, "_update_timer") and self._update_timer.isActive():
+            self._update_timer.stop()
+        
+        # Cria novo timer para rodar daqui a 200ms (tempo suficiente para clicar em vários)
+        self._update_timer = QtCore.QTimer()
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._perform_heavy_update)
+        self._update_timer.start(200)
 
+    def _perform_heavy_update(self):
+        """Executa a atualização pesada (Ranking e 3D) uma única vez."""
+        # Atualiza Comparação 3D se estiver visível
+        if hasattr(self, "refresh_comparison_active_view"):
+            try: self.refresh_comparison_active_view()
+            except: pass
+            
+        # Atualiza Ranking se estiver visível
+        if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 3:
+            if hasattr(self, "update_ranking_view_content"): 
+                self.update_ranking_view_content()
 
     def sync_multi_cameras(self, plotters):
         """Sincroniza N plotters."""
@@ -5287,6 +5522,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ):
         import numpy as np
         from analysis import compute_well_match_score
+        from load_data import grid as global_grid, facies as global_facies # Import para fallback
 
         if not self.wells: return []
 
@@ -5295,15 +5531,14 @@ class MainWindow(QtWidgets.QMainWindow):
         else: well_names = [w for w in well_names if w in self.wells]
         if not well_names: return []
 
-        # 2. Prepara Modelos (INCLUINDO BASE OBRIGATORIAMENTE)
+        # 2. Prepara Modelos
         if model_keys is None:
             model_keys = list(self.models.keys())
+            # Garante base se nenhum filtro for passado
+            if "base" in self.models and "base" not in model_keys:
+                model_keys.append("base")
         
-        # --- CORREÇÃO: Força a inclusão da string 'base' se ela existir nos modelos ---
-        if "base" in self.models and "base" not in model_keys:
-            model_keys.append("base")
-            
-        # Filtra chaves válidas
+        # Filtra apenas chaves que existem
         model_keys = [k for k in model_keys if k in self.models]
         if not model_keys: return []
 
@@ -5317,18 +5552,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for mk in model_keys:
             m = self.models.get(mk, {})
+            
+            # --- CORREÇÃO: Resolve Grid e Facies do Base ---
             g = m.get("grid", None)
+            fac = m.get("facies", None)
+
+            # Se for base e não tiver grid no dict, usa o global
+            if mk == "base":
+                if g is None: g = global_grid
+                if fac is None: fac = global_facies
+
+            # Se mesmo assim não tiver grid, pula
             if g is None:
                 continue
 
-            # garante Facies no grid, se seu modelo guarda facies fora
-            if "Facies" not in getattr(g, "cell_data", {}):
-                fac = m.get("facies", None)
-                if fac is not None:
-                    try:
+            # Injeta Facies no Grid se necessário (para garantir consistência)
+            if fac is not None:
+                try:
+                    # Verifica se precisa atualizar (evita overhead desnecessário)
+                    current_f = g.cell_data.get("Facies")
+                    if current_f is None or current_f is not fac:
                         g.cell_data["Facies"] = np.asarray(fac).astype(int)
-                    except Exception:
-                        pass
+                except Exception: pass
 
             per_well = {}
             score_list = []
@@ -5339,27 +5584,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 if well is None or well.data is None or well.data.empty:
                     continue
 
-                # REAL: igual seu relatório
-                if "DEPT" not in well.data.columns:
-                    continue
+                # REAL: Preparação
+                if "DEPT" not in well.data.columns: continue
 
-                if "fac" in well.data.columns:
-                    col_real = "fac"
-                elif "lito_upscaled" in well.data.columns:
-                    col_real = "lito_upscaled"
-                else:
-                    continue
+                col_real = None
+                if "fac" in well.data.columns: col_real = "fac"
+                elif "lito_upscaled" in well.data.columns: col_real = "lito_upscaled"
+                else: continue
 
                 full_depth = well.data["DEPT"].to_numpy(dtype=float)
                 full_real  = well.data[col_real].to_numpy(dtype=float)
 
+                # Filtro por Marcadores (Real)
                 key = str(wn).strip()
                 markers = self.markers_db.get(key, [])
-
                 real_depth = full_depth
                 real_fac   = np.where(np.isfinite(full_real), full_real, 0.0).astype(int)
 
-                # recorte por marcadores (mesmo critério do show_well_comparison_report)
                 if markers:
                     mds = sorted([mm.get("md") for mm in markers if mm.get("md") is not None])
                     if len(mds) >= 2:
@@ -5371,16 +5612,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                 real_depth = full_depth[mask]
                                 real_fac   = real_fac[mask]
 
-                # pega (X,Y) de referência exatamente como no relatório
+                # (X,Y) de referência
                 xy = self._pick_reference_xy_for_well_report(well, markers)
-                if xy is None:
-                    continue
-
+                if xy is None: continue
                 xref, yref = xy
 
-                # --------- AQUI É O ÚNICO PONTO QUE MUDA (1x1 vs NxN) ---------
+                # --------- CÁLCULO (1x1 ou NxN) ---------
                 if window_size == 1:
-                    # 1x1: coluna mais próxima (comportamento antigo)
+                    # 1x1: coluna mais próxima
                     sim_depth, sim_fac, _ = self._column_profile_from_grid(g, xref, yref)
                     if sim_depth is None or len(sim_depth) < 2:
                         continue
@@ -5394,9 +5633,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         ignore_real_zeros=ignore_real_zeros,
                         use_kappa=use_kappa,
                     )
+                    # Adiciona dados espaciais dummy para compatibilidade
+                    s["best_i"], s["best_j"] = self._get_ij_from_xy(g, xref, yref)
 
                 else:
-                    # NxN: pega o melhor match dentro da janela (3x3, 5x5, ...)
+                    # NxN: varredura
                     sim_depth, sim_fac, sim_total, i_best, j_best, s = self._best_profile_score_in_window(
                         g,
                         xref, yref,
@@ -5410,12 +5651,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                     if sim_depth is None or len(sim_depth) < 2:
                         continue
-
-                    # opcional: guardar diagnóstico do deslocamento
+                    
+                    # Salva coordenadas do melhor match
                     s = dict(s)
                     s["best_i"] = i_best
                     s["best_j"] = j_best
-                # ----------------------------------------------------------------
+                # ----------------------------------------
 
                 weight = max(int(s.get("n_valid_bins", 0)), 0)
                 per_well[str(wn)] = s
@@ -6087,3 +6328,35 @@ class MainWindow(QtWidgets.QMainWindow):
         
         layout.addWidget(FigureCanvas(fig))
         dialog.exec_()
+
+    def _get_or_create_study_item(self, study_name):
+        """Encontra ou cria o item pai (Pasta/Study) na árvore."""
+        root = self.project_tree.invisibleRootItem()
+        
+        # 1. Procura se já existe
+        for i in range(root.childCount()):
+            item = root.child(i)
+            if item.data(0, QtCore.Qt.UserRole) == "study_folder" and item.text(0) == study_name:
+                return item
+        
+        # 2. Se não existe, cria
+        study_item = QtWidgets.QTreeWidgetItem([study_name])
+        study_item.setData(0, QtCore.Qt.UserRole, "study_folder")
+        study_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        
+        # --- CORREÇÃO: Removemos ItemIsTristate para evitar comportamento automático imprevisível ---
+        # Usamos apenas ItemIsUserCheckable. Nós gerenciaremos o estado visual manualmente.
+        study_item.setFlags(study_item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+        study_item.setCheckState(0, QtCore.Qt.Checked)
+        
+        if hasattr(self, "wells_root_item") and self.wells_root_item is not None:
+            idx = self.project_tree.indexOfTopLevelItem(self.wells_root_item)
+            if idx >= 0:
+                self.project_tree.insertTopLevelItem(idx, study_item)
+            else:
+                self.project_tree.addTopLevelItem(study_item)
+        else:
+            self.project_tree.addTopLevelItem(study_item)
+            
+        study_item.setExpanded(True)
+        return study_item
