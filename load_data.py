@@ -24,7 +24,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
+DEFAULT_GRDECL_PATH = "grids/m_chaves_completo.grdecl"
 
 # Se suas fácies aparecem invertidas em Z, este é o knob principal.
 # Você relatou que: load_grid_from_grdecl(..., flip_k=True) "deu certo"
@@ -41,6 +41,7 @@ VERBOSE_DEFAULT = True
 _RE_REPEAT = re.compile(
     r"^(?P<n>\d+)\*(?P<val>[-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)$"
 )
+_RE_KEYWORD_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*/?\s*$")
 
 def _tokenize_keyword_block(lines: list[str]) -> list[str]:
     """Coleta tokens após uma keyword até o terminador '/'."""
@@ -75,6 +76,61 @@ def _expand_repeats(tokens: list[str]) -> list[str]:
             out.append(t)
     return out
 
+def list_grdecl_keywords(grdecl_path: str) -> list[str]:
+    """Lista keywords do GRDECL (apenas linhas com keyword isolada)."""
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    with open(grdecl_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("--"):
+                continue
+
+            if _RE_KEYWORD_LINE.match(s):
+                key = s.replace("/", "").strip()
+                if not key:
+                    continue
+                key_norm = key.upper()
+                if key_norm not in seen:
+                    keys.append(key)
+                    seen.add(key_norm)
+
+                # Skip block until '/' (if not on same line)
+                if "/" in line:
+                    continue
+                for line in f:
+                    if "/" in line:
+                        break
+
+    return keys
+
+def discover_numeric_keyword_arrays(
+    grdecl_path: str,
+    nx: int,
+    ny: int,
+    nz: int,
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """Descobre keywords numericas com tamanho nx*ny*nz e devolve seus arrays 1D."""
+    expected = nx * ny * nz
+    exclude_norm = {k.upper() for k in (exclude or set())}
+
+    out: dict[str, np.ndarray] = {}
+    for key in list_grdecl_keywords(grdecl_path):
+        if key.upper() in exclude_norm:
+            continue
+        try:
+            arr = read_keyword_array(grdecl_path, key, dtype=float)
+        except Exception:
+            continue
+        if arr.size != expected:
+            continue
+        out[key] = arr
+
+    return out
+
 def read_specgrid(grdecl_path: str) -> Tuple[int, int, int]:
     """Lê (nx, ny, nz) a partir de SPECGRID."""
     with open(grdecl_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -95,16 +151,39 @@ def read_specgrid(grdecl_path: str) -> Tuple[int, int, int]:
 
 def read_keyword_array(grdecl_path: str, keyword: str, dtype=float) -> np.ndarray:
     """Lê um array numérico de uma keyword (suporta 'n*valor')."""
+    target = keyword.upper()
     with open(grdecl_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("--"):
+                continue
 
-    m = re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE)
-    if not m:
-        raise KeyError(f"Keyword '{keyword}' não encontrado no GRDECL.")
+            if _RE_KEYWORD_LINE.match(s):
+                key = s.replace("/", "").strip()
+                if not key:
+                    continue
 
-    after = text[m.end():].splitlines()
-    tokens = _tokenize_keyword_block(after)
-    tokens = _expand_repeats(tokens)
+                if key.upper() == target:
+                    if "/" in line:
+                        tokens = []
+                    else:
+                        block_lines: list[str] = []
+                        for line in f:
+                            block_lines.append(line)
+                            if "/" in line:
+                                break
+                        tokens = _tokenize_keyword_block(block_lines)
+                    tokens = _expand_repeats(tokens)
+                    break
+                else:
+                    # Skip this block to avoid false keyword matches inside data
+                    if "/" in line:
+                        continue
+                    for line in f:
+                        if "/" in line:
+                            break
+        else:
+            raise KeyError(f"Keyword '{keyword}' não encontrado no GRDECL.")
 
     # Trata expoente Fortran D (1.0D+03)
     def _to_float(tok: str) -> float:
@@ -151,17 +230,15 @@ def load_grid_from_grdecl(
     verbose: bool = VERBOSE_DEFAULT,
 ):
     """
-    Carrega geometria + Facies (+ StratigraphicThickness se existir).
-
-    RETORNO (fixo, 2 valores):
-        grid, facies_1d
+    Carrega geometria + Facies + Propriedades Petrofísicas (PORO, PERM...).
     """
     if verbose:
         print(f"\nLendo Grid: {grdecl_path}...")
 
+    # 1. Leitura da Geometria via PyVista
     g = pv.read_grdecl(grdecl_path)
 
-    # Reflexão em Y (se seu projeto usa isso)
+    # Reflexão em Y (se configurado)
     if apply_reflection:
         pts = g.points.copy()
         pts[:, 1] = 2.0 * float(anchor_y) - pts[:, 1]
@@ -174,30 +251,45 @@ def load_grid_from_grdecl(
 
     nx_, ny_, nz_ = read_specgrid(grdecl_path)
 
-    # Facies
-    fac_raw = read_keyword_array(grdecl_path, facies_keyword, dtype=float)
-    fac_1d = _reshape_flat(fac_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=int)
+    # 2. Leitura de Fácies
+    try:
+        fac_raw = read_keyword_array(grdecl_path, facies_keyword, dtype=float)
+        fac_1d = _reshape_flat(fac_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=int)
+    except KeyError:
+        if verbose: print(f"[WARN] Keyword '{facies_keyword}' não encontrada. Criando array zerado.")
+        fac_1d = np.zeros(g.n_cells, dtype=int)
+        
     g.cell_data["Facies"] = fac_1d
 
-    # Thickness (opcional)
+    # 3. Leitura de Espessura
     try:
         th_raw = read_keyword_array(grdecl_path, thickness_keyword, dtype=float)
         th_1d = _reshape_flat(th_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=float)
         g.cell_data["StratigraphicThickness"] = th_1d
-        g.cell_data["cell_thickness"] = th_1d  # alias conveniente
+        g.cell_data["cell_thickness"] = th_1d
     except KeyError:
-        if verbose:
-            print(f"[INFO] Keyword '{thickness_keyword}' não existe neste GRDECL.")
+        pass
     except Exception as e:
-        if verbose:
-            print(f"[WARN] Falha ao ler '{thickness_keyword}': {e}")
+        if verbose: print(f"[WARN] Falha ao ler '{thickness_keyword}': {e}")
 
-    if verbose:
-        print("has StratigraphicThickness?", "StratigraphicThickness" in g.cell_data)
-        print("cell_data keys sample:", list(g.cell_data.keys())[:10])
-        if "StratigraphicThickness" in g.cell_data:
-            a = g.cell_data["StratigraphicThickness"]
-            print(f"StratigraphicThickness: n={a.size} min={float(np.nanmin(a))} max={float(np.nanmax(a))}")
+    # 4. --- Auto: Leitura de propriedades numéricas (qualquer keyword com nx*ny*nz) ---
+    auto_exclude = {
+        "SPECGRID", "COORD", "ZCORN", "MAPAXES", "MAPUNITS", "GRIDUNIT",
+        facies_keyword, thickness_keyword, "Facies", "StratigraphicThickness", "cell_thickness",
+    }
+
+    auto_arrays = discover_numeric_keyword_arrays(
+        grdecl_path, nx_, ny_, nz_, exclude=auto_exclude
+    )
+
+    for key, arr_raw in auto_arrays.items():
+        try:
+            # Reshape e Flip K (importante para alinhar com a geometria)
+            arr_1d = _reshape_flat(arr_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=float)
+            g.cell_data[key] = arr_1d
+            if verbose: print(f"[INFO] Propriedade carregada: {key}")
+        except Exception as e:
+            if verbose: print(f"[WARN] Erro ao ler propriedade '{key}': {e}")
 
     return g, fac_1d
 

@@ -1312,14 +1312,17 @@ class MainWindow(QtWidgets.QMainWindow):
         
         menu_mode = QtWidgets.QMenu(self.btn_mode)
         
-        # --- ADICIONADO "Entropia" NA LISTA ---
+        # --- CORREÇÃO: Conecta o sinal no MENU, não no botão ---
+        menu_mode.aboutToShow.connect(self.populate_mode_menu)
+
+        # Lista inicial (idêntica ao seu código original para garantir que inicie correto)
         modes = [
             ("Fácies", "facies"), 
             ("Reservatório", "reservoir"), 
             ("Clusters", "clusters"), 
             ("Maior Cluster", "largest"), 
             ("Espessura Local", "thickness_local"),
-            ("Entropia (Incerteza)", "entropy") # <--- NOVO
+            ("Entropia (Incerteza)", "entropy")
         ]
         
         for text, data in modes:
@@ -1400,6 +1403,105 @@ class MainWindow(QtWidgets.QMainWindow):
         view_lay.addStretch(1)
         
         self.ribbon_tabs.addTab(tab_view, "View")
+
+    def populate_mode_menu(self):
+        """Reconstrói o menu de Modos/Propriedades baseado no grid atual."""
+        menu = self.btn_mode.menu()
+        menu.clear()
+        
+        # 1. Modos Padrão (Manuais)
+        modes_std = [
+            ("Fácies (Discreto)", "facies"), 
+            ("Reservatório (Binário)", "reservoir"), 
+            ("Clusters (Conectividade)", "clusters"), 
+            ("Maior Cluster", "largest"),
+            ("Espessura Local", "thickness_local"),
+            ("Entropia (Incerteza)", "entropy")
+        ]
+        
+        menu.addSection("Análise Estrutural")
+        for text, data in modes_std:
+            action = menu.addAction(text)
+            action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
+
+        # 2. Propriedades do Grid (Dinâmico)
+        # Pega o grid ativo (Base ou de um modelo comparado)
+        grid = self.state.get("current_grid_source")
+        if grid is None and "base" in self.models:
+            grid = self.models["base"].get("grid")
+            
+        if grid:
+            # Lista de nomes EXATOS para ignorar (já tratados acima ou internos)
+            exact_ignore = {
+                "vtkOriginalCellIds", "vtkOriginalPointIds", 
+                "Facies", "facies", "Entropy", "Texture Coordinates", 
+                "StratigraphicThickness", "cell_thickness",
+                "Reservoir", "reservoir", "Clusters", "clusters", 
+                "LargestCluster", "Volume", "NTG_local"
+            }
+            
+            found_any = False
+            
+            # Ordena para ficar bonito no menu
+            for name in sorted(grid.cell_data.keys()):
+                # FILTRO 1: Ignora nomes exatos da lista negra
+                if name in exact_ignore: continue
+                
+                # FILTRO 2: Ignora variáveis internas ou de controle
+                # (Indices i,j,k, métricas verticais caculadas, ou vetores fantasma)
+                if name.endswith("_index"): continue  # Remove i_index, k_index
+                if name.startswith("vert_"): continue # Remove métricas verticais internas
+                if "Ghost" in name: continue
+                
+                # Se passou pelos filtros, é uma propriedade válida (PORO, PERM, etc)
+                if not found_any:
+                    menu.addSection("Propriedades do Grid")
+                    found_any = True
+
+                # Cria ação para visualizar essa propriedade
+                action = menu.addAction(f"{name}")
+                action.triggered.connect(lambda ch, n=name: self.change_scalar_view(n))
+    
+    def change_scalar_view(self, scalar_name):
+        """Visualiza uma propriedade escalar arbitrária (PORO, PERM, etc)."""
+        import numpy as np
+        
+        self.btn_mode.setText(f"Prop:\n{scalar_name}")
+        
+        grid = self.state.get("current_grid_source")
+        if grid is None:
+            if "base" in self.models:
+                grid = self.models["base"].get("grid")
+        
+        if grid is None or scalar_name not in grid.cell_data:
+            return
+
+        arr = grid.cell_data[scalar_name]
+        
+        # Configura como um Preset de Espessura (Hack visual para usar o renderizador escalar)
+        presets = self.state.get("thickness_presets", {})
+        presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
+        self.state["thickness_presets"] = presets
+        self.state["thickness_mode"] = scalar_name
+        
+        # Escala automática
+        valid_arr = arr[np.isfinite(arr)]
+        if valid_arr.size > 0:
+            vmin, vmax = float(np.min(valid_arr)), float(np.max(valid_arr))
+        else:
+            vmin, vmax = 0.0, 1.0
+            
+        self.state["thickness_clim"] = (vmin, vmax)
+        self.state["thickness_cmap"] = "viridis" 
+        
+        # Ativa modo
+        self.state["mode"] = "thickness_local"
+        
+        # Refresh
+        refresh = self.state.get("refresh")
+        if callable(refresh): refresh()
+        
+        if hasattr(self, "update_2d_map"): self.update_2d_map()
     
     def show_ranking_view(self):
         """Alterna para a visão de Ranking (Seja no modo Visualização ou Comparação)."""
