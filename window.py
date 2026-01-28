@@ -1657,14 +1657,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # ComboBox com as opções
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setToolTip("Altera a escala de cores para propriedades contínuas (Espessura, Porosidade, etc).")
-        # Adiciona opções populares
-        self.cmb_colormap.addItems(["plasma", "viridis", "jet", "magma", "seismic", "coolwarm"])
-        # Define o padrão atual (geralmente plasma ou viridis)
-        self.cmb_colormap.setCurrentText("plasma") 
-        self.cmb_colormap.setFixedWidth(80)
-        
-        # Conecta à função que vamos criar no Passo 2
-        self.cmb_colormap.currentTextChanged.connect(self.change_colormap_ui)
+        self.cmb_colormap.setIconSize(QtCore.QSize(80, 14))
+        self.cmb_colormap.setFixedWidth(92)
+        self._init_colormap_combo(
+            ["plasma", "viridis", "magma", "cividis", "turbo", "jet", "seismic", "coolwarm"],
+            default_name="plasma"
+        )
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
         
         # Adiciona ao layout do grupo
         v_box_style = QtWidgets.QVBoxLayout()
@@ -1729,30 +1728,102 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.ribbon_tabs.addTab(tab_view, "View")
 
+
+    def _make_cmap_icon(self, cmap_name, w=160, h=28):
+        """Cria um ícone (amostra) da paleta para usar no ComboBox."""
+        from PyQt5 import QtGui, QtCore
+        import numpy as np
+        import matplotlib.cm as cm
+
+        try:
+            cmap = cm.get_cmap(cmap_name)
+        except Exception:
+            cmap = cm.get_cmap("plasma")
+
+        grad = np.linspace(0, 1, w, dtype=float)
+        rgba = (cmap(grad) * 255).astype(np.uint8)  # (w,4)
+        img = np.repeat(rgba[np.newaxis, :, :], h, axis=0)  # (h,w,4)
+
+        qimg = QtGui.QImage(img.data, w, h, QtGui.QImage.Format_RGBA8888)
+        qimg = qimg.copy()  # garante ownership
+        pix = QtGui.QPixmap.fromImage(qimg)
+        return QtGui.QIcon(pix)
+
+    def _init_colormap_combo(self, cmap_names, default_name="plasma"):
+        """Preenche o combo de paletas com amostras (ícones) em vez de texto."""
+        from PyQt5 import QtCore
+
+        if not hasattr(self, "cmb_colormap"):
+            return
+
+        self.cmb_colormap.blockSignals(True)
+        try:
+            self.cmb_colormap.clear()
+            for name in cmap_names:
+                icon = self._make_cmap_icon(name)
+                self.cmb_colormap.addItem(icon, "", userData=name)
+                idx = self.cmb_colormap.count() - 1
+                # tooltip com o nome da paleta
+                self.cmb_colormap.setItemData(idx, name, QtCore.Qt.ToolTipRole)
+
+            # seleciona default
+            for i in range(self.cmb_colormap.count()):
+                if self.cmb_colormap.itemData(i) == default_name:
+                    self.cmb_colormap.setCurrentIndex(i)
+                    break
+        finally:
+            self.cmb_colormap.blockSignals(False)
+
+    def _on_colormap_combo_changed(self, idx):
+        """Handler do combo de paletas (usa itemData)."""
+        if not hasattr(self, "cmb_colormap"):
+            return
+        cmap_name = self.cmb_colormap.itemData(idx)
+        if isinstance(cmap_name, str) and cmap_name.strip():
+            self.change_colormap_ui(cmap_name)
+
     def change_colormap_ui(self, cmap_name):
-        """Troca a cor dos mapas de Espessura e Propriedades (Grid Eclipse)."""
-        
-        # Atualiza o estado global
+        """Troca a paleta para propriedades contínuas (Espessura, Porosidade, etc.) em 3D/2D e Comparação."""
+        if not cmap_name:
+            return
+
+        # Estado global (usado pelo 3D principal e pelos estados de comparação)
         self.state["thickness_cmap"] = cmap_name
-        
-        # Se estiver visualizando uma propriedade genérica (ex: Porosidade)
         self.state["current_scalar_cmap"] = cmap_name
-        
-        # Força atualização do 3D Principal
+
+        # Atualiza 3D principal
         refresh = self.state.get("refresh")
         if callable(refresh):
-            refresh()
-            
-        # Atualiza o Mapa 2D
-        if hasattr(self, "update_2d_map"):
-            self.update_2d_map()
-            
-        # Atualiza Comparação (se houver)
+            try:
+                refresh()
+            except Exception:
+                pass
+
+        # Atualiza mapa 2D da visualização
+        try:
+            if hasattr(self, "update_2d_map"):
+                self.update_2d_map()
+        except Exception:
+            pass
+
+        # Atualiza estados 3D de comparação (se houver)
         if hasattr(self, "active_comp_states"):
             for st in self.active_comp_states:
-                st["thickness_cmap"] = cmap_name
-                st["current_scalar_cmap"] = cmap_name
-                if "refresh" in st: st["refresh"]()
+                try:
+                    st["thickness_cmap"] = cmap_name
+                    st["current_scalar_cmap"] = cmap_name
+                    if callable(st.get("refresh")):
+                        st["refresh"]()
+                except Exception:
+                    pass
+
+        # Se estiver vendo 2D na comparação, reconstrói para aplicar a paleta
+        try:
+            if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1 and self.compare_stack.currentIndex() == 2:
+                self.update_dynamic_comparison_2d(self.get_checked_models())
+        except Exception:
+            pass
+
 
     def populate_mode_menu(self):
         """Reconstrói o menu de Modos/Propriedades baseado no grid atual."""
@@ -2196,32 +2267,52 @@ class MainWindow(QtWidgets.QMainWindow):
         if "refresh" in self.state and callable(self.state["refresh"]):
             self.change_thickness_mode(label)
 
-
     def show_main_3d_view(self):
-        """Alterna para a visualização 3D (Força a perspectiva de Visualização)."""
-        # Se estiver em Incerteza ou Comparação, volta para Visualização
+        """Alterna para a visualização 3D respeitando a perspectiva atual."""
+        # Se estiver em COMPARAÇÃO, volta para o 3D da comparação (não troca perspectiva)
+        if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1:
+            self.compare_stack.setCurrentIndex(0)  # comp_page_3d
+            try:
+                self.refresh_comparison_active_view()
+            except Exception as e:
+                print(f"[show_main_3d_view] erro comp 3D: {e}")
+            return
+
+        # Caso contrário, força perspectiva de Visualização
         if self.central_stack.currentIndex() != 0:
             self.switch_perspective("visualization")
-        
-        # Garante que a aba interna seja a 0 (3D)
+
         if hasattr(self, "viz_container"):
             self.viz_container.setCurrentIndex(0)
             model_key = self.state.get("active_model_key", "base")
-            try: self.switch_main_view_to_model(model_key)
-            except: pass
+            try:
+                self.switch_main_view_to_model(model_key)
+            except Exception:
+                pass
 
     def show_map2d_view(self):
-        """Alterna para Mapas 2D (Força a perspectiva de Visualização)."""
+        """Alterna para Mapas 2D respeitando a perspectiva atual."""
+        # COMPARAÇÃO: abre a página 2D da comparação
+        if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1:
+            self.compare_stack.setCurrentIndex(2)  # comp_page_2d
+            try:
+                self.update_dynamic_comparison_2d(self.get_checked_models())
+            except Exception as e:
+                print(f"[show_map2d_view] erro comp 2D: {e}")
+            return
+
+        # VISUALIZAÇÃO: abre a página 2D da visualização
         if self.central_stack.currentIndex() != 0:
             self.switch_perspective("visualization")
 
         if hasattr(self, "viz_container"):
             self.viz_container.setCurrentIndex(1)
             model_key = self.state.get("active_model_key", "base")
-            try: 
+            try:
                 self.switch_main_view_to_model(model_key)
                 self.update_2d_map()
-            except: pass
+            except Exception:
+                pass
 
     def show_metrics_view(self):
         """Alterna para Métricas (Força a perspectiva de Visualização)."""
@@ -3030,72 +3121,102 @@ class MainWindow(QtWidgets.QMainWindow):
                 if grid:
                     self._draw_2d_map_local(plotter, grid, scalar, full_title)
 
-    def _draw_2d_map_local(self, plotter, grid_source, scalar_name_3d, title):
-        from load_data import nx, ny, nz
+    def _draw_2d_map_local(
+        self,
+        plotter,
+        grid_source,
+        scalar_name_3d,
+        title,
+        *,
+        cmap=None,
+        show_scalar_bar=True,
+        scalar_bar_title=None,
+    ):
+        """Desenha um mapa 2D (coluna) no BackgroundPlotter, usando a paleta do estado."""
         import pyvista as pv
         import numpy as np
-        
+
         # Limpa o plotter antes de desenhar
         plotter.clear()
 
-        if scalar_name_3d not in grid_source.cell_data:
-            plotter.render() # Força limpeza visual
+        if grid_source is None or scalar_name_3d not in getattr(grid_source, "cell_data", {}):
+            plotter.render()
             return
-            
-        # Prepara os dados 2D a partir do 3D
-        arr3d = grid_source.cell_data[scalar_name_3d].reshape((nx, ny, nz), order="F")
+
+        # Inferir (nx, ny, nz) do próprio grid (cells = (dims_pts-1))
+        nx = ny = nz = None
+        try:
+            dims_pts = getattr(grid_source, "dimensions", None)
+            if dims_pts and len(dims_pts) == 3:
+                cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
+                if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == grid_source.n_cells):
+                    nx, ny, nz = cx, cy, cz
+        except Exception:
+            pass
+        if nx is None:
+            try:
+                from load_data import nx as lnx, ny as lny, nz as lnz
+                nx, ny, nz = int(lnx), int(lny), int(lnz)
+            except Exception:
+                plotter.render()
+                return
+
+        arr3d = np.asarray(grid_source.cell_data[scalar_name_3d], dtype=float).reshape((nx, ny, nz), order="F")
         thickness_2d = np.full((nx, ny), np.nan, dtype=float)
-        
-        # Mapa de máximo/soma na coluna (conforme sua lógica original)
+
+        # Coluna: usa o máximo (>0) como no seu código original
         for ix in range(nx):
             for iy in range(ny):
                 col = arr3d[ix, iy, :]
                 col = col[col > 0]
-                if col.size > 0: thickness_2d[ix, iy] = col.max()
-                
-        # Cria o grid estruturado 2D
+                if col.size > 0:
+                    thickness_2d[ix, iy] = float(np.nanmax(col))
+
+        # Cria o grid estruturado 2D no topo
         x_min, x_max, y_min, y_max, _, z_max = grid_source.bounds
         xs = np.linspace(x_min, x_max, nx)
         ys = np.linspace(y_min, y_max, ny)
         xs, ys = np.meshgrid(xs, ys, indexing="ij")
         zs = np.full_like(xs, z_max)
-        
+
         surf = pv.StructuredGrid(xs, ys, zs)
         name2d = scalar_name_3d + "_2d"
-        
-        # Ajusta array para o pyvista (Cell Data)
         surf.cell_data[name2d] = thickness_2d[:nx-1, :ny-1].ravel(order="F")
-        
-        # Trata NaNs
-        arr = surf.cell_data[name2d]
+
+        # Trata NaNs / negativos
+        arr = np.asarray(surf.cell_data[name2d], dtype=float)
         arr = np.where(arr < 0, np.nan, arr)
         surf.cell_data[name2d] = arr
-        
-        # Pega limites de cor
+
+        # Limites de cor
         clim = get_2d_clim(scalar_name_3d, arr)
-        
-        # Adiciona a malha
+
+        # Paleta: usa a do estado se não vier explícita
+        if cmap is None:
+            cmap = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
+
         plotter.add_mesh(
-            surf, 
-            scalars=name2d, 
-            cmap="plasma", 
-            show_edges=True, 
-            edge_color="black", 
-            line_width=0.5, 
-            nan_color="white", 
-            show_scalar_bar=False, 
-            clim=clim
+            surf,
+            scalars=name2d,
+            cmap=cmap,
+            show_edges=True,
+            edge_color="black",
+            line_width=0.5,
+            nan_color="white",
+            show_scalar_bar=False,  # adicionamos abaixo (opcional)
+            clim=clim,
         )
-        
-        # Configura câmera 2D
+
         plotter.view_xy()
         plotter.enable_parallel_projection()
         plotter.set_background("white")
-        plotter.add_scalar_bar(title=title, n_labels=5, fmt="%.1f")
+
+        if show_scalar_bar:
+            plotter.add_scalar_bar(title=(scalar_bar_title or title), n_labels=5, fmt="%.1f")
+
         plotter.reset_camera()
-        
-        # --- CORREÇÃO: Força o redesenho imediato na tela ---
         plotter.render()
+
 
     # --- ABA COMPARAÇÃO ---
 
@@ -4767,7 +4888,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
 
             # Desenha
-            self._draw_2d_map_local(p2d, temp_grid, scalar, f"{model_name} - {title}")
+            self._draw_2d_map_local(
+                p2d,
+                temp_grid,
+                scalar,
+                title,
+                cmap=self.state.get("thickness_cmap", "plasma"),
+                show_scalar_bar=False,
+            )
 
             w = QtWidgets.QWidget()
             vl = QtWidgets.QVBoxLayout(w)

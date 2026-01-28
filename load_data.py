@@ -24,7 +24,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/m_chaves_completo.grdecl"
+DEFAULT_GRDECL_PATH = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
 
 # Se suas fácies aparecem invertidas em Z, este é o knob principal.
 # Você relatou que: load_grid_from_grdecl(..., flip_k=True) "deu certo"

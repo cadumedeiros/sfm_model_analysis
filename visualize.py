@@ -98,24 +98,56 @@ def make_clusters_lut(clusters_arr):
 
 def prepare_grid_indices(target_grid):
     """
-    Adiciona índices I, J, K (estruturais) como escalares no grid
-    para permitir filtros de threshold (cortes) rápidos.
+    Adiciona índices I, J, K (estruturais) como escalares no grid para permitir
+    filtros (cortes) e extrações por coluna de forma robusta.
+
+    IMPORTANTe: inferimos (nx, ny, nz) do PRÓPRIO grid (ou fallback do load_data),
+    evitando inconsistências quando múltiplos grids/modelos são carregados.
     """
-    # K index (Bottom -> Top)
+    import numpy as np
+
+    if target_grid is None:
+        return target_grid
+
+    # --- Inferir dims de CÉLULAS a partir das dimensions (de pontos) ---
+    nx = ny = nz = None
+    try:
+        dims_pts = getattr(target_grid, "dimensions", None)
+        if dims_pts and len(dims_pts) == 3:
+            cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
+            if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == target_grid.n_cells):
+                nx, ny, nz = cx, cy, cz
+    except Exception:
+        pass
+
+    # --- Fallback: pega nx/ny/nz atuais do load_data (não os congelados no import) ---
+    if nx is None:
+        try:
+            from load_data import nx as lnx, ny as lny, nz as lnz
+            if int(lnx) * int(lny) * int(lnz) == target_grid.n_cells:
+                nx, ny, nz = int(lnx), int(lny), int(lnz)
+        except Exception:
+            pass
+
+    if nx is None:
+        # sem dims coerentes, não cria índices
+        return target_grid
+
+    # --- K index (Bottom -> Top) ---
     if "k_index" not in target_grid.cell_data:
         k3d = np.zeros((nx, ny, nz), dtype=int)
         for k in range(nz):
-            k3d[:, :, k] = nz - 1 - k # K=0 é base, K=nz-1 é topo
+            k3d[:, :, k] = nz - 1 - k  # K=0 é base, K=nz-1 é topo
         target_grid.cell_data["k_index"] = k3d.reshape(-1, order="F")
 
-    # I index (X axis)
+    # --- I index ---
     if "i_index" not in target_grid.cell_data:
         i3d = np.zeros((nx, ny, nz), dtype=int)
         for i in range(nx):
             i3d[i, :, :] = i
         target_grid.cell_data["i_index"] = i3d.reshape(-1, order="F")
 
-    # J index (Y axis)
+    # --- J index ---
     if "j_index" not in target_grid.cell_data:
         j3d = np.zeros((nx, ny, nz), dtype=int)
         for j in range(ny):
