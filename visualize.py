@@ -463,7 +463,7 @@ def run(
                 except: mesh_bg, mesh_main = mesh, None
                 
                 scalar_name = s_name
-                cmap = "plasma" 
+                cmap = state.get("thickness_cmap", "plasma") 
                 
                 if mesh_main and mesh_main.n_cells > 0:
                     arr = mesh_main.cell_data[s_name]
@@ -472,6 +472,33 @@ def run(
                     clim = (vmin, vmax)
                 else:
                     clim = (0.0, 1.0)
+
+            else:
+                # Propriedade não existe neste grid -> deixa transparente
+                show_scalar = False
+                opacity_main = 0.0
+
+        elif mode == "scalar":
+            s_name = state.get("current_scalar_name")
+            bar_title = state.get("current_scalar_title", s_name)
+            
+            if s_name and s_name in mesh.cell_data:
+                mesh_main = mesh # Mostra geometria completa (incluindo zeros)
+                scalar_name = s_name
+                cmap = state.get("current_scalar_cmap", "viridis")
+                clim = state.get("current_scalar_clim", None)
+                
+                if clim is None:
+                    arr = mesh.cell_data[s_name]
+                    v_valid = arr[np.isfinite(arr)]
+                    if v_valid.size > 0:
+                        clim = (float(v_valid.min()), float(v_valid.max()))
+                    else:
+                        clim = (0.0, 1.0)
+            else:
+                mesh_main = mesh
+                show_scalar = False
+                opacity_main = 0.0
 
         def sync_actor(actor_key, mesh_data, is_bg=False):
             actor = state.get(actor_key)
@@ -492,8 +519,21 @@ def run(
             
             actor.SetVisibility(True)
             actor.mapper.SetInputData(mesh_data)
-            
+
+            # Garante que não "vaze" scalar visibility entre modos
+            if not show_scalar:
+                try:
+                    actor.mapper.SetScalarVisibility(False)
+                except Exception:
+                    pass
+
             if is_bg: return actor
+
+            # Aplica opacidade (para deixar "vazio" quando faltar propriedade)
+            try:
+                actor.GetProperty().SetOpacity(float(opacity_main))
+            except Exception:
+                pass
 
             if show_scalar and scalar_name and scalar_name in mesh_data.cell_data:
                 actor.mapper.SetScalarVisibility(True)
@@ -525,7 +565,7 @@ def run(
             
         if main_actor: 
             main_actor.SetScale(1.0, 1.0, z_scale)
-            if mode == "thickness_local" and bar_title:
+            if (mode == "thickness_local" or mode == "scalar") and bar_title:
                 plotter.add_scalar_bar(title=bar_title, mapper=main_actor.mapper, n_labels=5, fmt="%.1f")
 
     def _refresh():
@@ -605,7 +645,7 @@ def run(
     state["refresh"] = _refresh
     return plotter, state
 
-def show_thickness_2d(surf, scalar_name, title=None):
+def show_thickness_2d(surf, scalar_name, title=None, cmap="plasma"):
     # 1) limpa valores negativos (viram NaN)
     arr = surf.cell_data[scalar_name]
     arr = np.where(arr < 0, np.nan, arr)
@@ -620,7 +660,7 @@ def show_thickness_2d(surf, scalar_name, title=None):
     p.add_mesh(
         surf,
         scalars=scalar_name,
-        cmap="plasma",
+        cmap=cmap,
         show_edges=True,
         edge_color="black",
         line_width=0.5,
@@ -637,7 +677,7 @@ def show_thickness_2d(surf, scalar_name, title=None):
     p.show()
 
 
-def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
+def update_2d_plot(plotter, array_name_3d, title="Mapa 2D", cmap="plasma"):
     surf = make_thickness_2d_from_grid(array_name_3d, array_name_3d + "_2d")
     scalar_name_2d = array_name_3d + "_2d"
 

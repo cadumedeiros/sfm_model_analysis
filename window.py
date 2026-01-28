@@ -429,6 +429,298 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compare_stack.addWidget(self.comp_page_2d)
         self.central_stack.addWidget(self.compare_stack)
 
+        # --- PERSPECTIVA 3: INCERTEZA (NOVA) ---
+        self.uncertainty_page = QtWidgets.QWidget()
+        self.setup_uncertainty_tab(self.uncertainty_page)
+        self.central_stack.addWidget(self.uncertainty_page)
+    
+    def setup_uncertainty_tab(self, parent_widget):
+        """Layout: Painel Esquerdo (Opções) | Centro (3D) | Painel Direito (Geometria)."""
+        from load_data import nx, ny, nz
+        
+        # 1. Limpeza para evitar sobreposição se a aba for recriada
+        if parent_widget.layout():
+            old = parent_widget.layout()
+            while old.count():
+                it = old.takeAt(0)
+                if it.widget(): it.widget().deleteLater()
+            QtWidgets.QWidget().setLayout(old)
+            
+        layout = QtWidgets.QHBoxLayout(parent_widget)
+        
+        # --- COLUNA DA ESQUERDA (Config e Diagnóstico) ---
+        left_panel = QtWidgets.QFrame()
+        left_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        left_panel.setFixedWidth(300)
+        vl_left = QtWidgets.QVBoxLayout(left_panel)
+        
+        vl_left.addWidget(QtWidgets.QLabel("<b>Configuração</b>"))
+        
+        self.cmb_uncert_prop = QtWidgets.QComboBox()
+        self.cmb_uncert_prop.addItem("Fácies (Entropia)", "facies")
+        vl_left.addWidget(self.cmb_uncert_prop)
+        
+        vl_left.addWidget(QtWidgets.QLabel("Modelos:"))
+        self.lst_uncert_models = QtWidgets.QListWidget()
+        self.lst_uncert_models.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        vl_left.addWidget(self.lst_uncert_models)
+        
+        h_sel = QtWidgets.QHBoxLayout()
+        b_all = QtWidgets.QPushButton("Todos"); b_all.clicked.connect(self._uncert_sel_all)
+        b_none = QtWidgets.QPushButton("Nenhum"); b_none.clicked.connect(self._uncert_sel_none)
+        h_sel.addWidget(b_all); h_sel.addWidget(b_none)
+        vl_left.addLayout(h_sel)
+        
+        vl_left.addSpacing(15)
+        
+        # Diagnóstico (Labels que serão atualizados)
+        gb_diag = QtWidgets.QGroupBox("Diagnóstico")
+        l_diag = QtWidgets.QVBoxLayout(gb_diag)
+        self.lbl_uncert_n = QtWidgets.QLabel("Modelos (N): -")
+        self.lbl_uncert_max_theo = QtWidgets.QLabel("Máx. Teórico: -")
+        self.lbl_uncert_max_real = QtWidgets.QLabel("Máx. Encontrado: -")
+        
+        # Estilo para leitura fácil
+        self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; font-size: 13px;")
+        
+        l_diag.addWidget(self.lbl_uncert_n)
+        l_diag.addWidget(self.lbl_uncert_max_theo)
+        l_diag.addWidget(self.lbl_uncert_max_real)
+        vl_left.addWidget(gb_diag)
+        
+        self.chk_abs_scale = QtWidgets.QCheckBox("Usar Escala Absoluta")
+        self.chk_abs_scale.stateChanged.connect(self.on_uncert_settings_changed)
+        vl_left.addWidget(self.chk_abs_scale)
+        
+        btn_calc = QtWidgets.QPushButton("Calcular Incerteza")
+        btn_calc.setFixedHeight(40)
+        btn_calc.setStyleSheet("background-color: #d0f0c0; font-weight: bold;")
+        btn_calc.clicked.connect(self.calculate_uncertainty)
+        vl_left.addWidget(btn_calc)
+        
+        vl_left.addStretch(1) # Empurra tudo para cima
+        
+        # --- COLUNA CENTRAL (3D) ---
+        self.uncert_plotter, uncert_widget = self._make_embedded_plotter(parent=parent_widget)
+        
+        # --- COLUNA DA DIREITA (Geometria / Slicer) ---
+        right_panel = QtWidgets.QFrame()
+        right_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        right_panel.setFixedWidth(280)
+        vl_right = QtWidgets.QVBoxLayout(right_panel)
+        
+        gb_geo = QtWidgets.QGroupBox("Geometria & Cortes")
+        l_geo = QtWidgets.QVBoxLayout(gb_geo)
+        # Cria o slicer dedicado
+        self.uncert_slicer = GridSlicerWidget(nx, ny, nz, self.on_uncert_slice_changed)
+        l_geo.addWidget(self.uncert_slicer)
+        vl_right.addWidget(gb_geo)
+        vl_right.addStretch(1)
+
+        # Adiciona ao layout principal na ordem: Esq -> Centro -> Dir
+        layout.addWidget(left_panel)
+        layout.addWidget(uncert_widget, 1) # Stretch factor 1
+        layout.addWidget(right_panel)
+
+        self.uncert_view_state = None
+
+    # --- Callbacks necessários para a interface acima não dar erro ---
+    
+    def on_uncert_settings_changed(self, state=None):
+        """Recalcula visualização ao clicar no Checkbox."""
+        # Se a aba existe, recalcula. O QtInteractor não tem atributo .mesh.
+        if hasattr(self, "uncert_plotter"):
+            self.calculate_uncertainty()
+
+
+    def on_uncert_slice_changed(self, axis, mode, value):
+        """Aplica cortes da aba de Incerteza."""
+        # Atualiza a UI do slicer
+        self.uncert_slicer.external_update(axis, mode, value)
+        
+        if not hasattr(self, "uncert_view_state") or not self.uncert_view_state:
+            return
+
+        state = self.uncert_view_state
+        
+        if axis == "z" and mode == "scale":
+            state["z_exag"] = float(value)
+        elif "set_slice" in state:
+            state["set_slice"](axis, mode, value)
+            
+        if "refresh" in state: state["refresh"]()
+        if hasattr(self, "uncert_plotter"): self.uncert_plotter.render()
+
+    def _uncert_sel_all(self):
+        for i in range(self.lst_uncert_models.count()):
+            self.lst_uncert_models.item(i).setCheckState(QtCore.Qt.Checked)
+
+    def _uncert_sel_none(self):
+        for i in range(self.lst_uncert_models.count()):
+            self.lst_uncert_models.item(i).setCheckState(QtCore.Qt.Unchecked)
+
+    def show_uncertainty_view(self):
+        """Ativa a perspectiva de Incerteza (Força bruta para fechar painéis)."""
+        
+        # 1. FORÇA BRUTA: Fecha os painéis laterais imediatamente
+        if hasattr(self, "dock_explorer"): 
+            self.dock_explorer.close()
+        if hasattr(self, "dock_props"): 
+            self.dock_props.close()
+
+        # 2. Troca o estado lógico
+        self.switch_perspective("uncertainty")
+        
+        # 3. Garante que o stack central mostre a aba de Incerteza (Índice 2)
+        if hasattr(self, "central_stack"):
+            self.central_stack.setCurrentIndex(2) 
+        
+        # 4. Atualiza visualmente o botão da Ribbon
+        if hasattr(self, "act_view_uncert"):
+            self.act_view_uncert.setChecked(True)
+
+        # 5. Garante que a interface interna esteja montada
+        if hasattr(self, "uncertainty_page") and not getattr(self, "_uncert_tab_ready", False):
+            self.setup_uncertainty_tab(self.uncertainty_page)
+            self._uncert_tab_ready = True
+
+        # 6. Atualiza a lista de modelos
+        self._refresh_uncert_model_list()
+        
+    def _refresh_uncert_model_list(self):
+        """Atualiza a lista de modelos disponíveis na aba Incerteza."""
+        self.lst_uncert_models.clear()
+        
+        # Base
+        if "base" in self.models:
+            it = QtWidgets.QListWidgetItem("Modelo Base")
+            it.setData(QtCore.Qt.UserRole, "base")
+            it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked)
+            self.lst_uncert_models.addItem(it)
+            
+        # Outros (Ignora 'base' e 'compare')
+        for k, v in self.models.items():
+            if k == "base": continue
+            if k == "compare": continue  # <--- CORREÇÃO: Ignora o placeholder de comparação
+            
+            # Garante que tem nome
+            name = v.get("name", str(k))
+            if not name: continue 
+
+            it = QtWidgets.QListWidgetItem(name)
+            it.setData(QtCore.Qt.UserRole, k)
+            it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked)
+            self.lst_uncert_models.addItem(it)
+
+    def calculate_uncertainty(self):
+        """Calcula Entropia, atualiza números na tela e desenha o mapa."""
+        from analysis import compute_facies_entropy_map
+        from visualize import run
+        from load_data import grid as global_grid
+        import numpy as np
+
+        # 1. Coleta Modelos
+        selected_keys = []
+        if hasattr(self, "lst_uncert_models"):
+            for i in range(self.lst_uncert_models.count()):
+                it = self.lst_uncert_models.item(i)
+                if it.checkState() == QtCore.Qt.Checked:
+                    selected_keys.append(it.data(QtCore.Qt.UserRole))
+        
+        if not selected_keys:
+            QtWidgets.QMessageBox.warning(self, "Aviso", "Selecione modelos na lista.")
+            return
+
+        # 2. Pega Arrays
+        arrays = []
+        for k in selected_keys:
+            if k in self.models:
+                arr = self.models[k].get("facies")
+                if arr is not None: arrays.append(arr)
+
+        if not arrays: return
+
+        # 3. Prepara Grid
+        base_model = self.models.get("base", {})
+        grid_template = base_model.get("grid") or global_grid
+        vis_grid = grid_template.copy(deep=True)
+
+        # 4. Cálculos Matemáticos
+        n_models = len(arrays)
+        
+        # Calcula mapa de entropia
+        result_map = compute_facies_entropy_map(arrays, target_grid=vis_grid)
+        
+        # Estatísticas para o Diagnóstico
+        max_real = float(np.max(result_map)) if len(result_map) > 0 else 0.0
+        max_theo = float(np.log(n_models)) if n_models > 1 else 0.0
+        
+        # --- ATUALIZAÇÃO DOS TEXTOS NA TELA ---
+        if hasattr(self, "lbl_uncert_n"):
+            self.lbl_uncert_n.setText(f"Modelos (N): {n_models}")
+            self.lbl_uncert_max_theo.setText(f"Máx. Teórico: {max_theo:.3f}")
+            self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {max_real:.3f}")
+            
+            # Muda cor do texto se estiver crítico
+            if max_theo > 0 and max_real > (0.85 * max_theo):
+                self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: red; font-size: 13px;")
+            else:
+                self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: green; font-size: 13px;")
+
+        # 5. Configuração Visual
+        scalar_name = "Uncertainty"
+        vis_grid.cell_data[scalar_name] = result_map
+        
+        # Escala Absoluta ou Relativa?
+        use_abs = self.chk_abs_scale.isChecked() if hasattr(self, "chk_abs_scale") else False
+        
+        if use_abs:
+            clim = (0.0, max_theo if max_theo > 0 else 0.1)
+        else:
+            clim = (0.0, max_real if max_real > 0 else 0.1)
+
+        uncert_state = {
+            "mode": "scalar",
+            "current_scalar_name": scalar_name,
+            "current_scalar_title": f"Entropia (N={n_models})",
+            "current_scalar_clim": clim,
+            "current_scalar_cmap": "jet",
+            "z_exag": float(self.state.get("z_exag", 15.0)),
+            "show_scalar_bar": True
+        }
+
+        # 6. Renderizar
+        self.uncert_plotter.clear()
+        
+        _, final_state = run(
+            mode="scalar",
+            z_exag=uncert_state["z_exag"],
+            show_scalar_bar=True,
+            external_plotter=self.uncert_plotter,
+            external_state=uncert_state,
+            target_grid=vis_grid,
+            target_facies=None
+        )
+        
+        # Salva estado para o Slicer funcionar
+        self.uncert_view_state = final_state
+        
+        # Limpa barras antigas (Correção QtInteractor)
+        if hasattr(self.uncert_plotter, 'scalar_bars'):
+             keys = list(self.uncert_plotter.scalar_bars.keys())
+             for k in keys:
+                 self.uncert_plotter.remove_scalar_bar(k)
+        
+        # Adiciona nova barra
+        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
+        if mapper:
+            mapper.SetScalarRange(clim)
+            self.uncert_plotter.add_scalar_bar(title=uncert_state["current_scalar_title"], mapper=mapper, fmt="%.2f")
+
+        self.uncert_plotter.reset_camera()
+
     def _copy_table_to_clipboard(self, table_widget):
         """Copia o conteúdo de uma QTableWidget para o clipboard (formato CSV/Excel)."""
         if table_widget.rowCount() == 0:
@@ -1270,36 +1562,42 @@ class MainWindow(QtWidgets.QMainWindow):
         ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
         ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
         icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
-        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp) # Ícone para Ranking
+        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp)
+        icouncert = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxQuestion) # Ícone Incerteza
 
         self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self); self.act_view_3d.setCheckable(True)
         self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self); self.act_view_2d.setCheckable(True)
         self.act_view_metrics = QtWidgets.QAction(icomet, "Métricas", self); self.act_view_metrics.setCheckable(True)
         self.act_view_ranking = QtWidgets.QAction(icorank, "Ranking", self); self.act_view_ranking.setCheckable(True)
+        self.act_view_uncert = QtWidgets.QAction(icouncert, "Incerteza", self); self.act_view_uncert.setCheckable(True)
 
         grp = QtWidgets.QActionGroup(self); grp.setExclusive(True)
-        grp.addAction(self.act_view_3d); grp.addAction(self.act_view_2d); grp.addAction(self.act_view_metrics); grp.addAction(self.act_view_ranking)
+        grp.addAction(self.act_view_3d)
+        grp.addAction(self.act_view_2d)
+        grp.addAction(self.act_view_metrics)
+        grp.addAction(self.act_view_ranking)
+        grp.addAction(self.act_view_uncert) # Add ao grupo
         self.act_view_3d.setChecked(True)
 
-        # Conecta aos métodos unificados
+        # Conecta aos métodos
         self.act_view_3d.triggered.connect(self.show_main_3d_view)
         self.act_view_2d.triggered.connect(self.show_map2d_view)
         self.act_view_metrics.triggered.connect(self.show_metrics_view)
-        self.act_view_ranking.triggered.connect(self.show_ranking_view) # Novo slot
+        self.act_view_ranking.triggered.connect(self.show_ranking_view)
+        self.act_view_uncert.triggered.connect(self.show_uncertainty_view) # Novo Slot
 
-        b3d = QtWidgets.QToolButton(); b3d.setDefaultAction(self.act_view_3d)
-        b3d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); b3d.setIconSize(QtCore.QSize(28, 28)); b3d.setAutoRaise(True)
-        
-        b2d = QtWidgets.QToolButton(); b2d.setDefaultAction(self.act_view_2d)
-        b2d.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); b2d.setIconSize(QtCore.QSize(28, 28)); b2d.setAutoRaise(True)
-        
-        bmet = QtWidgets.QToolButton(); bmet.setDefaultAction(self.act_view_metrics)
-        bmet.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); bmet.setIconSize(QtCore.QSize(28, 28)); bmet.setAutoRaise(True)
+        # Botões
+        def mk_tbtn(act):
+            b = QtWidgets.QToolButton(); b.setDefaultAction(act)
+            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            b.setIconSize(QtCore.QSize(28, 28)); b.setAutoRaise(True)
+            return b
 
-        brank = QtWidgets.QToolButton(); brank.setDefaultAction(self.act_view_ranking)
-        brank.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); brank.setIconSize(QtCore.QSize(28, 28)); brank.setAutoRaise(True)
-
-        g_vista_row.addWidget(b3d); g_vista_row.addWidget(b2d); g_vista_row.addWidget(bmet); g_vista_row.addWidget(brank)
+        g_vista_row.addWidget(mk_tbtn(self.act_view_3d))
+        g_vista_row.addWidget(mk_tbtn(self.act_view_2d))
+        g_vista_row.addWidget(mk_tbtn(self.act_view_metrics))
+        g_vista_row.addWidget(mk_tbtn(self.act_view_ranking))
+        g_vista_row.addWidget(mk_tbtn(self.act_view_uncert))
 
         # Modo
         g_modo, g_modo_row = make_group("Modo")
@@ -1350,6 +1648,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_thick_btn("Espessura")
         g_esp_row.addWidget(self.btn_thick)
 
+        # --- NOVO GRUPO: ESTILO (CORES) ---
+        g_style, g_style_row = make_group("Estilo")
+        
+        # Label pequena
+        lbl_cmap = QtWidgets.QLabel("Paleta:")
+        
+        # ComboBox com as opções
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setToolTip("Altera a escala de cores para propriedades contínuas (Espessura, Porosidade, etc).")
+        # Adiciona opções populares
+        self.cmb_colormap.addItems(["plasma", "viridis", "jet", "magma", "seismic", "coolwarm"])
+        # Define o padrão atual (geralmente plasma ou viridis)
+        self.cmb_colormap.setCurrentText("plasma") 
+        self.cmb_colormap.setFixedWidth(80)
+        
+        # Conecta à função que vamos criar no Passo 2
+        self.cmb_colormap.currentTextChanged.connect(self.change_colormap_ui)
+        
+        # Adiciona ao layout do grupo
+        v_box_style = QtWidgets.QVBoxLayout()
+        v_box_style.setSpacing(0)
+        v_box_style.setContentsMargins(0,0,0,0)
+        v_box_style.addWidget(lbl_cmap)
+        v_box_style.addWidget(self.cmb_colormap)
+        
+        g_style_row.addLayout(v_box_style)
+
         # Inspeção de Poços
         g_wells, g_wells_row = make_group("Inspeção")
         
@@ -1398,25 +1723,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
         g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
 
-        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp)
+        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp); view_lay.addWidget(g_style);
         view_lay.addWidget(g_wells); view_lay.addWidget(g_rep); view_lay.addWidget(g_windows) # Inserido g_rep
         view_lay.addStretch(1)
         
         self.ribbon_tabs.addTab(tab_view, "View")
+
+    def change_colormap_ui(self, cmap_name):
+        """Troca a cor dos mapas de Espessura e Propriedades (Grid Eclipse)."""
+        
+        # Atualiza o estado global
+        self.state["thickness_cmap"] = cmap_name
+        
+        # Se estiver visualizando uma propriedade genérica (ex: Porosidade)
+        self.state["current_scalar_cmap"] = cmap_name
+        
+        # Força atualização do 3D Principal
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            refresh()
+            
+        # Atualiza o Mapa 2D
+        if hasattr(self, "update_2d_map"):
+            self.update_2d_map()
+            
+        # Atualiza Comparação (se houver)
+        if hasattr(self, "active_comp_states"):
+            for st in self.active_comp_states:
+                st["thickness_cmap"] = cmap_name
+                st["current_scalar_cmap"] = cmap_name
+                if "refresh" in st: st["refresh"]()
 
     def populate_mode_menu(self):
         """Reconstrói o menu de Modos/Propriedades baseado no grid atual."""
         menu = self.btn_mode.menu()
         menu.clear()
         
-        # 1. Modos Padrão (Manuais)
+        # Removido "Entropia" daqui. Agora é uma View separada.
         modes_std = [
             ("Fácies (Discreto)", "facies"), 
             ("Reservatório (Binário)", "reservoir"), 
             ("Clusters (Conectividade)", "clusters"), 
             ("Maior Cluster", "largest"),
-            ("Espessura Local", "thickness_local"),
-            ("Entropia (Incerteza)", "entropy")
+            ("Espessura Local", "thickness_local")
         ]
         
         menu.addSection("Análise Estrutural")
@@ -1425,12 +1774,30 @@ class MainWindow(QtWidgets.QMainWindow):
             action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
 
         # 2. Propriedades do Grid (Dinâmico)
-        # Pega o grid ativo (Base ou de um modelo comparado)
-        grid = self.state.get("current_grid_source")
-        if grid is None and "base" in self.models:
-            grid = self.models["base"].get("grid")
-            
-        if grid:
+        # Em Visualização: usa o grid ativo.
+        # Em Comparação: monta a UNIÃO de propriedades entre os modelos selecionados.
+        grids = []
+        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and hasattr(self, "active_comp_states") and self.active_comp_states:
+            for st in self.active_comp_states:
+                g = st.get("current_grid_source")
+                if g is not None:
+                    grids.append(g)
+        else:
+            g = self.state.get("current_grid_source")
+            if g is None and "base" in self.models:
+                g = self.models["base"].get("grid")
+            if g is not None:
+                grids.append(g)
+
+        # helper: chaves de cell_data de todos os grids (união)
+        all_cell_keys = set()
+        for g in grids:
+            try:
+                all_cell_keys |= set(g.cell_data.keys())
+            except Exception:
+                pass
+
+        if all_cell_keys:
             # Lista de nomes EXATOS para ignorar (já tratados acima ou internos)
             exact_ignore = {
                 "vtkOriginalCellIds", "vtkOriginalPointIds", 
@@ -1443,7 +1810,7 @@ class MainWindow(QtWidgets.QMainWindow):
             found_any = False
             
             # Ordena para ficar bonito no menu
-            for name in sorted(grid.cell_data.keys()):
+            for name in sorted(all_cell_keys):
                 # FILTRO 1: Ignora nomes exatos da lista negra
                 if name in exact_ignore: continue
                 
@@ -1492,10 +1859,28 @@ class MainWindow(QtWidgets.QMainWindow):
             vmin, vmax = 0.0, 1.0
             
         self.state["thickness_clim"] = (vmin, vmax)
-        self.state["thickness_cmap"] = "viridis" 
         
         # Ativa modo
         self.state["mode"] = "thickness_local"
+
+        # Propaga para comparação (se estiver ativa)
+        if hasattr(self, "active_comp_states"):
+            for st in self.active_comp_states:
+                try:
+                    st_presets = st.get("thickness_presets", {})
+                    st_presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
+                    st["thickness_presets"] = st_presets
+                    st["thickness_mode"] = scalar_name
+                    st["thickness_clim"] = (vmin, vmax)
+                    # mantém a paleta escolhida no ribbon
+                    st["thickness_cmap"] = self.state.get("thickness_cmap", st.get("thickness_cmap", "plasma"))
+                    st["mode"] = "thickness_local"
+                    if "update_thickness" in st: st["update_thickness"]()
+                    if "refresh" in st: st["refresh"]()
+                    if "plotter_ref" in st: st["plotter_ref"].render()
+                except Exception:
+                    pass
+
         
         # Refresh
         refresh = self.state.get("refresh")
@@ -1503,20 +1888,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         if hasattr(self, "update_2d_map"): self.update_2d_map()
     
-    def show_ranking_view(self):
-        """Alterna para a visão de Ranking (Seja no modo Visualização ou Comparação)."""
-        is_comparison = (self.central_stack.currentIndex() == 1)
-        
-        if is_comparison:
-            # Ranking não disponível no modo comparação lado a lado por enquanto
-            QtWidgets.QMessageBox.information(self, "Modo Comparação", "Volte para o modo Visualização para ver o Ranking detalhado.")
-            return
-
-        # Na visualização simples, o Ranking é o índice 3
-        if hasattr(self, "viz_container"):
-            self.viz_container.setCurrentIndex(3)
-            # Atualiza o conteúdo do ranking
-            self.update_ranking_view_content()
 
     def _on_global_window_size_changed(self):
         """Callback quando o tamanho da janela global (Ribbon) é alterado."""
@@ -1827,59 +2198,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def show_main_3d_view(self):
-        """Alterna para a visualização 3D (Seja no modo Visualização ou Comparação)."""
-        is_comparison = (self.central_stack.currentIndex() == 1)
+        """Alterna para a visualização 3D (Força a perspectiva de Visualização)."""
+        # Se estiver em Incerteza ou Comparação, volta para Visualização
+        if self.central_stack.currentIndex() != 0:
+            self.switch_perspective("visualization")
         
-        if is_comparison:
-            # Na comparação, o 3D é o índice 0
-            if hasattr(self, "compare_stack"):
-                self.compare_stack.setCurrentIndex(0)
-                self.refresh_comparison_active_view()
-        else:
-            # Na visualização simples, o 3D é o índice 0 do viz_container
-            if hasattr(self, "viz_container"):
-                self.viz_container.setCurrentIndex(0)
-                model_key = self.state.get("active_model_key", "base")
-                try: self.switch_main_view_to_model(model_key)
-                except: pass
-
+        # Garante que a aba interna seja a 0 (3D)
+        if hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(0)
+            model_key = self.state.get("active_model_key", "base")
+            try: self.switch_main_view_to_model(model_key)
+            except: pass
 
     def show_map2d_view(self):
-        """Alterna para Mapas 2D (Seja no modo Visualização ou Comparação)."""
-        is_comparison = (self.central_stack.currentIndex() == 1)
-        
-        if is_comparison:
-            # Na comparação, os Mapas 2D são o índice 2 (conforme o update_dynamic_comparison_view)
-            if hasattr(self, "compare_stack"):
-                self.compare_stack.setCurrentIndex(2)
-                self.refresh_comparison_active_view()
-        else:
-            # Na visualização simples, os Mapas 2D são o índice 1
-            if hasattr(self, "viz_container"):
-                self.viz_container.setCurrentIndex(1)
-                model_key = self.state.get("active_model_key", "base")
-                try: 
-                    self.switch_main_view_to_model(model_key)
-                    self.update_2d_map()
-                except: pass
+        """Alterna para Mapas 2D (Força a perspectiva de Visualização)."""
+        if self.central_stack.currentIndex() != 0:
+            self.switch_perspective("visualization")
 
+        if hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(1)
+            model_key = self.state.get("active_model_key", "base")
+            try: 
+                self.switch_main_view_to_model(model_key)
+                self.update_2d_map()
+            except: pass
 
     def show_metrics_view(self):
-        """Alterna para Métricas (Seja no modo Visualização ou Comparação)."""
-        is_comparison = (self.central_stack.currentIndex() == 1)
-        
-        if is_comparison:
-            # Na comparação, as Métricas são o índice 1 (Tabela Comparativa)
-            if hasattr(self, "compare_stack"):
-                self.compare_stack.setCurrentIndex(1)
-                self.refresh_comparison_active_view()
-        else:
-            # Na visualização simples, as Métricas são o índice 2
-            if hasattr(self, "viz_container"):
-                self.viz_container.setCurrentIndex(2)
-                model_key = self.state.get("active_model_key", "base")
-                try: self.update_metrics_view_content(model_key)
-                except: pass
+        """Alterna para Métricas (Força a perspectiva de Visualização)."""
+        if self.central_stack.currentIndex() != 0:
+            self.switch_perspective("visualization")
+
+        if hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(2)
+            model_key = self.state.get("active_model_key", "base")
+            try: self.update_metrics_view_content(model_key)
+            except: pass
+
+    def show_ranking_view(self):
+        """Alterna para a visão de Ranking (Força a perspectiva de Visualização)."""
+        if self.central_stack.currentIndex() != 0:
+            self.switch_perspective("visualization")
+
+        # Na visualização simples, o Ranking é o índice 3
+        if hasattr(self, "viz_container"):
+            self.viz_container.setCurrentIndex(3)
+            # Atualiza o conteúdo do ranking
+            self.update_ranking_view_content()
 
     def _wrap_expanding(self, widget):
             """Helper: força o widget a ocupar toda a área do dock."""
@@ -1999,12 +2363,12 @@ class MainWindow(QtWidgets.QMainWindow):
             tbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
         self.dock_props.setWidget(self._wrap_expanding(self.inspector_tabs))
-        self.dock_props.setMinimumWidth(420)
+        self.dock_props.setMinimumWidth(60)
 
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_props)
 
         # Ajuste inicial de larguras
-        self.resizeDocks([self.dock_explorer, self.dock_props], [320, 420], QtCore.Qt.Horizontal)
+        self.resizeDocks([self.dock_explorer, self.dock_props], [180, 250], QtCore.Qt.Horizontal)
 
         # Liga botões "Janelas" do ribbon aos docks (reabrir Explorer/Inspector)
         if hasattr(self, "btn_toggle_explorer") and isinstance(self.btn_toggle_explorer, QtWidgets.QToolButton):
@@ -3477,10 +3841,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def change_thickness_mode(self, label):
         self.state["thickness_mode"] = label
-        
-        # Se saiu do modo Entropia, restaura o colormap padrão (plasma)
-        if label != "Entropy":
-            self.state["thickness_cmap"] = "plasma"
 
         # 1. Atualiza Visualização PRINCIPAL
         if "update_thickness" in self.state and callable(self.state["update_thickness"]):
@@ -3497,7 +3857,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "active_comp_states"):
             for st in self.active_comp_states:
                 st["thickness_mode"] = label
-                if label != "Entropy": st["thickness_cmap"] = "plasma"
                 
                 if "update_thickness" in st: st["update_thickness"]()
                 if "refresh" in st: st["refresh"]()
@@ -3618,7 +3977,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cols = self.multi_model_table.columnCount()
             
             # Atualiza visual da tabela e o set de dados interno
-            for c in range(2, cols): # Colunas de modelos começam no índice 2
+            for c in range(1, cols):  # Colunas de modelos começam no índice 1
                 # Tenta descobrir o model_key olhando para o UserRole da primeira célula válida da coluna
                 model_key = None
                 for r_chk in range(rows):
@@ -3778,41 +4137,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_compare_2d_maps()
     
     def switch_perspective(self, mode):
-        """Alterna entre visualização (0) e comparação (1)."""
+        """Alterna entre visualização (0), comparação (1) e incerteza (2)."""
+        self.current_perspective = mode
+
+        # --- CONTROLE DE VISIBILIDADE DOS DOCKS ---
+        if mode == "uncertainty":
+            # Esconde Explorer e Inspector
+            if hasattr(self, "dock_explorer"): self.dock_explorer.hide()
+            if hasattr(self, "dock_props"): self.dock_props.hide()
+        else:
+            # Mostra Explorer e Inspector nos outros modos
+            if hasattr(self, "dock_explorer"): self.dock_explorer.show()
+            if hasattr(self, "dock_props"): self.dock_props.show()
+
+        # --- LÓGICA DE STACKS ---
         if mode == "visualization":
             self.central_stack.setCurrentIndex(0)
             self.act_persp_viz.setChecked(True)
             self.act_persp_comp.setChecked(False)
-
-            if hasattr(self, "inspector_tabs"):
-                self.inspector_tabs.setCurrentWidget(self.page_props)
-
-            # --- CORREÇÃO: Checkboxes sempre VISÍVEIS (necessário para o Ranking) ---
-            self.toggle_tree_checkboxes(True)
-            
-            # Opcional: Expandir tudo para facilitar visualização
-            # self.project_tree.expandAll()
-
-            if hasattr(self, "act_view_3d"):
-                self.act_view_3d.setChecked(True)
+            if hasattr(self, "act_view_uncert"): self.act_view_uncert.setChecked(False)
+            if hasattr(self, "act_view_3d"): self.act_view_3d.setChecked(True)
             self.show_main_3d_view()
 
         elif mode == "comparison":
             self.central_stack.setCurrentIndex(1)
             self.act_persp_viz.setChecked(False)
             self.act_persp_comp.setChecked(True)
-
-            if hasattr(self, "inspector_tabs"):
-                self.inspector_tabs.setCurrentWidget(self.page_compare)
-
-            # Garante checkboxes visíveis
-            self.toggle_tree_checkboxes(True)
-            
-            # Atualiza a vista de comparação
+            if hasattr(self, "act_view_uncert"): self.act_view_uncert.setChecked(False)
             checked_models = self.get_checked_models()
             self.update_dynamic_comparison_view(checked_models)
 
-        self.current_perspective = mode
+        elif mode == "uncertainty":
+            self.central_stack.setCurrentIndex(2)
+            self.act_persp_viz.setChecked(False)
+            self.act_persp_comp.setChecked(False)
+            if hasattr(self, "act_view_uncert"): self.act_view_uncert.setChecked(True)
 
     
     def update_comparison_tables_multi(self, checked_models):
@@ -4042,7 +4401,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plotter.add_text("GRID OFF", font_size=12)
             else:
                 # CORREÇÃO 2: Injeta o thickness_mode no estado inicial
-                local_state = {"thickness_mode": thickness_mode}
+                local_state = {"thickness_mode": thickness_mode, "thickness_cmap": self.state.get("thickness_cmap", "plasma"), "current_scalar_cmap": self.state.get("current_scalar_cmap", self.state.get("thickness_cmap", "plasma"))}
                 
                 _, local_state = run(
                     mode=mode,

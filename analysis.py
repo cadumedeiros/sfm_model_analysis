@@ -1079,9 +1079,8 @@ def generate_detailed_metrics_df(facies_array, target_grid=None):
 
 def compute_facies_entropy_map(list_of_facies_arrays, target_grid=None):
     """
-    Calcula a entropia de Shannon célula a célula para uma lista de arrays de fácies.
+    Calcula a entropia de Shannon célula a célula para Fácies (Discreto).
     H(x) = - sum(p * log(p))
-    Retorna array 1D com valores de entropia.
     """
     import numpy as np
     
@@ -1089,39 +1088,57 @@ def compute_facies_entropy_map(list_of_facies_arrays, target_grid=None):
         if target_grid: return np.zeros(target_grid.n_cells)
         return np.array([])
 
-    # Empilha arrays: (N_modelos, N_celulas)
-    # Cuidado: Todos devem ter o mesmo tamanho. Filtre antes se necessário.
     try:
+        # Stack shape: (N_modelos, N_celulas)
         stack = np.vstack(list_of_facies_arrays)
     except ValueError:
-        # Se tamanhos forem diferentes, falha graciosamente
         if target_grid: return np.zeros(target_grid.n_cells)
         return np.array([])
 
     n_models, n_cells = stack.shape
-    
-    if n_models < 1:
-        return np.zeros(n_cells)
+    if n_models < 1: return np.zeros(n_cells)
 
-    # Identifica todas as fácies únicas presentes no conjunto
-    unique_facies = np.unique(stack)
-    
+    # Identifica todas as classes únicas
+    unique_vals = np.unique(stack)
     entropy_map = np.zeros(n_cells, dtype=float)
     
-    # Cálculo Vetorizado
-    for f in unique_facies:
-        # Conta quantas vezes a fácies 'f' aparece em cada célula (ao longo dos modelos)
-        counts = (stack == f).sum(axis=0)
-        
-        # Probabilidade p(x)
+    # Vetorizado: para cada fácies, calcula P(x) e soma -P*log(P)
+    for val in unique_vals:
+        # Conta ocorrências desta fácies em cada célula
+        counts = (stack == val).sum(axis=0)
         probs = counts / n_models
         
-        # Entropia: -p * log(p)
-        # Usamos máscara para evitar log(0)
+        # Evita log(0)
         mask = probs > 0
         p_valid = probs[mask]
         
-        term = -p_valid * np.log(p_valid)
-        entropy_map[mask] += term
+        entropy_map[mask] -= p_valid * np.log(p_valid)
         
     return entropy_map
+
+def compute_continuous_uncertainty_map(list_of_arrays, target_grid=None, metric="std"):
+    """
+    Calcula incerteza para variáveis contínuas (ex: Porosidade, NTG).
+    metric="std" -> Desvio Padrão (Standard Deviation)
+    metric="var" -> Variância
+    metric="range" -> Max - Min
+    """
+    import numpy as np
+    
+    if not list_of_arrays:
+        if target_grid: return np.zeros(target_grid.n_cells)
+        return np.array([])
+
+    try:
+        stack = np.vstack(list_of_arrays) # (N_modelos, N_celulas)
+    except ValueError:
+        return np.zeros(target_grid.n_cells) if target_grid else np.array([])
+
+    if metric == "std":
+        return np.std(stack, axis=0)
+    elif metric == "var":
+        return np.var(stack, axis=0)
+    elif metric == "range":
+        return np.ptp(stack, axis=0) # Peak to peak (Max - Min)
+    
+    return np.zeros(stack.shape[1])
