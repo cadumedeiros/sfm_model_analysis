@@ -3116,10 +3116,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if model_key in self.models:
                     model_name = self.models[model_key].get("name", str(model_key))
                 
-                full_title = f"{model_name}\n{title_suffix}"
+                full_title = f"{title_suffix}"  # nome do modelo já aparece no painel
                 
                 if grid:
-                    self._draw_2d_map_local(plotter, grid, scalar, full_title)
+                    self._draw_2d_map_local(plotter, grid, scalar, full_title, show_scalar_bar=True, scalar_bar_title=title_suffix)
 
     def _draw_2d_map_local(
         self,
@@ -3131,6 +3131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cmap=None,
         show_scalar_bar=True,
         scalar_bar_title=None,
+        clim_override=None,
     ):
         """Desenha um mapa 2D (coluna) no BackgroundPlotter, usando a paleta do estado."""
         import pyvista as pv
@@ -3138,6 +3139,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Limpa o plotter antes de desenhar
         plotter.clear()
+        # Remove barras antigas (pyvista pode manter widgets após clear)
+        try:
+            plotter.remove_scalar_bar()
+        except Exception:
+            pass
 
         if grid_source is None or scalar_name_3d not in getattr(grid_source, "cell_data", {}):
             plotter.render()
@@ -3189,7 +3195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         surf.cell_data[name2d] = arr
 
         # Limites de cor
-        clim = get_2d_clim(scalar_name_3d, arr)
+        clim = clim_override if clim_override is not None else get_2d_clim(scalar_name_3d, arr)
 
         # Paleta: usa a do estado se não vier explícita
         if cmap is None:
@@ -4140,6 +4146,13 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Atualiza 2D maps
             self.update_compare_2d_maps()
+
+            # Se estiver na aba 2D da comparação, reconstrói os mapas
+            if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 2:
+                try:
+                    self.update_dynamic_comparison_2d(self.get_checked_models())
+                except Exception as e:
+                    print(f"[toggle_all_multi_model] update_dynamic_comparison_2d falhou: {e}")
     
     def fill_unified_facies_table(self):
         """Preenche a tabela unificada com a união das fácies dos dois modelos."""
@@ -4653,13 +4666,38 @@ class MainWindow(QtWidgets.QMainWindow):
             # Se não fizermos isso, o st["refresh"]() vai usar o valor antigo e desfazer tudo.
             st["reservoir_facies"] = target_set
             
-            # Agora pode chamar o refresh seguro
+            
+
+            # Recalcula campos derivados (Reservoir/Clusters/Verticais) no state visual
+            if "update_reservoir_fields" in st:
+                try:
+                    st["update_reservoir_fields"](target_set)
+                except Exception as e:
+                    print(f"[on_multi_model_filter_changed] update_reservoir_fields falhou: {e}")
+
+            # Se estiver em modo de espessura local, atualiza o scalar (para refletir novo reservatório)
+            if st.get("mode") == "thickness_local" and "update_thickness" in st:
+                try:
+                    st["update_thickness"]()
+                except Exception:
+                    pass
+
+# Agora pode chamar o refresh seguro
             if "refresh" in st:
                 st["refresh"]()
             
             # Força renderização imediata
             if "plotter_ref" in st:
                 st["plotter_ref"].render()
+
+        # Se estiver na aba 2D da comparação, reconstrói os mapas para refletir o novo reservatório
+        if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 2:
+            try:
+                self.update_dynamic_comparison_2d(self.get_checked_models())
+            except Exception as e:
+                print(f"[on_multi_model_filter_changed] update_dynamic_comparison_2d falhou: {e}")
+
+
 
         # 3. Atualiza tabela de métricas se visível
         if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 1:
@@ -4870,36 +4908,98 @@ class MainWindow(QtWidgets.QMainWindow):
         from load_data import grid as global_grid
         base_grid = self.models.get("base", {}).get("grid") or self.state.get("current_grid_source") or global_grid
 
-        for idx, (model_key, model_name) in enumerate(normalized):
-            row, col = idx // cols, idx % cols
-            model_data = self.models[model_key]
+        
 
-            p2d = BackgroundPlotter(show=False)
-            self.active_comp_2d_plotters.append(p2d)
-
+        # Pré-prepara grids (já com métricas verticais recalculadas) para podermos
+        # calcular uma escala de cores GLOBAL (comparável) quando necessário.
+        prepared = []
+        for (model_key, model_name) in normalized:
+            model_data = self.models.get(model_key, {})
             src_grid = model_data.get("grid") or base_grid
             if src_grid is None:
                 continue
 
             temp_grid = src_grid.copy(deep=True)
-            temp_grid.cell_data["Facies"] = model_data["facies"]
+            temp_grid.cell_data["Facies"] = model_data.get("facies")
 
-            # Recalcula métricas verticais para este modelo
-            self.recalc_vertical_metrics(temp_grid, model_data["facies"], model_data["reservoir_facies"])
+            # Recalcula métricas verticais para este modelo (espessura, maior pacote, n pacotes etc.)
+            try:
+                self.recalc_vertical_metrics(temp_grid, model_data.get("facies"), model_data.get("reservoir_facies"))
+            except Exception as e:
+                print(f"[compare_2d] recalc_vertical_metrics falhou para {model_name}: {e}")
 
-            # Desenha
+            prepared.append((model_key, model_name, temp_grid))
+
+        # Escala GLOBAL para comparar por cor (somente para: Espessura, Maior Pacote, Nº Pacotes)
+        clim_override = None
+        thickness_like = {"vert_Ttot_reservoir", "vert_Tpack_max_reservoir", "vert_n_packages_reservoir"}
+        if scalar in thickness_like:
+            import numpy as np
+
+            def _infer_dims(g):
+                # cells = (dims_pts - 1)
+                try:
+                    dims_pts = getattr(g, "dimensions", None)
+                    if dims_pts and len(dims_pts) == 3:
+                        cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
+                        if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == g.n_cells):
+                            return cx, cy, cz
+                except Exception:
+                    pass
+                try:
+                    from load_data import nx as lnx, ny as lny, nz as lnz
+                    return int(lnx), int(lny), int(lnz)
+                except Exception:
+                    return None
+
+            vmax_global = 0.0
+            for _, _, g in prepared:
+                if g is None or scalar not in getattr(g, 'cell_data', {}):
+                    continue
+                dims = _infer_dims(g)
+                if not dims:
+                    continue
+                nx, ny, nz = dims
+                try:
+                    arr = np.asarray(g.cell_data[scalar], dtype=float).reshape((nx, ny, nz), order='F')
+                    # Para esses modos, o 2D é max em K, então o vmax global é simplesmente o max do 3D (>0)
+                    arr = np.where(arr > 0, arr, np.nan)
+                    vmax = float(np.nanmax(arr))
+                    if np.isfinite(vmax) and vmax > vmax_global:
+                        vmax_global = vmax
+                except Exception:
+                    continue
+            
+            if np.isfinite(vmax_global) and vmax_global > 0:
+                clim_override = (0.0, vmax_global)
+        # --- DESENHA ---
+        for idx, (model_key, model_name, temp_grid) in enumerate(prepared):
+            # Paleta atual (modo Espessura usa thickness_cmap; propriedades usam current_scalar_cmap)
+            if scalar.startswith("vert_") or scalar in {"vert_Ttot_reservoir", "vert_Tpack_max_reservoir", "vert_n_packages_reservoir"}:
+                cmap_use = self.state.get("thickness_cmap") or self.state.get("current_scalar_cmap") or "plasma"
+            else:
+                cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
+
+            row, col = idx // cols, idx % cols
+
+            p2d = BackgroundPlotter(show=False)
+            self.active_comp_2d_plotters.append(p2d)
+
+            # Desenha: título da legenda = SOMENTE propriedade (nome do modelo já está no cabeçalho da janela)
             self._draw_2d_map_local(
                 p2d,
                 temp_grid,
                 scalar,
                 title,
-                cmap=self.state.get("thickness_cmap", "plasma"),
-                show_scalar_bar=False,
+                cmap=cmap_use,
+                show_scalar_bar=True,
+                scalar_bar_title=title,
+                clim_override=clim_override,
             )
 
             w = QtWidgets.QWidget()
             vl = QtWidgets.QVBoxLayout(w)
-            vl.setContentsMargins(0,0,0,0)
+            vl.setContentsMargins(0, 0, 0, 0)
             vl.setSpacing(0)
 
             lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
@@ -4908,10 +5008,6 @@ class MainWindow(QtWidgets.QMainWindow):
             vl.addWidget(p2d.interactor)
 
             grid_layout.addWidget(w, row, col)
-
-        # Atualiza filtro matriz (multi-model)
-        self._build_multi_model_filter_table(normalized)
-
 
     def on_tree_item_changed(self, item, column):
         """Lida com alterações na árvore (Modelos, Studies e Poços) com lógica Pai/Filho manual."""
@@ -5494,7 +5590,7 @@ class MainWindow(QtWidgets.QMainWindow):
             min_bins=1,
             link_alpha=0.18
         )
-        ax4a.set_title("Correlação Estratigráfica", fontsize=10, pad=10)
+        
         
         canvas4a = FigureCanvas(fig4a)
         

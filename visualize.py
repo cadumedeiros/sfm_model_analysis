@@ -40,6 +40,24 @@ def get_2d_clim(base_scalar_name, arr=None):
     Caso contrário, usa os próprios dados como fallback.
     """
     preset = THICKNESS_2D_CLIM.get(base_scalar_name)
+
+    # Para alguns campos de "espessura" a escala NÃO deve ser fixa (ex.: 0–200),
+    # porque isso atrapalha a comparação quando os modelos mudam. Para esses casos,
+    # usamos os próprios dados (quando arr foi fornecido) e fixamos apenas o vmin em 0.
+    if arr is not None and base_scalar_name in (
+        "vert_Ttot_reservoir",
+        "vert_Tpack_max_reservoir",
+        "vert_n_packages_reservoir",
+    ):
+        arr = np.asarray(arr)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return (0.0, 1.0)
+        vmax = float(np.nanmax(finite))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+        return (0.0, vmax)
+
     if preset is not None:
         return preset
 
@@ -98,56 +116,24 @@ def make_clusters_lut(clusters_arr):
 
 def prepare_grid_indices(target_grid):
     """
-    Adiciona índices I, J, K (estruturais) como escalares no grid para permitir
-    filtros (cortes) e extrações por coluna de forma robusta.
-
-    IMPORTANTe: inferimos (nx, ny, nz) do PRÓPRIO grid (ou fallback do load_data),
-    evitando inconsistências quando múltiplos grids/modelos são carregados.
+    Adiciona índices I, J, K (estruturais) como escalares no grid
+    para permitir filtros de threshold (cortes) rápidos.
     """
-    import numpy as np
-
-    if target_grid is None:
-        return target_grid
-
-    # --- Inferir dims de CÉLULAS a partir das dimensions (de pontos) ---
-    nx = ny = nz = None
-    try:
-        dims_pts = getattr(target_grid, "dimensions", None)
-        if dims_pts and len(dims_pts) == 3:
-            cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
-            if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == target_grid.n_cells):
-                nx, ny, nz = cx, cy, cz
-    except Exception:
-        pass
-
-    # --- Fallback: pega nx/ny/nz atuais do load_data (não os congelados no import) ---
-    if nx is None:
-        try:
-            from load_data import nx as lnx, ny as lny, nz as lnz
-            if int(lnx) * int(lny) * int(lnz) == target_grid.n_cells:
-                nx, ny, nz = int(lnx), int(lny), int(lnz)
-        except Exception:
-            pass
-
-    if nx is None:
-        # sem dims coerentes, não cria índices
-        return target_grid
-
-    # --- K index (Bottom -> Top) ---
+    # K index (Bottom -> Top)
     if "k_index" not in target_grid.cell_data:
         k3d = np.zeros((nx, ny, nz), dtype=int)
         for k in range(nz):
-            k3d[:, :, k] = nz - 1 - k  # K=0 é base, K=nz-1 é topo
+            k3d[:, :, k] = nz - 1 - k # K=0 é base, K=nz-1 é topo
         target_grid.cell_data["k_index"] = k3d.reshape(-1, order="F")
 
-    # --- I index ---
+    # I index (X axis)
     if "i_index" not in target_grid.cell_data:
         i3d = np.zeros((nx, ny, nz), dtype=int)
         for i in range(nx):
             i3d[i, :, :] = i
         target_grid.cell_data["i_index"] = i3d.reshape(-1, order="F")
 
-    # --- J index ---
+    # J index (Y axis)
     if "j_index" not in target_grid.cell_data:
         j3d = np.zeros((nx, ny, nz), dtype=int)
         for j in range(ny):
@@ -495,20 +481,21 @@ def run(
                 except: mesh_bg, mesh_main = mesh, None
                 
                 scalar_name = s_name
-                cmap = state.get("thickness_cmap", "plasma") 
+                cmap = state.get("thickness_cmap", "plasma")
                 
-                if mesh_main and mesh_main.n_cells > 0:
+                # Se a comparação quiser uma escala global (mesmo vmax para todos),
+                # ela pode preencher state["thickness_global_clim"].
+                if state.get("thickness_global_clim") is not None:
+                    clim = state["thickness_global_clim"]
+                elif mesh_main and mesh_main.n_cells > 0:
                     arr = mesh_main.cell_data[s_name]
                     vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-                    if vmax <= vmin: vmax = vmin + 1e-6
-                    clim = (vmin, vmax)
+                    # para espessura, vmin em geral deve ser >= 0
+                    if not np.isfinite(vmin) or vmin < 0: vmin = 0.0
+                    if not np.isfinite(vmax) or vmax <= vmin: vmax = vmin + 1e-6
+                    clim = (float(vmin), float(vmax))
                 else:
                     clim = (0.0, 1.0)
-
-            else:
-                # Propriedade não existe neste grid -> deixa transparente
-                show_scalar = False
-                opacity_main = 0.0
 
         elif mode == "scalar":
             s_name = state.get("current_scalar_name")
@@ -530,7 +517,6 @@ def run(
             else:
                 mesh_main = mesh
                 show_scalar = False
-                opacity_main = 0.0
 
         def sync_actor(actor_key, mesh_data, is_bg=False):
             actor = state.get(actor_key)
@@ -551,21 +537,8 @@ def run(
             
             actor.SetVisibility(True)
             actor.mapper.SetInputData(mesh_data)
-
-            # Garante que não "vaze" scalar visibility entre modos
-            if not show_scalar:
-                try:
-                    actor.mapper.SetScalarVisibility(False)
-                except Exception:
-                    pass
-
+            
             if is_bg: return actor
-
-            # Aplica opacidade (para deixar "vazio" quando faltar propriedade)
-            try:
-                actor.GetProperty().SetOpacity(float(opacity_main))
-            except Exception:
-                pass
 
             if show_scalar and scalar_name and scalar_name in mesh_data.cell_data:
                 actor.mapper.SetScalarVisibility(True)
@@ -677,7 +650,7 @@ def run(
     state["refresh"] = _refresh
     return plotter, state
 
-def show_thickness_2d(surf, scalar_name, title=None, cmap="plasma"):
+def show_thickness_2d(surf, scalar_name, title=None):
     # 1) limpa valores negativos (viram NaN)
     arr = surf.cell_data[scalar_name]
     arr = np.where(arr < 0, np.nan, arr)
@@ -692,7 +665,7 @@ def show_thickness_2d(surf, scalar_name, title=None, cmap="plasma"):
     p.add_mesh(
         surf,
         scalars=scalar_name,
-        cmap=cmap,
+        cmap="plasma",
         show_edges=True,
         edge_color="black",
         line_width=0.5,
@@ -709,7 +682,7 @@ def show_thickness_2d(surf, scalar_name, title=None, cmap="plasma"):
     p.show()
 
 
-def update_2d_plot(plotter, array_name_3d, title="Mapa 2D", cmap="plasma"):
+def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
     surf = make_thickness_2d_from_grid(array_name_3d, array_name_3d + "_2d")
     scalar_name_2d = array_name_3d + "_2d"
 
