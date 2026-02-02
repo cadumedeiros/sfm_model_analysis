@@ -151,7 +151,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wells = {}
         
         self.facies_colors = load_facies_colors() # Sua função
-        self.markers_db = load_markers("assets/wellMarkers.txt")
+        #self.markers_db = load_markers("/wellMarkers.txt")
+        ## Mudar para ser automatico conforme o projeto, por enquanto:
+        self.markers_db = load_markers(r"C:\Users\08378950905\Documents\root\m_chaves\input_base\wellMarkers.txt")
+
         
         # Criação do Colormap
         self.pv_cmap = None
