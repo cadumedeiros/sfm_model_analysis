@@ -11,35 +11,58 @@ APPLY_REFLECTION = True
 def load_facies_colors(path=None):
     """
     Lê o arquivo color_reference_facies.txt e devolve um dict
-    {facie_int: (r, g, b, a)} com floats.
-    Ignora o cabeçalho "Facie R G B A".
+    {facie_id: (r, g, b, a)} com floats.
+
+    Observação:
+    - `facie_id` será `int` quando possível (ex.: "23" -> 23)
+      e `str` quando o identificador não for numérico (ex.: "A", "AB").
+    - Linhas de comentário (começando com '#') são ignoradas.
+    - A linha de cabeçalho "Facie R G B A" (ou variações) é ignorada.
+    """
+    ref = load_facies_reference(path)
+    return {facie_id: rgba for facie_id, rgba in ref}
+
+
+def load_facies_reference(path=None):
+    """Carrega a referência completa de fácies e cores.
+
+    Retorna uma lista ordenada (na ordem do arquivo):
+        [(facie_id, (r,g,b,a)), ...]
+
+    `facie_id` é `int` quando possível, senão `str`.
     """
     if path is None:
-        # tenta achar o arquivo na mesma pasta deste .py
         path = os.path.join(os.path.dirname(__file__), "assets/color_reference_facies.txt")
 
-    colors = {}
-    with open(path, "r") as f:
-        lines = f.readlines()
+    ref = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
 
-    # pula a primeira linha (cabeçalho)
-    for line in lines[1:]:
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split()
-        # garante que a primeira coluna é número
-        if not parts[0].isdigit():
-            continue
+            parts = line.replace("\t", " ").split()
+            if len(parts) < 5:
+                continue
 
-        facie = int(parts[0])
-        r = float(parts[1])
-        g = float(parts[2])
-        b = float(parts[3])
-        a = float(parts[4])
-        colors[facie] = (r, g, b, a)
+            if parts[0].lower() in ("facie", "facies", "facies_id", "faciesid"):
+                continue
 
-    return colors
+            facie_tok = parts[0]
+            try:
+                facie_id = int(facie_tok)
+            except ValueError:
+                facie_id = facie_tok
+
+            try:
+                r, g, b, a = map(float, parts[1:5])
+            except ValueError:
+                continue
+
+            ref.append((facie_id, (r, g, b, a)))
+
+    return ref
+
 
 def load_markers(path):
     """

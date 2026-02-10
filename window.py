@@ -5,12 +5,13 @@ from pyvistaqt import BackgroundPlotter
 import numpy as np
 import os
 import pandas as pd
+import json
 from scipy.ndimage import label, generate_binary_structure
 from matplotlib.colors import ListedColormap
 
 from visualize import run, get_2d_clim, make_clusters_lut, compute_cluster_sizes, prepare_grid_indices
 from load_data import facies, nx, ny, nz
-from config import load_facies_colors, load_markers
+from config import load_facies_colors, load_facies_reference, load_markers
 
 from analysis import (
     facies_distribution_array,
@@ -122,6 +123,258 @@ def make_facies_table():
     return table
 
 # --- CLASSE PRINCIPAL ---
+
+class FaciesGroupingDialog(QtWidgets.QDialog):
+    """Diálogo para configurar agrupamentos (grupos) de fácies a partir do color_reference_facies.txt.
+
+    A ideia é: cada fácies original recebe um ID de "grupo" (que também é um ID de fácies existente na referência).
+    O resto do software pode então operar sobre a fácies agrupada como se fosse uma fácies normal.
+
+    Formato de persistência (JSON):
+        {
+          "version": 1,
+          "mapping": {"231": 23, "232": 23, ...}
+        }
+    """
+
+    def __init__(self, facies_reference, colors_dict, current_mapping=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configuração de Grupos de Fácies")
+        self.resize(720, 520)
+
+        # lista ordenada [(facies, rgba), ...]
+        self.facies_reference = list(facies_reference or [])
+        self.colors_dict = dict(colors_dict or {})
+
+        self.facies_ids = [int(f) for f, _ in self.facies_reference]
+        self.allowed_groups = set(self.facies_ids)
+
+        # mapping {orig:int -> group:int}
+        if current_mapping is None:
+            self.mapping = {int(fid): int(fid) for fid in self.facies_ids}
+        else:
+            self.mapping = {int(k): int(v) for k, v in dict(current_mapping).items()}
+            # completa faltantes com identidade
+            for fid in self.facies_ids:
+                self.mapping.setdefault(int(fid), int(fid))
+
+        self._building = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # Filtro + ações em massa
+        top = QtWidgets.QHBoxLayout()
+        self.txt_filter = QtWidgets.QLineEdit()
+        self.txt_filter.setPlaceholderText("Filtrar fácies... (ex.: 23, 231, 11)")
+        self.txt_filter.textChanged.connect(self._apply_filter)
+        top.addWidget(self.txt_filter, 1)
+
+        self.cmb_mass_group = QtWidgets.QComboBox()
+        self.cmb_mass_group.setToolTip("Grupo a aplicar nas linhas selecionadas")
+        for fid in self.facies_ids:
+            self.cmb_mass_group.addItem(str(fid), int(fid))
+        top.addWidget(self.cmb_mass_group)
+
+        btn_apply = QtWidgets.QPushButton("Aplicar ao selecionado")
+        btn_apply.clicked.connect(self._apply_group_to_selection)
+        top.addWidget(btn_apply)
+
+        layout.addLayout(top)
+
+        # Tabela
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Cor", "Fácies", "Grupo", "Cor Grupo"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.table.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.table, 1)
+
+        # Botões
+        btns = QtWidgets.QHBoxLayout()
+        btn_reset_sel = QtWidgets.QPushButton("Reset selecionados")
+        btn_reset_sel.clicked.connect(self._reset_selected)
+        btns.addWidget(btn_reset_sel)
+
+        btn_reset_all = QtWidgets.QPushButton("Reset tudo")
+        btn_reset_all.clicked.connect(self._reset_all)
+        btns.addWidget(btn_reset_all)
+
+        btns.addStretch(1)
+
+        btn_load = QtWidgets.QPushButton("Carregar...")
+        btn_load.clicked.connect(self._load_json)
+        btns.addWidget(btn_load)
+
+        btn_save = QtWidgets.QPushButton("Salvar...")
+        btn_save.clicked.connect(self._save_json)
+        btns.addWidget(btn_save)
+
+        btn_ok = QtWidgets.QPushButton("OK")
+        btn_ok.clicked.connect(self.accept)
+        btns.addWidget(btn_ok)
+
+        btn_cancel = QtWidgets.QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_cancel)
+
+        layout.addLayout(btns)
+
+        self._populate_table()
+
+    def get_mapping(self):
+        # garante ints
+        return {int(k): int(v) for k, v in self.mapping.items()}
+
+    # ---------- UI helpers ----------
+    def _populate_table(self):
+        self._building = True
+        try:
+            self.table.setRowCount(len(self.facies_ids))
+            for row, fid in enumerate(self.facies_ids):
+                # Cor original
+                rgba = self.colors_dict.get(int(fid), (0.8, 0.8, 0.8, 1.0))
+                c = QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255))
+                item_c = QtWidgets.QTableWidgetItem()
+                item_c.setBackground(QBrush(c))
+                item_c.setFlags(QtCore.Qt.ItemIsEnabled)
+                self.table.setItem(row, 0, item_c)
+
+                # ID facies
+                item_id = QtWidgets.QTableWidgetItem(str(int(fid)))
+                item_id.setData(QtCore.Qt.UserRole, int(fid))
+                item_id.setFlags(QtCore.Qt.ItemIsEnabled)
+                self.table.setItem(row, 1, item_id)
+
+                # Grupo (editável)
+                g = int(self.mapping.get(int(fid), int(fid)))
+                item_g = QtWidgets.QTableWidgetItem(str(g))
+                item_g.setData(QtCore.Qt.UserRole, int(fid))
+                item_g.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsSelectable)
+                self.table.setItem(row, 2, item_g)
+
+                # Cor do grupo
+                self._set_group_color_cell(row, g)
+
+        finally:
+            self._building = False
+
+        self.table.resizeColumnsToContents()
+
+    def _set_group_color_cell(self, row, group_id):
+        rgba_g = self.colors_dict.get(int(group_id), (0.6, 0.6, 0.6, 1.0))
+        cg = QColor(int(rgba_g[0]*255), int(rgba_g[1]*255), int(rgba_g[2]*255))
+        item_cg = QtWidgets.QTableWidgetItem()
+        item_cg.setBackground(QBrush(cg))
+        item_cg.setFlags(QtCore.Qt.ItemIsEnabled)
+        self.table.setItem(row, 3, item_cg)
+
+    def _apply_filter(self, text):
+        t = (text or "").strip()
+        for row in range(self.table.rowCount()):
+            fid = self.table.item(row, 1).text()
+            show = (t == "") or (t in fid) or (t in self.table.item(row, 2).text())
+            self.table.setRowHidden(row, not show)
+
+    def _apply_group_to_selection(self):
+        group_id = int(self.cmb_mass_group.currentData())
+        sel = self.table.selectionModel().selectedRows()
+        if not sel:
+            return
+        self._building = True
+        try:
+            for idx in sel:
+                row = idx.row()
+                fid = int(self.table.item(row, 1).text())
+                self.mapping[fid] = group_id
+                self.table.item(row, 2).setText(str(group_id))
+                self._set_group_color_cell(row, group_id)
+        finally:
+            self._building = False
+
+    def _reset_selected(self):
+        sel = self.table.selectionModel().selectedRows()
+        if not sel:
+            return
+        self._building = True
+        try:
+            for idx in sel:
+                row = idx.row()
+                fid = int(self.table.item(row, 1).text())
+                self.mapping[fid] = fid
+                self.table.item(row, 2).setText(str(fid))
+                self._set_group_color_cell(row, fid)
+        finally:
+            self._building = False
+
+    def _reset_all(self):
+        self.mapping = {int(fid): int(fid) for fid in self.facies_ids}
+        self._populate_table()
+
+    def _on_item_changed(self, item):
+        if self._building:
+            return
+        # Coluna 2 é grupo editável
+        if item.column() != 2:
+            return
+        try:
+            fid = int(item.data(QtCore.Qt.UserRole))
+        except Exception:
+            # fallback: usa coluna 1
+            try:
+                fid = int(self.table.item(item.row(), 1).text())
+            except Exception:
+                return
+
+        raw = (item.text() or "").strip()
+        try:
+            gid = int(raw)
+        except Exception:
+            gid = fid
+
+        self.mapping[int(fid)] = int(gid)
+        self._set_group_color_cell(item.row(), int(gid))
+
+    # ---------- Persistência ----------
+    def _load_json(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Carregar configuração", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            mapping = data.get("mapping", {}) if isinstance(data, dict) else {}
+            # converte chaves
+            new_map = {}
+            for k, v in mapping.items():
+                try:
+                    new_map[int(k)] = int(v)
+                except Exception:
+                    pass
+            # completa faltantes
+            for fid in self.facies_ids:
+                new_map.setdefault(int(fid), int(fid))
+            self.mapping = new_map
+            self._populate_table()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Erro", f"Falha ao carregar configuração:\n{e}")
+
+    def _save_json(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Salvar configuração", "", "JSON (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            data = {"version": 1, "mapping": {str(k): int(v) for k, v in self.get_mapping().items()}}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Erro", f"Falha ao salvar configuração:\n{e}")
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
         super().__init__()
@@ -141,6 +394,23 @@ class MainWindow(QtWidgets.QMainWindow):
             "base": {"name": "Modelo Base", "facies": facies, "reservoir_facies": set(initial_reservoir)},
             "compare": {"name": None, "facies": None, "reservoir_facies": set()},
         }
+
+        # --- Agrupamento de fácies (configuração) ---
+        # Baseado no color_reference_facies.txt (lista global de fácies e cores),
+        # e não no conteúdo de um modelo específico.
+        try:
+            self.facies_reference = load_facies_reference()
+        except Exception:
+            self.facies_reference = []
+        self.facies_colors_dict = load_facies_colors()
+        self.facies_grouping_map = {int(f): int(f) for f, _ in (self.facies_reference or [])}
+        self.use_facies_grouping = False
+        self._fg_src = np.array(sorted(self.facies_grouping_map.keys()), dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
+        self._fg_dst = np.array([self.facies_grouping_map[k] for k in self._fg_src], dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
+
+        # Mantém seleções de reservatório em raw e agrupado, para alternar sem perder intenção.
+        self.state_reservoir_raw = set(initial_reservoir)
+        self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
         
         # Cache de métricas (inclui dataframe da tabela detalhada)
         self.cached_metrics = {
@@ -167,8 +437,15 @@ class MainWindow(QtWidgets.QMainWindow):
             # Ex: se vai de 11 a 22, clim=[11, 22]
             self.clim = [ids[0], ids[-1]]
 
-        self.state = {"reservoir_facies": initial_reservoir, "mode": mode}
+        self.state = {"reservoir_facies": set(initial_reservoir), "mode": mode, "reservoir_facies_raw": set(initial_reservoir), "reservoir_facies_grouped": set(initial_reservoir)}
         self.compare_states = {"base": {}, "compare": {}}
+        # Inicializa conjuntos raw/agrupado (por enquanto identidade)
+        self.state["reservoir_facies_raw"] = set(self.state_reservoir_raw)
+        self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
+        self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
+        self.state["reservoir_facies"] = set(self.state_reservoir_raw)
+        self.state["current_facies_raw"] = np.asarray(facies).ravel().astype(np.int32)
+
         self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
         self.compare_path = None
         self.compare_facies = None
@@ -947,9 +1224,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 if mesh is not None and mesh.n_points > 0:
                     # A.1 Tubo
                     if "Facies_Real" in mesh.point_data and self.pv_cmap is not None:
+                        # Aplica agrupamento (config de fácies) também aos poços carregados
+                        scal_name = "Facies_Real"
+                        if getattr(self, "use_facies_grouping", False) and getattr(self, "facies_grouping_map", None):
+                            try:
+                                fr = np.asarray(mesh.point_data["Facies_Real"]).astype(np.int32)
+                                frg = self.apply_facies_grouping(fr)
+                                mesh.point_data["Facies_Real_Group"] = frg
+                                scal_name = "Facies_Real_Group"
+                            except Exception:
+                                scal_name = "Facies_Real"
                         actor_tube = self.plotter.add_mesh(
                             mesh,
-                            scalars="Facies_Real",
+                            scalars=scal_name,
                             cmap=self.pv_cmap,
                             clim=self.clim,
                             line_width=3,
@@ -2406,6 +2693,20 @@ class MainWindow(QtWidgets.QMainWindow):
         lgl = QtWidgets.QVBoxLayout(self.legend_group)
         lgl.setContentsMargins(2, 6, 2, 2)
 
+        # --- Agrupamento de fácies ---
+        h_group_cfg = QtWidgets.QHBoxLayout()
+        self.chk_use_facies_grouping = QtWidgets.QCheckBox("Usar grupos")
+        self.chk_use_facies_grouping.setToolTip("Aplica a configuração de grupos de fácies na visualização e nos filtros.")
+        self.chk_use_facies_grouping.setChecked(bool(getattr(self, "use_facies_grouping", False)))
+        self.chk_use_facies_grouping.toggled.connect(self.on_toggle_use_facies_grouping)
+        btn_cfg_groups = QtWidgets.QPushButton("Configurar…")
+        btn_cfg_groups.setToolTip("Definir agrupamentos (grupos) de fácies")
+        btn_cfg_groups.clicked.connect(self.open_facies_grouping_dialog)
+        h_group_cfg.addWidget(self.chk_use_facies_grouping)
+        h_group_cfg.addStretch(1)
+        h_group_cfg.addWidget(btn_cfg_groups)
+        lgl.addLayout(h_group_cfg)
+
         # --- NOVO: Botões de Seleção ---
         h_btn_leg = QtWidgets.QHBoxLayout()
         btn_sel_all = QtWidgets.QPushButton("Todos")
@@ -2616,6 +2917,16 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             target_facies = np.asarray(base_facies).ravel().astype(np.int32)
 
+        # Guarda facies raw e aplica agrupamento (se ativo)
+        target_facies_raw = target_facies
+        if bool(getattr(self, 'use_facies_grouping', False)):
+            try:
+                target_facies = self.apply_facies_grouping(target_facies_raw)
+            except Exception:
+                target_facies = target_facies_raw
+        else:
+            target_facies = target_facies_raw
+
         # --- preserva modo global ---
         desired_mode = self.state.get("mode", "facies")
 
@@ -2623,11 +2934,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.active_model_key = model_key_norm
         self.state["active_model_key"] = model_key_norm
         self.state["current_grid_source"] = source_grid
+        self.state["current_facies_raw"] = target_facies_raw
         self.state["current_facies"] = target_facies
         self.state["mode"] = desired_mode
 
         # garante Facies no grid atual (se possível)
         try:
+            try:
+                source_grid.cell_data["FaciesRaw"] = target_facies_raw
+            except Exception:
+                pass
             source_grid.cell_data["Facies"] = target_facies
         except Exception:
             pass
@@ -2884,9 +3200,27 @@ class MainWindow(QtWidgets.QMainWindow):
         from load_data import facies as base_facies
         from analysis import compute_global_metrics_for_array, generate_detailed_metrics_df
 
-        # Normaliza entrada (GLOBAL)
-        rf_global = set(int(x) for x in (reservoir_set or []))
-        self.state["reservoir_facies"] = set(rf_global)
+        # Normaliza entrada (GLOBAL) - respeita modo raw vs agrupado
+        rf_active = set(int(x) for x in (reservoir_set or []))
+
+        if bool(getattr(self, "use_facies_grouping", False)):
+            # Seleção recebida está no espaço de "grupos"
+            self.state_reservoir_grouped = set(rf_active)
+            inv = self._build_inverse_grouping()
+            rf_raw_global = set()
+            for g in self.state_reservoir_grouped:
+                rf_raw_global |= inv.get(int(g), {int(g)})
+            self.state_reservoir_raw = set(rf_raw_global)
+        else:
+            # Seleção recebida está no espaço raw
+            self.state_reservoir_raw = set(rf_active)
+            self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
+            rf_raw_global = set(self.state_reservoir_raw)
+
+        # Atualiza state (active = o que combina com a fácies exibida)
+        self.state["reservoir_facies_raw"] = set(self.state_reservoir_raw)
+        self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
+        self.state["reservoir_facies"] = set(self.state_reservoir_grouped if bool(getattr(self, "use_facies_grouping", False)) else self.state_reservoir_raw)
 
         # Atualiza "reservoir_facies" de cada modelo como interseção
         for mk, m in (self.models or {}).items():
@@ -2899,7 +3233,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             present = set(int(v) for v in np.unique(np.asarray(f).astype(int)))
             # Interseção: Só mantém fácies que existem no modelo E foram selecionadas
-            rf_local = set(rf_global & present)
+            rf_local = set(rf_raw_global & present)
             m["reservoir_facies"] = rf_local
             
             # --- CORREÇÃO: Recalcula Cache de Métricas para o modelo, passando o GRID correto ---
@@ -3806,10 +4140,118 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 
+    
+    # ------------------------------------------------------------------
+    # Agrupamento de fácies (UI/configuração)
+    # ------------------------------------------------------------------
+    def _rebuild_facies_grouping_cache(self):
+        """Reconstrói caches (src/dst) para aplicar mapeamento facies->grupo de forma rápida."""
+        try:
+            keys = sorted(int(k) for k in self.facies_grouping_map.keys())
+        except Exception:
+            keys = []
+        self._fg_src = np.array(keys, dtype=np.int32) if keys else np.array([], dtype=np.int32)
+        if keys:
+            self._fg_dst = np.array([int(self.facies_grouping_map.get(int(k), int(k))) for k in keys], dtype=np.int32)
+        else:
+            self._fg_dst = np.array([], dtype=np.int32)
+
+    def apply_facies_grouping(self, facies_array_1d):
+        """Aplica o mapeamento facies->grupo em um array 1D (int32) de fácies.
+
+        - Mantém valores que não existirem no mapping (ex.: 0, -999...) como estão.
+        - Implementação vetorizada via searchsorted para performance.
+        """
+        arr = np.asarray(facies_array_1d).ravel().astype(np.int32)
+        if not getattr(self, "facies_grouping_map", None):
+            return arr
+        if self._fg_src.size == 0:
+            return arr
+
+        flat = arr
+        idx = np.searchsorted(self._fg_src, flat)
+        mask = (idx < self._fg_src.size) & (self._fg_src[idx] == flat)
+        if not np.any(mask):
+            return flat
+        out = flat.copy()
+        out[mask] = self._fg_dst[idx[mask]]
+        return out
+
+    def _build_inverse_grouping(self):
+        inv = {}
+        for orig, grp in (self.facies_grouping_map or {}).items():
+            try:
+                o = int(orig); g = int(grp)
+            except Exception:
+                continue
+            inv.setdefault(g, set()).add(o)
+        return inv
+
+    def on_toggle_use_facies_grouping(self, checked):
+        """Alterna entre usar fácies originais (raw) e fácies agrupadas (grupo)."""
+        self.use_facies_grouping = bool(checked)
+
+        # Converte seleção de reservatório para manter intenção
+        if self.use_facies_grouping:
+            # raw -> grouped
+            self.state_reservoir_raw = set(self.state.get("reservoir_facies_raw", set()) or set())
+            self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
+        else:
+            # grouped -> raw (expande membros)
+            self.state_reservoir_grouped = set(self.state.get("reservoir_facies_grouped", set()) or set())
+            inv = self._build_inverse_grouping()
+            raw = set()
+            for g in self.state_reservoir_grouped:
+                raw |= inv.get(int(g), {int(g)})
+            self.state_reservoir_raw = raw
+
+        # Atualiza state
+        self.state["reservoir_facies_raw"] = set(self.state_reservoir_raw)
+        self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
+        self.state["reservoir_facies"] = set(self.state_reservoir_grouped if self.use_facies_grouping else self.state_reservoir_raw)
+
+        # Reaplica no modelo ativo para atualizar campo Facies, legenda e filtros
+        try:
+            self.switch_main_view_to_model(getattr(self, "active_model_key", "base"))
+        except Exception as e:
+            print("[on_toggle_use_facies_grouping] falhou:", e)
+            try:
+                self.populate_facies_legend()
+            except Exception:
+                pass
+
+    def open_facies_grouping_dialog(self):
+        """Abre o diálogo de configuração de grupos de fácies."""
+        dlg = FaciesGroupingDialog(self.facies_reference, self.facies_colors_dict, self.facies_grouping_map, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new_map = dlg.get_mapping()
+        self.facies_grouping_map = dict(new_map)
+        self._rebuild_facies_grouping_cache()
+
+        # Recalcula sets raw/agrupado conforme toggle atual
+        self.state_reservoir_raw = set(self.state.get("reservoir_facies_raw", set()) or set())
+        self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
+
+        self.state["reservoir_facies_raw"] = set(self.state_reservoir_raw)
+        self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
+        self.state["reservoir_facies"] = set(self.state_reservoir_grouped if self.use_facies_grouping else self.state_reservoir_raw)
+
+        # Atualiza visualização/legenda
+        try:
+            self.switch_main_view_to_model(getattr(self, "active_model_key", "base"))
+        except Exception as e:
+            print("[open_facies_grouping_dialog] refresh falhou:", e)
+            try:
+                self.populate_facies_legend()
+            except Exception:
+                pass
+
+
     def populate_facies_legend(self):
         """Preenche a legenda lateral com as estatísticas do GRID ATIVO na visualização."""
         self.facies_legend_table.blockSignals(True)
-        colors_dict = load_facies_colors()
+        colors_dict = getattr(self, 'facies_colors_dict', load_facies_colors())
         
         # CORREÇÃO: Usa as fácies do estado atual (Base ou Compare), não a global
         current_f = self.state.get("current_facies")
@@ -4056,6 +4498,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_filter_group = QtWidgets.QGroupBox("Filtro de Reservatório por Modelo")
         l_filt = QtWidgets.QVBoxLayout(self.comp_filter_group)
         
+        # --- Agrupamento de fácies ---
+        h_group_cfg = QtWidgets.QHBoxLayout()
+        self.chk_use_facies_grouping = QtWidgets.QCheckBox("Usar grupos")
+        self.chk_use_facies_grouping.setToolTip("Aplica a configuração de grupos de fácies na visualização e nos filtros.")
+        self.chk_use_facies_grouping.setChecked(bool(getattr(self, "use_facies_grouping", False)))
+        self.chk_use_facies_grouping.toggled.connect(self.on_toggle_use_facies_grouping)
+        btn_cfg_groups = QtWidgets.QPushButton("Configurar…")
+        btn_cfg_groups.setToolTip("Definir agrupamentos (grupos) de fácies")
+        btn_cfg_groups.clicked.connect(self.open_facies_grouping_dialog)
+        h_group_cfg.addWidget(self.chk_use_facies_grouping)
+        h_group_cfg.addStretch(1)
+        h_group_cfg.addWidget(btn_cfg_groups)
+        l_filt.addLayout(h_group_cfg)
+
         # --- NOVO: Botões de Seleção ---
         h_btn_multi = QtWidgets.QHBoxLayout()
         btn_all = QtWidgets.QPushButton("Todos")
@@ -5328,6 +5784,13 @@ class MainWindow(QtWidgets.QMainWindow):
         real_fac = real_fac.astype(int)
         base_fac = base_fac.astype(int)
         sim_fac = sim_fac.astype(int)
+        # Se agrupamento estiver ativo, aplica também aos logs do poço (REAL/BASE/SIM)
+        if getattr(self, "use_facies_grouping", False) and getattr(self, "facies_grouping_map", None):
+            real_fac = self.apply_facies_grouping(real_fac)
+            base_fac = self.apply_facies_grouping(base_fac)
+            sim_fac = self.apply_facies_grouping(sim_fac)
+            if best_fac is not None:
+                best_fac = self.apply_facies_grouping(np.asarray(best_fac).astype(int))
         all_facies = sorted(list(set(real_fac) | set(base_fac) | set(sim_fac)))
 
         # --- Janela ---
