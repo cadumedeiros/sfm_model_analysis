@@ -1462,7 +1462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return depth_out, fac_out, ttot_active
 
 
-    def _column_profile_from_grid(self, grid, x, y, *, i0=None, j0=None, return_ij=False):
+    def _column_profile_from_grid(self, grid, x, y, *, i0=None, j0=None, return_ij=False, facies_override=None):
         """
         Retorna um perfil vertical topo->base na coluna (i,j) do grid.
 
@@ -1497,13 +1497,21 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        # facies
-        fac = g.cell_data.get("Facies", None)
+        # facies (pode ser sobrescrita via facies_override)
+        fac = None
+        if facies_override is not None:
+            try:
+                fac = np.asarray(facies_override).astype(int)
+                if fac.size != g.n_cells:
+                    fac = None
+            except Exception:
+                fac = None
         if fac is None:
-            fac = np.zeros(g.n_cells, dtype=int)
-        else:
-            fac = np.asarray(fac).astype(int)
-
+            fac = g.cell_data.get("Facies", None)
+            if fac is None:
+                fac = np.zeros(g.n_cells, dtype=int)
+            else:
+                fac = np.asarray(fac).astype(int)
         # thickness: prioridade StratigraphicThickness
         th = None
         if "StratigraphicThickness" in g.cell_data:
@@ -1602,7 +1610,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not well or well.data is None or well.data.empty:
             return
 
-        from load_data import grid as base_grid
+        from load_data import grid as base_grid, facies as base_facies_global
         if base_grid is None:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Grid BASE não carregado.")
             return
@@ -1662,12 +1670,27 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Aviso", "Não consegui obter (X,Y) do poço para comparação.")
             return
 
-        xref, yref = xy
-        
-        # Base (sempre 1x1 no local)
-        base_depth, base_facies, _ = self._column_profile_from_grid(base_grid, xref, yref)
-        
-        # --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
+        xref, yref = xy        # Base (sempre 1x1 no local) - usa facies RAW do BASE para não ser contaminado pela facies do modelo ativo
+        base_facies_raw = None
+        try:
+            if base_grid is not None and hasattr(base_grid, "cell_data"):
+                fb = base_grid.cell_data.get("FaciesRaw", None)
+                if fb is not None:
+                    fb = np.asarray(fb).astype(int)
+                    if fb.size == getattr(base_grid, "n_cells", fb.size):
+                        base_facies_raw = fb
+        except Exception:
+            base_facies_raw = None
+        if base_facies_raw is None:
+            try:
+                base_facies_raw = np.asarray(base_facies_global).astype(int)
+            except Exception:
+                base_facies_raw = None
+
+        base_depth, base_facies, _ = self._column_profile_from_grid(
+            base_grid, xref, yref, facies_override=base_facies_raw
+        )
+# --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
         try:
             txt = self.cmb_debug_win.currentText()
             w_size = int(txt.split("x")[0])
