@@ -132,8 +132,8 @@ class FaciesGroupingDialog(QtWidgets.QDialog):
 
     Formato de persistência (JSON):
         {
-          "version": 1,
-          "mapping": {"231": 23, "232": 23, ...}
+        "version": 1,
+        "mapping": {"231": 23, "232": 23, ...}
         }
     """
 
@@ -376,9 +376,55 @@ class FaciesGroupingDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, mode, z_exag, show_scalar_bar, reservoir_facies):
+
+    # ------------------------------------------------------------------
+    # Compat: open_compare_dialog (some builds call this from the menu)
+    # ------------------------------------------------------------------
+    def open_compare_dialog(self):
+        """Abrir diálogo para carregar modelos adicionais (comparação)."""
+        # Prefer an existing dedicated dialog if present
+        fn = getattr(self, "open_compare_models_dialog", None)
+        if callable(fn):
+            return fn()
+
+        # Fallback: file picker + load_compare_model if available
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
+        )
+        if not paths:
+            return
+
+        study_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Novo Estudo",
+            "Nome do Estudo / Grupo de Calibração:",
+            text="Importação Recente",
+        )
+        if not ok or not study_name.strip():
+            study_name = "Importação Recente"
+
+        loader = getattr(self, "load_compare_model", None)
+        if not callable(loader):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Função indisponível",
+                "load_compare_model não está disponível nesta versão do window.py.",
+            )
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for path in paths:
+                loader(path, study_name=study_name)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    def __init__(self, mode="facies", z_exag=15.0, show_scalar_bar=True, reservoir_facies=None):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
+
+        if reservoir_facies is None:
+            reservoir_facies = {0}
 
         self.current_mode = mode
 
@@ -478,6 +524,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if top_item: 
             top_item.setExpanded(True)
             self.project_tree.setCurrentItem(top_item)
+
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.aboutToQuit.connect(self._cleanup_vtk)
+            except Exception:
+                pass
+
     
     def open_selected_well_reports(self):
         from PyQt5 import QtCore
@@ -614,68 +668,136 @@ class MainWindow(QtWidgets.QMainWindow):
         l_det.addWidget(self.facies_table, 3)
 
         self.viz_container.addWidget(self.details_tab)
-        
-        # Pag 3: Ranking (ATUALIZADO COM BOTÕES DE COPIAR e COLUNA STUDY)
+        # Pag 3: Ranking (SCORE POR PROPORÇÃO + VISÃO GERAL)
         self.ranking_tab = QtWidgets.QWidget()
         l_rank = QtWidgets.QVBoxLayout(self.ranking_tab)
         l_rank.setContentsMargins(8, 8, 8, 8)
-        
+        l_rank.setSpacing(6)
+
+        # --- Barra superior: parâmetros do score ---
+        h_ctrl = QtWidgets.QHBoxLayout()
+        lbl_rank = QtWidgets.QLabel("Ranking Global (score por proporção de fácies)")
+        lbl_rank.setStyleSheet("font-weight: 600;")
+        h_ctrl.addWidget(lbl_rank)
+        h_ctrl.addStretch(1)
+
+        h_ctrl.addWidget(QtWidgets.QLabel("t_min (m):"))
+        self.spin_rank_tmin = QtWidgets.QDoubleSpinBox()
+        self.spin_rank_tmin.setRange(0.0, 100.0)
+        self.spin_rank_tmin.setDecimals(2)
+        self.spin_rank_tmin.setSingleStep(0.05)
+        self.spin_rank_tmin.setValue(float(getattr(self, "well_rank_t_min", 0.30) or 0.30))
+        self.spin_rank_tmin.setToolTip(
+            "Espessura mínima para suavizar o log: segmentos < t_min são mesclados ao vizinho antes de calcular proporções."
+        )
+        self.spin_rank_tmin.valueChanged.connect(self._on_rank_params_changed)
+        h_ctrl.addWidget(self.spin_rank_tmin)
+
+        btn_recalc = QtWidgets.QPushButton("Recalcular")
+        btn_recalc.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+        btn_recalc.clicked.connect(self.update_ranking_view_content)
+        h_ctrl.addWidget(btn_recalc)
+
+        l_rank.addLayout(h_ctrl)
+
+        # --- Split: esquerda (tabelas) | direita (visão geral) ---
+        self.rank_main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        # ===== Esquerda: tabelas =====
+        w_left = QtWidgets.QWidget()
+        l_left = QtWidgets.QVBoxLayout(w_left)
+        l_left.setContentsMargins(0, 0, 0, 0)
+
         self.ranking_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        
-        # --- Container Superior: Tabela de Modelos ---
+
+        # --- Tabela de Modelos ---
         w_top = QtWidgets.QWidget()
         l_top = QtWidgets.QVBoxLayout(w_top)
         l_top.setContentsMargins(0, 0, 0, 0)
-        
+
         h_top_bar = QtWidgets.QHBoxLayout()
-        h_top_bar.addWidget(QtWidgets.QLabel("Ranking Global de Modelos"))
+        h_top_bar.addWidget(QtWidgets.QLabel("Ranking de Modelos"))
         h_top_bar.addStretch(1)
-        btn_copy_models = QtWidgets.QPushButton("Copiar Tabela")
+        btn_copy_models = QtWidgets.QPushButton("Copiar")
         btn_copy_models.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         btn_copy_models.clicked.connect(lambda: self._copy_table_to_clipboard(self.tbl_models))
         h_top_bar.addWidget(btn_copy_models)
         l_top.addLayout(h_top_bar)
 
         self.tbl_models = QtWidgets.QTableWidget()
-        # Colunas: Rank, Study, Modelo, Score, Fácies(acc), Fácies(kappa), Poços
-        self.tbl_models.setColumnCount(7)
-        self.tbl_models.setHorizontalHeaderLabels(["Rank", "Study", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"])
+        # Colunas: Rank, Study, Modelo, Score, ΣT_real (m), Poços
+        self.tbl_models.setColumnCount(6)
+        self.tbl_models.setHorizontalHeaderLabels(["Rank", "Study", "Modelo", "Score", "ΣT_real (m)", "Poços"])
         self.tbl_models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tbl_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_models.setSortingEnabled(True)
         self.tbl_models.itemSelectionChanged.connect(self._on_models_table_selection_changed)
         l_top.addWidget(self.tbl_models)
-        
-        # --- Container Inferior: Tabela de Poços ---
+
+        # --- Tabela de Poços (modelo selecionado) ---
         w_bot = QtWidgets.QWidget()
         l_bot = QtWidgets.QVBoxLayout(w_bot)
         l_bot.setContentsMargins(0, 0, 0, 0)
-        
+
         h_bot_bar = QtWidgets.QHBoxLayout()
-        h_bot_bar.addWidget(QtWidgets.QLabel("Detalhamento por Poço (Modelo Selecionado)"))
+        h_bot_bar.addWidget(QtWidgets.QLabel("Detalhamento por Poço (modelo selecionado)"))
         h_bot_bar.addStretch(1)
-        btn_copy_wells = QtWidgets.QPushButton("Copiar Tabela")
+        btn_copy_wells = QtWidgets.QPushButton("Copiar")
         btn_copy_wells.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         btn_copy_wells.clicked.connect(lambda: self._copy_table_to_clipboard(self.tbl_wells))
         h_bot_bar.addWidget(btn_copy_wells)
         l_bot.addLayout(h_bot_bar)
 
         self.tbl_wells = QtWidgets.QTableWidget()
-        self.tbl_wells.setColumnCount(7) 
-        self.tbl_wells.setHorizontalHeaderLabels(["Poço", "Score", "Fácies (acc)", "Fácies (kappa)", "Espessura", "T_real", "T_sim", "Ações"])
+        # Colunas: Poço, Score, D_prop, T_real, T_sim, ΔT, Ações
+        self.tbl_wells.setColumnCount(7)
+        self.tbl_wells.setHorizontalHeaderLabels(["Poço", "Score", "D_prop", "T_real (m)", "T_sim (m)", "ΔT (m)", "Ações"])
         self.tbl_wells.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tbl_wells.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_wells.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_wells.setSortingEnabled(True)
         l_bot.addWidget(self.tbl_wells)
-        
+
         self.ranking_splitter.addWidget(w_top)
         self.ranking_splitter.addWidget(w_bot)
         self.ranking_splitter.setStretchFactor(0, 1)
         self.ranking_splitter.setStretchFactor(1, 2)
-        
-        l_rank.addWidget(self.ranking_splitter)
+
+        l_left.addWidget(self.ranking_splitter)
+        self.rank_main_splitter.addWidget(w_left)
+
+        # ===== Direita: visão geral =====
+        w_right = QtWidgets.QWidget()
+        l_right = QtWidgets.QVBoxLayout(w_right)
+        l_right.setContentsMargins(0, 0, 0, 0)
+        gb = QtWidgets.QGroupBox("Visão geral dos poços (REAL vs SIM)")
+        gb_l = QtWidgets.QVBoxLayout(gb)
+
+        info = QtWidgets.QLabel("Cada linha mostra dois logs simplificados (REAL e SIM) com a suavização t_min aplicada.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #555;")
+        gb_l.addWidget(info)
+
+        self.rank_overview_canvas = None
+        self.rank_overview_ax = None
+        try:
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(6.0, 4.0), tight_layout=True)
+            self.rank_overview_canvas = FigureCanvas(fig)
+            self.rank_overview_ax = fig.add_subplot(111)
+            gb_l.addWidget(self.rank_overview_canvas, 1)
+        except Exception:
+            gb_l.addWidget(QtWidgets.QLabel("Matplotlib não disponível para a visão geral."))
+
+        l_right.addWidget(gb, 1)
+        self.rank_main_splitter.addWidget(w_right)
+        self.rank_main_splitter.setStretchFactor(0, 3)
+        self.rank_main_splitter.setStretchFactor(1, 2)
+
+        l_rank.addWidget(self.rank_main_splitter, 1)
+
         self.viz_container.addWidget(self.ranking_tab)
 
         self.central_stack.addWidget(self.viz_container)
@@ -2280,104 +2402,247 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.btn_debug_all.isChecked():
             self.toggle_global_well_debug()
 
+    def _on_rank_params_changed(self):
+        """Atualiza parâmetros do ranking (ex.: t_min) e agenda recálculo."""
+        try:
+            if hasattr(self, "spin_rank_tmin"):
+                self.well_rank_t_min = float(self.spin_rank_tmin.value())
+        except Exception:
+            pass
+
+        # Agenda atualização pesada (ranking/entropia/comparação)
+        if hasattr(self, "_schedule_heavy_update"):
+            self._schedule_heavy_update()
+        else:
+            # fallback
+            try:
+                self.update_ranking_view_content()
+            except Exception:
+                pass
+
     def update_ranking_view_content(self):
+        """Recalcula o ranking considerando MODELOS e POÇOS marcados no Project Explorer.
+
+        **Score por poço (proporção por espessura):**
+        - Constrói runs (fácies, espessura) a partir do log (REAL e SIM).
+        - Suaviza segmentos finos: segmentos com espessura < t_min são mesclados ao vizinho.
+        - Calcula proporções p(f)=T_f/T_total e distância L1:
+                D_prop = 0.5 * Σ_f |p_real(f) - p_sim(f)|
+                Score = clip(1 - D_prop, 0, 1)
+
+        **Score do modelo:**
+        - Média ponderada dos scores por poço usando `t_real_valid` como peso.
         """
-        Calcula o ranking considerando MODELOS e POÇOS selecionados.
-        Preenche a tabela incluindo a coluna 'Study'.
-        """
-        # 1. Pega tamanho da janela
+        # 1) janela global (Ribbon)
         try:
             txt = self.cmb_debug_win.currentText()
             ws = int(txt.split("x")[0])
-        except: ws = 1
+        except Exception:
+            ws = 1
         self.well_rank_window_size = ws
-        
-        # 2. Pega MODELOS selecionados
-        checked_data = self.get_checked_models()
-        selected_keys = [k for k, name in checked_data]
 
-        # 3. Pega POÇOS selecionados
+        # 2) modelos / poços marcados
+        checked_data = self.get_checked_models()
+        selected_keys = [k for k, _name in checked_data]
         selected_wells = self.get_checked_wells()
 
-        # Se faltar modelo ou poço, limpa a tabela e sai
         if not selected_keys or not selected_wells:
             self.tbl_models.setRowCount(0)
             self.tbl_wells.setRowCount(0)
+            self._current_ranking_data = []
+            self._update_ranking_overview_plot(None)
             return
 
-        # 4. Calcula Ranking com os filtros aplicados
+        # 3) t_min do score
+        try:
+            if hasattr(self, "spin_rank_tmin"):
+                self.well_rank_t_min = float(self.spin_rank_tmin.value())
+        except Exception:
+            pass
+        tmin = float(getattr(self, "well_rank_t_min", 0.30) or 0.30)
+
         ranking = self.evaluate_models_against_wells(
             model_keys=selected_keys,
             well_names=selected_wells,
             window_size=ws,
-            n_bins=200,
-            w_strat=0.7,
-            w_thick=0.3,
+            t_min=tmin,
             ignore_real_zeros=True,
-            use_kappa=True,
         )
 
-        # 5. Atualiza Tabela
-        self._current_ranking_data = ranking
+        self._current_ranking_data = ranking or []
+
+        # 4) preenche tabela de modelos
+        self.tbl_models.setSortingEnabled(False)
         self.tbl_models.setRowCount(0)
-        
-        if not ranking: return
+
+        if not ranking:
+            self.tbl_models.setSortingEnabled(True)
+            self.tbl_wells.setRowCount(0)
+            self._update_ranking_overview_plot(None)
+            return
 
         for i, r in enumerate(ranking, start=1):
             row = self.tbl_models.rowCount()
             self.tbl_models.insertRow(row)
-            
-            # Chave do modelo
-            m_key = r.get("model_key")
 
-            # --- Col 0: Rank ---
+            m_key = r.get("model_key")
+            model_name = str(r.get("model_name", ""))
+
+            # Col 0: Rank (guarda model_key)
             it_rank = QtWidgets.QTableWidgetItem(f"{i:02d}")
             it_rank.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
             it_rank.setData(QtCore.Qt.UserRole, m_key)
             self.tbl_models.setItem(row, 0, it_rank)
 
-            # --- Col 1: Study (NOVO) ---
+            # Col 1: Study
             study_name = "Geral"
             if m_key in self.models:
                 study_name = self.models[m_key].get("study", "Geral")
-            
             it_study = QtWidgets.QTableWidgetItem(str(study_name))
-            if m_key == "base": 
+            if m_key == "base":
                 it_study.setBackground(QtGui.QBrush(QtGui.QColor(230, 240, 255)))
             self.tbl_models.setItem(row, 1, it_study)
 
-            # --- Col 2: Modelo ---
-            self.tbl_models.setItem(row, 2, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+            # Col 2: Modelo
+            it_model = QtWidgets.QTableWidgetItem(model_name)
+            if m_key == "base":
+                it_model.setBackground(QtGui.QBrush(QtGui.QColor(230, 240, 255)))
+            self.tbl_models.setItem(row, 2, it_model)
 
-            # --- Col 3: Score ---
-            it_score = QtWidgets.QTableWidgetItem(f"{r.get('score', 0.0):.3f}")
+            # Col 3: Score
+            sc = float(r.get("score", 0.0) or 0.0)
+            it_score = QtWidgets.QTableWidgetItem(f"{sc:.3f}")
             it_score.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            if r.get("score", 0.0) > 0.5:
+            if sc >= 0.70:
                 it_score.setFont(QtGui.QFont("Arial", weight=QtGui.QFont.Bold))
             self.tbl_models.setItem(row, 3, it_score)
 
-            # Detalhes médios
+            # Col 4: ΣT_real (m)
             details = r.get("details", {}) or {}
-            accs = [float(s.get("strat_acc", 0.0)) for s in details.values()]
-            kappas = [float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0))) for s in details.values()]
-            
-            mean_acc = sum(accs) / len(accs) if accs else 0.0
-            mean_kap = sum(kappas) / len(kappas) if kappas else 0.0
+            sum_t = 0.0
+            for s in details.values():
+                try:
+                    sum_t += float(s.get("t_real_valid", 0.0) or 0.0)
+                except Exception:
+                    pass
+            it_t = QtWidgets.QTableWidgetItem(f"{sum_t:.1f}")
+            it_t.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_models.setItem(row, 4, it_t)
 
-            it_acc = QtWidgets.QTableWidgetItem(f"{mean_acc:.3f}")
-            it_acc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            self.tbl_models.setItem(row, 4, it_acc)
+            # Col 5: Poços
+            self.tbl_models.setItem(row, 5, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
 
-            it_kap = QtWidgets.QTableWidgetItem(f"{mean_kap:.3f}")
-            it_kap.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            self.tbl_models.setItem(row, 5, it_kap)
-
-            self.tbl_models.setItem(row, 6, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
-        
+        self.tbl_models.setSortingEnabled(True)
         self.tbl_models.resizeColumnsToContents()
-        
+
+        # seleciona o primeiro para popular a tabela de poços e o gráfico
         if self.tbl_models.rowCount() > 0:
             self.tbl_models.selectRow(0)
+
+    def _update_ranking_overview_plot(self, model_record):
+        """Atualiza o gráfico de visão geral (REAL vs SIM) para o modelo selecionado."""
+        if getattr(self, "rank_overview_ax", None) is None or getattr(self, "rank_overview_canvas", None) is None:
+            return
+
+        ax = self.rank_overview_ax
+        ax.clear()
+
+        if not model_record:
+            ax.set_title("Selecione um modelo para ver a visão geral")
+            self.rank_overview_canvas.draw_idle()
+            return
+
+        details = model_record.get("details", {}) or {}
+        if not details:
+            ax.set_title("Sem poços válidos para o modelo selecionado")
+            self.rank_overview_canvas.draw_idle()
+            return
+
+        # limita para não ficar pesado/ilegível
+        well_names = list(details.keys())
+        max_show = 12
+        if len(well_names) > max_show:
+            well_names = well_names[:max_show]
+
+        # max espessura para alinhar o eixo X
+        max_t = 0.0
+        for wn in well_names:
+            s = details.get(wn, {}) or {}
+            max_t = max(max_t, float(s.get("t_real_valid", 0.0) or 0.0), float(s.get("t_sim_valid", 0.0) or 0.0))
+        if max_t <= 0:
+            max_t = 1.0
+
+        # função cor
+        def _col(f):
+            try:
+                c = self.facies_colors_dict.get(int(f), (0.7, 0.7, 0.7))
+                if isinstance(c, QtGui.QColor):
+                    return (c.redF(), c.greenF(), c.blueF())
+                if isinstance(c, (list, tuple)) and len(c) >= 3:
+                    return (float(c[0]), float(c[1]), float(c[2]))
+            except Exception:
+                pass
+            return (0.7, 0.7, 0.7)
+
+        
+        # Parâmetros visuais: linhas finas e separação clara entre REAL (baixo) e SIM (cima)
+        row_h = 0.35
+        gap = 0.18
+        pad = 0.28
+        block_h = row_h * 2 + gap + pad
+        y = 0.0
+
+        # Cabeçalho dentro do gráfico
+        ax.text(0.0, 1.02, "Cada poço: REAL (baixo)  |  SIM (cima)", transform=ax.transAxes,
+                ha="left", va="bottom", fontsize=9, color="#444")
+
+        # Desenha de cima pra baixo (poço no topo do gráfico)
+        for wn in reversed(well_names):
+            s = details.get(wn, {}) or {}
+            runs_r = s.get("runs_real", []) or []
+            runs_s = s.get("runs_sim", []) or []
+            sc = float(s.get("score", s.get("score_prop", 0.0)) or 0.0)
+
+            # Linha guia de separação do poço
+            ax.hlines(y - 0.06, 0.0, max_t, colors="#dddddd", linewidth=0.8)
+
+            # REAL (linha inferior)
+            x0 = 0.0
+            for fac, t in runs_r:
+                t = float(t)
+                if t <= 0:
+                    continue
+                ax.broken_barh([(x0, t)], (y, row_h), facecolors=_col(fac))
+                x0 += t
+
+            # SIM (linha superior)
+            x0 = 0.0
+            for fac, t in runs_s:
+                t = float(t)
+                if t <= 0:
+                    continue
+                ax.broken_barh([(x0, t)], (y + row_h + gap, row_h), facecolors=_col(fac))
+                x0 += t
+
+            # label do poço + score no lado direito
+            ax.text(-0.015 * max_t, y + row_h + gap / 2.0, str(wn),
+                    ha="right", va="center", fontsize=9)
+            ax.text(max_t * 1.01, y + row_h + gap / 2.0, f"S={sc:.2f}",
+                    ha="left", va="center", fontsize=8, color="#444")
+
+            y += block_h
+
+        ax.hlines(y - 0.06, 0.0, max_t, colors="#dddddd", linewidth=0.8)
+
+        # espaço extra à direita para anotações
+        ax.set_xlim(0.0, max_t * 1.12)
+        ax.set_ylim(-0.2, y - 0.2)
+        ax.set_yticks([])
+        ax.set_xlabel("Espessura acumulada (m)")
+        ax.set_title(
+            f"{model_record.get('model_name','')}  |  Score={float(model_record.get('score',0.0) or 0.0):.3f}  |  t_min={float(model_record.get('t_min', getattr(self,'well_rank_t_min',0.3))):.2f} m"
+        )
+        self.rank_overview_canvas.draw_idle()
 
     def _create_well_debug_actors(self, grid, well_name, best_i, best_j, window_size, z_exag, scale_z):
         """
@@ -4243,6 +4508,16 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+        # Se estiver na aba Ranking, recalcula (para refletir o toggle)
+        if hasattr(self, "viz_container") and self.viz_container.currentIndex() == 3:
+            try:
+                self._schedule_heavy_update()
+            except Exception:
+                try:
+                    self.update_ranking_view_content()
+                except Exception:
+                    pass
+
     def open_facies_grouping_dialog(self):
         """Abre o diálogo de configuração de grupos de fácies."""
         dlg = FaciesGroupingDialog(self.facies_reference, self.facies_colors_dict, self.facies_grouping_map, parent=self)
@@ -5687,36 +5962,6 @@ class MainWindow(QtWidgets.QMainWindow):
             
         return pd.DataFrame(data_list)
 
-# --- LÓGICA DE FECHAMENTO (LIMPEZA) ---
-    def closeEvent(self, event):
-        """Garante que todos os processos do VTK sejam encerrados antes de matar a janela."""
-        
-        # 1. Fecha os plotters principais (Aba Visualização)
-        if hasattr(self, 'plotter') and self.plotter is not None: 
-            self.plotter.close()
-        if hasattr(self, 'plotter_2d') and self.plotter_2d is not None: 
-            self.plotter_2d.close()
-        
-        # 2. Fecha plotters antigos (se existirem por legado)
-        if hasattr(self, 'comp_plotter_base'): self.comp_plotter_base.close()
-        if hasattr(self, 'comp_plotter_comp'): self.comp_plotter_comp.close()
-        if hasattr(self, 'comp_plotter_base_2d'): self.comp_plotter_base_2d.close()
-        if hasattr(self, 'comp_plotter_comp_2d'): self.comp_plotter_comp_2d.close()
-        
-        # 3. --- CORREÇÃO PRINCIPAL: Fecha as listas dinâmicas de Comparação ---
-        if hasattr(self, 'active_comp_plotters'):
-            for p in self.active_comp_plotters:
-                try: p.close()
-                except: pass
-        
-        if hasattr(self, 'active_comp_2d_plotters'):
-            for p in self.active_comp_2d_plotters:
-                try: p.close()
-                except: pass
-        
-        # Aceita o evento de fechamento do Qt
-        event.accept()
-
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
         """Recalcula métricas verticais usando a geometria do grid do próprio modelo."""
         if target_grid is None or target_grid.n_cells != nx * ny * nz:
@@ -6704,66 +6949,76 @@ class MainWindow(QtWidgets.QMainWindow):
         well_names=None,
         model_keys=None,
         window_size=1,
-        n_bins=200,
-        w_strat=0.7,
-        w_thick=0.3,
+        t_min=0.30,
         ignore_real_zeros=True,
-        use_kappa=True,
     ):
+        """Calcula ranking dos modelos vs poços usando SCORE POR PROPORÇÃO.
+
+        - Para cada poço: calcula proporções por espessura das fácies (com suavização t_min)
+          e compara REAL vs SIM por distância L1 (score=1-0.5*L1).
+        - Para janela espacial NxN: escolhe a coluna (i,j) com melhor score.
+
+        Peso do score do modelo:
+          - Usa `t_real_valid` (espessura total válida após suavização) como peso.
+        """
         import numpy as np
         from analysis import compute_well_match_score
-        from load_data import grid as global_grid, facies as global_facies # Import para fallback
+        from load_data import grid as global_grid, facies as global_facies
 
-        if not self.wells: return []
+        if not self.wells:
+            return []
 
-        # 1. Prepara Poços
-        if well_names is None: well_names = list(self.wells.keys())
-        else: well_names = [w for w in well_names if w in self.wells]
-        if not well_names: return []
+        # 1) Poços
+        if well_names is None:
+            well_names = list(self.wells.keys())
+        else:
+            well_names = [w for w in well_names if w in self.wells]
+        if not well_names:
+            return []
 
-        # 2. Prepara Modelos
+        # 2) Modelos
         if model_keys is None:
             model_keys = list(self.models.keys())
-            # Garante base se nenhum filtro for passado
             if "base" in self.models and "base" not in model_keys:
                 model_keys.append("base")
-        
-        # Filtra apenas chaves que existem
         model_keys = [k for k in model_keys if k in self.models]
-        if not model_keys: return []
+        if not model_keys:
+            return []
 
-        # Garante window_size ímpar
-        try: window_size = int(window_size)
-        except: window_size = 1
-        if window_size < 1: window_size = 1
-        if window_size % 2 == 0: window_size += 1
+        # window_size ímpar
+        try:
+            window_size = int(window_size)
+        except Exception:
+            window_size = 1
+        if window_size < 1:
+            window_size = 1
+        if window_size % 2 == 0:
+            window_size += 1
 
         results = []
 
         for mk in model_keys:
             m = self.models.get(mk, {})
-            
-            # --- CORREÇÃO: Resolve Grid e Facies do Base ---
+
+            # Resolve grid/facies do base
             g = m.get("grid", None)
             fac = m.get("facies", None)
-
-            # Se for base e não tiver grid no dict, usa o global
             if mk == "base":
-                if g is None: g = global_grid
-                if fac is None: fac = global_facies
-
-            # Se mesmo assim não tiver grid, pula
+                if g is None:
+                    g = global_grid
+                if fac is None:
+                    fac = global_facies
             if g is None:
                 continue
 
-            # Injeta Facies no Grid se necessário (para garantir consistência)
+            # injeta facies no grid (consistência)
             if fac is not None:
                 try:
-                    # Verifica se precisa atualizar (evita overhead desnecessário)
                     current_f = g.cell_data.get("Facies")
                     if current_f is None or current_f is not fac:
                         g.cell_data["Facies"] = np.asarray(fac).astype(int)
-                except Exception: pass
+                except Exception:
+                    pass
 
             per_well = {}
             score_list = []
@@ -6774,23 +7029,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 if well is None or well.data is None or well.data.empty:
                     continue
 
-                # REAL: Preparação
-                if "DEPT" not in well.data.columns: continue
+                if "DEPT" not in well.data.columns:
+                    continue
 
-                col_real = None
-                if "fac" in well.data.columns: col_real = "fac"
-                elif "lito_upscaled" in well.data.columns: col_real = "lito_upscaled"
-                else: continue
+                # coluna de fácies do poço
+                if "fac" in well.data.columns:
+                    col_real = "fac"
+                elif "lito_upscaled" in well.data.columns:
+                    col_real = "lito_upscaled"
+                else:
+                    continue
 
                 full_depth = well.data["DEPT"].to_numpy(dtype=float)
-                full_real  = well.data[col_real].to_numpy(dtype=float)
+                full_real = well.data[col_real].to_numpy(dtype=float)
 
-                # Filtro por Marcadores (Real)
                 key = str(wn).strip()
                 markers = self.markers_db.get(key, [])
-                real_depth = full_depth
-                real_fac   = np.where(np.isfinite(full_real), full_real, 0.0).astype(int)
 
+                real_depth = full_depth
+                real_fac = np.where(np.isfinite(full_real), full_real, 0.0).astype(int)
+
+                # recorte por marcadores (Top->Base)
                 if markers:
                     mds = sorted([mm.get("md") for mm in markers if mm.get("md") is not None])
                     if len(mds) >= 2:
@@ -6800,55 +7059,62 @@ class MainWindow(QtWidgets.QMainWindow):
                             mask = (full_depth >= top_md) & (full_depth <= base_md)
                             if np.any(mask):
                                 real_depth = full_depth[mask]
-                                real_fac   = real_fac[mask]
+                                real_fac = real_fac[mask]
 
-                # (X,Y) de referência
+                # aplica agrupamento no REAL quando o toggle estiver ligado
+                if bool(getattr(self, "use_facies_grouping", False)):
+                    try:
+                        real_fac = self.apply_facies_grouping(real_fac)
+                    except Exception:
+                        pass
+
+                # (X,Y) de referência do poço
                 xy = self._pick_reference_xy_for_well_report(well, markers)
-                if xy is None: continue
+                if xy is None:
+                    continue
                 xref, yref = xy
 
-                # --------- CÁLCULO (1x1 ou NxN) ---------
+                # --- cálculo (1x1 ou NxN) ---
                 if window_size == 1:
-                    # 1x1: coluna mais próxima
                     sim_depth, sim_fac, _ = self._column_profile_from_grid(g, xref, yref)
+                    # aplica agrupamento no SIM quando o toggle estiver ligado
+                    if bool(getattr(self, "use_facies_grouping", False)):
+                        try:
+                            sim_fac = self.apply_facies_grouping(sim_fac)
+                        except Exception:
+                            pass
                     if sim_depth is None or len(sim_depth) < 2:
                         continue
 
                     s = compute_well_match_score(
                         real_depth, real_fac,
-                        sim_depth,  sim_fac,
-                        n_bins=n_bins,
-                        w_strat=w_strat,
-                        w_thick=w_thick,
+                        sim_depth, sim_fac,
+                        t_min=t_min,
                         ignore_real_zeros=ignore_real_zeros,
-                        use_kappa=use_kappa,
                     )
-                    # Adiciona dados espaciais dummy para compatibilidade
                     s["best_i"], s["best_j"] = self._get_ij_from_xy(g, xref, yref)
 
                 else:
-                    # NxN: varredura
                     sim_depth, sim_fac, sim_total, i_best, j_best, s = self._best_profile_score_in_window(
                         g,
                         xref, yref,
                         real_depth, real_fac,
                         window_size=window_size,
-                        n_bins=n_bins,
-                        w_strat=w_strat,
-                        w_thick=w_thick,
+                        t_min=t_min,
                         ignore_real_zeros=ignore_real_zeros,
-                        use_kappa=use_kappa,
                     )
                     if sim_depth is None or len(sim_depth) < 2:
                         continue
-                    
-                    # Salva coordenadas do melhor match
+
                     s = dict(s)
                     s["best_i"] = i_best
                     s["best_j"] = j_best
-                # ----------------------------------------
 
-                weight = max(int(s.get("n_valid_bins", 0)), 0)
+                # peso = espessura válida do REAL
+                weight = float(s.get("t_real_valid", 0.0))
+                if not np.isfinite(weight) or weight <= 0.0:
+                    continue
+
                 per_well[str(wn)] = s
                 score_list.append(float(s.get("score", 0.0)))
                 w_list.append(weight)
@@ -6865,24 +7131,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 "score": score_model,
                 "n_wells_used": int(len(w_list)),
                 "details": per_well,
+                "t_min": float(t_min),
             })
 
         results.sort(key=lambda d: d["score"], reverse=True)
         return results
-
-    
     def show_models_well_fit_ranking(self):
+        """Abre o ranking de modelos vs poços usando o NOVO score por proporção (sem bin-a-bin / sem kappa)."""
         from PyQt5 import QtWidgets
 
         ws = int(getattr(self, "well_rank_window_size", 1) or 1)
+        tmin = float(getattr(self, "well_rank_t_min", 0.30) or 0.30)
 
         ranking = self.evaluate_models_against_wells(
             window_size=ws,
-            n_bins=200,
-            w_strat=0.7,
-            w_thick=0.3,
+            t_min=tmin,
             ignore_real_zeros=True,
-            use_kappa=True,
         )
 
         if not ranking:
@@ -6895,39 +7159,38 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.open_models_ranking_dialog(ranking)
-
-
     def open_models_ranking_dialog(self, ranking):
-        """
-        Abre uma janela limpa com:
-        - Tabela de modelos (ranking)
-        - Tabela de detalhe por poço do modelo selecionado
-        - ComboBox para janela espacial (1x1, 3x3, 5x5...)
-        """
+        """Janela de ranking com o NOVO score por proporções (com espessura mínima t_min)."""
         from PyQt5 import QtWidgets, QtCore
 
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("Avaliação dos modelos vs poços")
-        dlg.setMinimumSize(980, 640)
+        dlg.setWindowTitle("Avaliação dos modelos vs poços (proporções)")
+        dlg.setMinimumSize(1100, 680)
 
-        # guarda ranking no dialog
         dlg._ranking = ranking
 
         layout = QtWidgets.QVBoxLayout(dlg)
 
-        # --- Top controls (compactos) ---
+        # --- Top bar ---
         top_bar = QtWidgets.QHBoxLayout()
 
         lbl = QtWidgets.QLabel("Clique em um modelo para ver o detalhe por poço.")
         top_bar.addWidget(lbl)
 
-        # ComboBox: janela espacial do ranking
-        top_bar.addSpacing(12)
+        top_bar.addSpacing(14)
         top_bar.addWidget(QtWidgets.QLabel("Janela:"))
-
         cmb_window = QtWidgets.QComboBox()
         cmb_window.addItems(["1x1", "3x3", "5x5", "7x7", "9x9"])
         top_bar.addWidget(cmb_window)
+
+        top_bar.addSpacing(14)
+        top_bar.addWidget(QtWidgets.QLabel("t_min (m):"))
+        sp_tmin = QtWidgets.QDoubleSpinBox()
+        sp_tmin.setDecimals(2)
+        sp_tmin.setSingleStep(0.05)
+        sp_tmin.setRange(0.00, 50.0)
+        sp_tmin.setValue(float(getattr(self, "well_rank_t_min", 0.30) or 0.30))
+        top_bar.addWidget(sp_tmin)
 
         top_bar.addStretch(1)
 
@@ -6937,44 +7200,80 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addLayout(top_bar)
 
-        # --- Splitter (modelos em cima, poços embaixo) ---
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        layout.addWidget(splitter)
+        # --- Horizontal splitter: (tables) | (overview plot) ---
+        sp_h = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(sp_h)
 
-        # Tabela 1: Modelos
+        # Left: vertical splitter (modelos / poços)
+        left = QtWidgets.QWidget()
+        l_left = QtWidgets.QVBoxLayout(left)
+        l_left.setContentsMargins(0, 0, 0, 0)
+
+        sp_v = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        l_left.addWidget(sp_v)
+
+        # Tabela modelos
         tbl_models = QtWidgets.QTableWidget()
-        tbl_models.setColumnCount(6)
-        tbl_models.setHorizontalHeaderLabels([
-            "Rank", "Modelo", "Score", "Fácies (acc)", "Fácies (kappa)", "Poços"
-        ])
+        tbl_models.setColumnCount(5)
+        tbl_models.setHorizontalHeaderLabels(["Rank", "Modelo", "Score", "ΣT_real (m)", "Poços"])
         tbl_models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         tbl_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         tbl_models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         tbl_models.setSortingEnabled(True)
         tbl_models.horizontalHeader().setStretchLastSection(True)
         tbl_models.verticalHeader().setVisible(False)
+        sp_v.addWidget(tbl_models)
 
-        splitter.addWidget(tbl_models)
-
-        # Tabela 2: Detalhe por poço
+        # Tabela poços
         tbl_wells = QtWidgets.QTableWidget()
-        tbl_wells.setColumnCount(7)
-        tbl_wells.setHorizontalHeaderLabels([
-            "Poço", "Score", "Fácies (acc)", "Fácies (kappa)", "Espessura", "T_real", "T_sim"
-        ])
+        tbl_wells.setColumnCount(6)
+        tbl_wells.setHorizontalHeaderLabels(["Poço", "Score", "T_real (m)", "T_sim (m)", "ΔT (m)", "D_prop"])
         tbl_wells.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         tbl_wells.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         tbl_wells.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         tbl_wells.setSortingEnabled(True)
         tbl_wells.horizontalHeader().setStretchLastSection(True)
         tbl_wells.verticalHeader().setVisible(False)
+        sp_v.addWidget(tbl_wells)
 
-        splitter.addWidget(tbl_wells)
+        sp_h.addWidget(left)
+
+        # Right: overview (matplotlib se disponível)
+        right = QtWidgets.QWidget()
+        l_right = QtWidgets.QVBoxLayout(right)
+        l_right.setContentsMargins(6, 6, 6, 6)
+
+        lbl_plot = QtWidgets.QLabel("Visão geral (REAL x SIM) — runs após suavização")
+        lbl_plot.setAlignment(QtCore.Qt.AlignLeft)
+        l_right.addWidget(lbl_plot)
+
+        dlg._has_mpl = False
+        dlg._fig = None
+        dlg._ax = None
+        dlg._canvas = None
+
+        try:
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+            from matplotlib.figure import Figure
+            dlg._fig = Figure(figsize=(5, 4))
+            dlg._ax = dlg._fig.add_subplot(111)
+            dlg._canvas = FigureCanvas(dlg._fig)
+            l_right.addWidget(dlg._canvas, 1)
+            dlg._has_mpl = True
+        except Exception:
+            info = QtWidgets.QLabel("Matplotlib não disponível no ambiente.\n(sem gráfico de visão geral)")
+            info.setAlignment(QtCore.Qt.AlignCenter)
+            l_right.addWidget(info, 1)
+
+        sp_h.addWidget(right)
+        sp_h.setStretchFactor(0, 3)
+        sp_h.setStretchFactor(1, 2)
 
         # guarda refs no dialog
         dlg._tbl_models = tbl_models
         dlg._tbl_wells = tbl_wells
         dlg._cmb_rank_window = cmb_window
+        dlg._sp_tmin = sp_tmin
 
         # seta combo para o window_size atual
         ws = int(getattr(self, "well_rank_window_size", 1) or 1)
@@ -6982,55 +7281,43 @@ class MainWindow(QtWidgets.QMainWindow):
             ws = 1
         cmb_window.setCurrentText(f"{ws}x{ws}")
 
-        # função interna: recalcula ranking com o window_size selecionado
+        # recompute
         def _recompute():
-            # lê window_size do combo
             try:
-                txt = cmb_window.currentText()
-                ws2 = int(txt.split("x")[0])
+                ws2 = int(cmb_window.currentText().split("x")[0])
             except Exception:
                 ws2 = 1
 
             self.well_rank_window_size = ws2
+            self.well_rank_t_min = float(sp_tmin.value())
 
             new_ranking = self.evaluate_models_against_wells(
                 window_size=ws2,
-                n_bins=200,
-                w_strat=0.7,
-                w_thick=0.3,
+                t_min=float(sp_tmin.value()),
                 ignore_real_zeros=True,
-                use_kappa=True,
             )
             dlg._ranking = new_ranking
-
-            # repopula tabelas
             self._populate_models_ranking_table(dlg)
             if tbl_models.rowCount() > 0:
                 tbl_models.selectRow(0)
 
-        # preenche inicialmente
+        # populate initial
         self._populate_models_ranking_table(dlg)
 
-        # seleção -> detalhe
-        tbl_models.itemSelectionChanged.connect(lambda: self._on_models_table_selection_changed(dlg))
+        # selection -> detail
+        tbl_models.itemSelectionChanged.connect(lambda: self._on_models_table_selection_changed_dialog(dlg))
 
-        # troca de janela -> recalcula ranking
         cmb_window.currentIndexChanged.connect(lambda *_: _recompute())
+        sp_tmin.valueChanged.connect(lambda *_: _recompute())
 
-        # seleciona o 1º automaticamente
         if tbl_models.rowCount() > 0:
             tbl_models.selectRow(0)
 
         dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         dlg.show()
-
-        # guarda referência para evitar GC
         self.open_reports.append(dlg)
-
-
     def _populate_models_ranking_table(self, dlg):
         from PyQt5 import QtWidgets, QtCore
-
         ranking = getattr(dlg, "_ranking", [])
         tbl = dlg._tbl_models
         tbl.setRowCount(0)
@@ -7039,121 +7326,257 @@ class MainWindow(QtWidgets.QMainWindow):
             row = tbl.rowCount()
             tbl.insertRow(row)
 
-            # helpers de item
-            def item(text, align_right=False):
-                it = QtWidgets.QTableWidgetItem(str(text))
-                if align_right:
-                    it.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-                return it
-
-            # Rank
+            # Rank (guarda model_key)
             it_rank = QtWidgets.QTableWidgetItem(f"{i:02d}")
             it_rank.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            it_rank.setData(QtCore.Qt.UserRole, r.get("model_key"))  # guardo model_key aqui
+            it_rank.setData(QtCore.Qt.UserRole, r.get("model_key"))
             tbl.setItem(row, 0, it_rank)
 
             # Modelo
-            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(r.get("model_name", "")))
+            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(str(r.get("model_name", ""))))
 
             # Score
-            it_score = QtWidgets.QTableWidgetItem(f"{r.get('score', 0.0):.3f}")
+            it_score = QtWidgets.QTableWidgetItem(f"{float(r.get('score', 0.0)):.3f}")
             it_score.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
             tbl.setItem(row, 2, it_score)
 
-            # Para mostrar médias de facies/espessura do modelo (a partir dos poços)
+            # ΣT_real (m) — soma das espessuras válidas dos poços
             details = r.get("details", {}) or {}
-            accs = []
-            kappas = []
-            thks = []
+            tsum = 0.0
             for _, s in details.items():
-                accs.append(float(s.get("strat_acc", 0.0)))
-                kappas.append(float(s.get("strat_kappa_norm", s.get("strat_kappa", 0.0))))
-                thks.append(float(s.get("thick_score", 0.0)))
+                tsum += float(s.get("t_real_valid", s.get("t_real", 0.0)) or 0.0)
 
-            mean_acc = sum(accs) / len(accs) if accs else 0.0
-            mean_kap = sum(kappas) / len(kappas) if kappas else 0.0
-            mean_thk = sum(thks) / len(thks) if thks else 0.0
+            it_t = QtWidgets.QTableWidgetItem(f"{tsum:.2f}")
+            it_t.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 3, it_t)
 
-            it_acc = QtWidgets.QTableWidgetItem(f"{mean_acc:.3f}")
-            it_acc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            tbl.setItem(row, 3, it_acc)
-
-            it_kap = QtWidgets.QTableWidgetItem(f"{mean_kap:.3f}")
-            it_kap.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
-            tbl.setItem(row, 4, it_kap)
-
-            tbl.setItem(row, 5, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
+            # Poços
+            tbl.setItem(row, 4, QtWidgets.QTableWidgetItem(str(r.get("n_wells_used", 0))))
 
         tbl.resizeColumnsToContents()
+    def _on_models_table_selection_changed_dialog(self, dlg):
+        """Callback do diálogo: usuário selecionou um modelo."""
+        from PyQt5 import QtCore
 
-    def _on_models_table_selection_changed(self):
-        """Callback quando o usuário clica num modelo na tabela de ranking."""
-        sel = self.tbl_models.selectedItems()
-        if not sel: return
+        tbl = dlg._tbl_models
+        row = tbl.currentRow()
+        if row < 0:
+            return
 
-        row = self.tbl_models.currentRow()
-        if row < 0: return
-
-        # model_key está no item Rank (col 0)
-        it_rank = self.tbl_models.item(row, 0)
+        it_rank = tbl.item(row, 0)
+        if it_rank is None:
+            return
         model_key = it_rank.data(QtCore.Qt.UserRole)
 
-        # Encontra dados no cache
-        ranking = getattr(self, "_current_ranking_data", [])
+        ranking = getattr(dlg, "_ranking", [])
         rec = None
         for r in ranking:
             if str(r.get("model_key")) == str(model_key):
                 rec = r
                 break
+        if rec is None:
+            return
 
-        if rec:
-            self._populate_wells_detail_table(rec)
+        self._populate_wells_detail_table_dialog(dlg, rec)
+        self._update_wells_overview_plot_dialog(dlg, rec)
 
-    def _populate_wells_detail_table(self, model_record):
-        """Popula a tabela inferior de poços para o modelo selecionado."""
-        self.tbl_wells.setRowCount(0)
-        
-        model_key = model_record.get("model_key")
+    def _populate_wells_detail_table_dialog(self, dlg, model_record):
+        from PyQt5 import QtWidgets, QtCore
+
+        tbl = dlg._tbl_wells
+        tbl.setRowCount(0)
+
         details = model_record.get("details", {}) or {}
-        
         items = list(details.items())
         items.sort(key=lambda kv: float(kv[1].get("score", 0.0)), reverse=True)
 
         for well_name, s in items:
+            row = tbl.rowCount()
+            tbl.insertRow(row)
+
+            score = float(s.get("score", 0.0))
+            t_real = float(s.get("t_real_valid", s.get("t_real", 0.0)) or 0.0)
+            t_sim = float(s.get("t_sim_valid", s.get("t_sim", 0.0)) or 0.0)
+            dt = t_sim - t_real
+            dprop = float(s.get("prop_distance", 0.0))
+
+            tbl.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
+
+            it_s = QtWidgets.QTableWidgetItem(f"{score:.3f}")
+            it_s.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 1, it_s)
+
+            it_tr = QtWidgets.QTableWidgetItem(f"{t_real:.2f}")
+            it_tr.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 2, it_tr)
+
+            it_ts = QtWidgets.QTableWidgetItem(f"{t_sim:.2f}")
+            it_ts.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 3, it_ts)
+
+            it_dt = QtWidgets.QTableWidgetItem(f"{dt:+.2f}")
+            it_dt.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 4, it_dt)
+
+            it_dp = QtWidgets.QTableWidgetItem(f"{dprop:.3f}")
+            it_dp.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            tbl.setItem(row, 5, it_dp)
+
+        tbl.resizeColumnsToContents()
+
+    def _update_wells_overview_plot_dialog(self, dlg, model_record):
+        """Desenha uma visão geral simples de runs REAL e SIM (após suavização)."""
+        if not getattr(dlg, "_has_mpl", False):
+            return
+        fig = dlg._fig
+        ax = dlg._ax
+        canvas = dlg._canvas
+        if fig is None or ax is None or canvas is None:
+            return
+
+        ax.clear()
+
+        details = model_record.get("details", {}) or {}
+        well_items = list(details.items())
+        well_items.sort(key=lambda kv: float(kv[1].get("score", 0.0)), reverse=True)
+
+        colors = getattr(self, "facies_colors_dict", {}) or {}
+
+        y = 0.0
+        yticks = []
+        ylabels = []
+
+        max_t = 0.0
+        for _, s in well_items:
+            max_t = max(max_t,
+                        float(s.get("t_real_valid", 0.0) or 0.0),
+                        float(s.get("t_sim_valid", 0.0) or 0.0))
+        max_t = max(max_t, 1.0)
+
+        for wname, s in well_items[:30]:
+            runs_sim = s.get("runs_sim", []) or []
+            runs_real = s.get("runs_real", []) or []
+
+            def draw_runs(runs, y0, side_label):
+                x0 = 0.0
+                for fac, t in runs:
+                    fac = int(fac)
+                    t = float(t)
+                    if t <= 0:
+                        continue
+                    rgba = colors.get(fac, (0.7, 0.7, 0.7, 1.0))
+                    ax.broken_barh([(x0, t)], (y0, 0.35), facecolors=[rgba], edgecolors='none')
+                    x0 += t
+                ax.text(max_t * 1.01, y0 + 0.17, side_label, va='center', fontsize=8)
+
+            draw_runs(runs_sim, y, "SIM")
+            draw_runs(runs_real, y + 0.45, "REAL")
+
+            yticks.append(y + 0.225)
+            ylabels.append(str(wname))
+            y += 1.05
+
+        ax.set_xlim(0, max_t * 1.15)
+        ax.set_ylim(-0.1, y)
+        ax.set_yticks(yticks)
+        ax.set_yticklabels(ylabels, fontsize=8)
+        ax.set_xlabel("Espessura acumulada (m)")
+        ax.set_title("Runs por poço (após t_min)")
+        ax.grid(False)
+
+        fig.tight_layout()
+        canvas.draw_idle()
+
+    def _on_models_table_selection_changed(self):
+        # Quando seleciona um modelo, atualiza detalhamento por poço e a visão geral
+        if not hasattr(self, "_current_ranking_data") or not self._current_ranking_data:
+            return
+
+        sel = self.tbl_models.selectedItems()
+        if not sel:
+            return
+
+        row = sel[0].row()
+        it_rank = self.tbl_models.item(row, 0)
+        if it_rank is None:
+            return
+
+        model_key = it_rank.data(QtCore.Qt.UserRole)
+
+        model_record = None
+        for r in self._current_ranking_data:
+            if r.get("model_key") == model_key:
+                model_record = r
+                break
+
+        if model_record is None:
+            return
+
+        self._populate_wells_detail_table(model_record)
+        self._update_ranking_overview_plot(model_record)
+
+    def _populate_wells_detail_table(self, model_record):
+        """Preenche tabela de poços para o modelo selecionado (score por proporção)."""
+        details = model_record.get("details", {}) or {}
+        model_key = model_record.get("model_key")
+
+        self.tbl_wells.setSortingEnabled(False)
+        self.tbl_wells.setRowCount(0)
+
+        for wn, s in details.items():
             row = self.tbl_wells.rowCount()
             self.tbl_wells.insertRow(row)
 
-            # Dados Numéricos
-            self.tbl_wells.setItem(row, 0, QtWidgets.QTableWidgetItem(str(well_name)))
-            self.tbl_wells.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{float(s.get('score',0)):.3f}"))
-            self.tbl_wells.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_acc',0)):.3f}"))
-            self.tbl_wells.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{float(s.get('strat_kappa_norm',0)):.3f}"))
-            self.tbl_wells.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{float(s.get('thick_score',0)):.3f}"))
-            self.tbl_wells.setItem(row, 5, QtWidgets.QTableWidgetItem(f"{float(s.get('t_real',0)):.2f}"))
-            self.tbl_wells.setItem(row, 6, QtWidgets.QTableWidgetItem(f"{float(s.get('t_sim',0)):.2f}"))
+            score = float(s.get("score", 0.0) or 0.0)
+            dprop = float(s.get("prop_distance", 0.0) or 0.0)
+            t_real = float(s.get("t_real_valid", s.get("t_real", 0.0)) or 0.0)
+            t_sim = float(s.get("t_sim_valid", s.get("t_sim", 0.0)) or 0.0)
+            dt = t_sim - t_real
 
-            # --- COLUNA DE AÇÕES ---
+            self.tbl_wells.setItem(row, 0, QtWidgets.QTableWidgetItem(str(wn)))
+
+            it_sc = QtWidgets.QTableWidgetItem(f"{score:.3f}")
+            it_sc.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_wells.setItem(row, 1, it_sc)
+
+            it_d = QtWidgets.QTableWidgetItem(f"{dprop:.3f}")
+            it_d.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_wells.setItem(row, 2, it_d)
+
+            it_tr = QtWidgets.QTableWidgetItem(f"{t_real:.2f}")
+            it_tr.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_wells.setItem(row, 3, it_tr)
+
+            it_ts = QtWidgets.QTableWidgetItem(f"{t_sim:.2f}")
+            it_ts.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_wells.setItem(row, 4, it_ts)
+
+            it_dt = QtWidgets.QTableWidgetItem(f"{dt:+.2f}")
+            it_dt.setTextAlignment(int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter))
+            self.tbl_wells.setItem(row, 5, it_dt)
+
+            # Ações: Relatório e (opcional) janela/best match
             widget = QtWidgets.QWidget()
             h_lay = QtWidgets.QHBoxLayout(widget)
-            h_lay.setContentsMargins(4, 2, 4, 2)
-            h_lay.setSpacing(6)
-            
-            best_i = s.get("best_i")
-            best_j = s.get("best_j")
-            
-            # Botão Gráfico (Lupa/Lista) - Abre relatório detalhado
-            btn_graph = QtWidgets.QPushButton()
-            btn_graph.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
-            btn_graph.setToolTip("Relatório Comparativo (Base vs Origem vs Melhor da Janela)")
-            btn_graph.setFixedSize(30, 24)
-            btn_graph.clicked.connect(lambda _, mk=model_key, wn=well_name, bi=best_i, bj=best_j: 
-                self.open_advanced_rank_report(mk, wn, bi, bj))
+            h_lay.setContentsMargins(0, 0, 0, 0)
 
-            h_lay.addWidget(btn_graph)
-            h_lay.addStretch(1) 
-            
-            self.tbl_wells.setCellWidget(row, 7, widget)
-        
+            btn_rep = QtWidgets.QPushButton("Relatório")
+            btn_rep.setToolTip("Abrir relatório do poço (Base/Sim/Real)")
+            btn_rep.clicked.connect(lambda _=False, name=str(wn), mk=model_key: self.show_well_comparison_report(name, mk))
+            h_lay.addWidget(btn_rep)
+
+            btn_best = QtWidgets.QPushButton("Janela")
+            btn_best.setToolTip("Abrir diagnóstico do best-match (janela NxN)")
+            bi = s.get("best_i")
+            bj = s.get("best_j")
+            btn_best.setEnabled(bi is not None and bj is not None)
+            btn_best.clicked.connect(lambda _=False, name=str(wn), ii=bi, jj=bj, mk=model_key: self.open_advanced_rank_report(model_key=mk, well_name=name, best_i=ii, best_j=jj))
+            h_lay.addWidget(btn_best)
+
+            h_lay.addStretch(1)
+            self.tbl_wells.setCellWidget(row, 6, widget)
+
+        self.tbl_wells.setSortingEnabled(True)
         self.tbl_wells.resizeColumnsToContents()
 
     def _best_profile_score_in_window(
@@ -7163,24 +7586,13 @@ class MainWindow(QtWidgets.QMainWindow):
         real_depth, real_fac,
         *,
         window_size=1,     # 1,3,5,7...
-        n_bins=200,
-        w_strat=0.7,
-        w_thick=0.3,
+        t_min=0.30,
         ignore_real_zeros=True,
-        use_kappa=True,
+        **_ignored,
     ):
-        """
-        Retorna o melhor match REAL vs pseudo-poço do grid em uma janela NxN.
-
-        Saída (sempre 6 itens):
-        sim_depth, sim_fac, sim_total, i_best, j_best, fit_best
-
-        - Se window_size=1: compara somente a coluna central (1x1).
-        - Se window_size=3: varre 3x3 e pega o melhor score.
-        - Se window_size=5: varre 5x5, etc.
-        """
+        """Retorna o melhor match REAL vs pseudo-poço do grid em uma janela NxN (score por proporção)."""
         import numpy as np
-        from analysis import compute_well_match_score  # ou compute_well_fit_score, se for o seu nome
+        from analysis import compute_well_match_score
 
         if grid is None:
             return np.array([]), np.array([]), 0.0, None, None, {"score": 0.0}
@@ -7213,17 +7625,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 jj = j0 + dj
 
                 sim_depth, sim_fac, sim_total = self._column_profile_from_grid_ij(grid, ii, jj)
+                # aplica agrupamento no SIM quando o toggle estiver ligado
+                if bool(getattr(self, "use_facies_grouping", False)):
+                    try:
+                        sim_fac = self.apply_facies_grouping(sim_fac)
+                    except Exception:
+                        pass
                 if sim_depth is None or len(sim_depth) < 2:
                     continue
 
                 fit = compute_well_match_score(
                     real_depth, real_fac,
                     sim_depth, sim_fac,
-                    n_bins=n_bins,
-                    w_strat=w_strat,
-                    w_thick=w_thick,
+                    t_min=t_min,
                     ignore_real_zeros=ignore_real_zeros,
-                    use_kappa=use_kappa,
                 )
 
                 if best_fit is None or float(fit.get("score", 0.0)) > float(best_fit.get("score", 0.0)):
@@ -7237,8 +7652,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return np.array([]), np.array([]), 0.0, int(i0), int(j0), {"score": 0.0}
 
         return best_depth, best_fac, best_total, best_i, best_j, best_fit
-
-
     def _copy_models_table_to_clipboard(self, dlg):
         from PyQt5 import QtWidgets
 
@@ -7611,3 +8024,101 @@ class MainWindow(QtWidgets.QMainWindow):
         if callable(refresh): refresh()
         
         if hasattr(self, "update_2d_map"): self.update_2d_map()
+
+    def _finalize_vtk_widget(self, obj):
+        """Fecha plotters/QtInteractors de forma agressiva para evitar erros do VTK no shutdown."""
+        if obj is None:
+            return
+
+        # 1) Tenta achar um vtkRenderWindow
+        rw = None
+        candidates = [
+            obj,
+            getattr(obj, "interactor", None),
+            getattr(obj, "iren", None),
+            getattr(obj, "plotter", None),
+        ]
+
+        for c in candidates:
+            if c is None:
+                continue
+            # QtInteractor (pyvistaqt) costuma ter .ren_win
+            if hasattr(c, "ren_win"):
+                rw = getattr(c, "ren_win", None)
+                if rw is not None:
+                    break
+            # alguns wrappers expõem .render_window
+            if hasattr(c, "render_window"):
+                rw = getattr(c, "render_window", None)
+                if rw is not None:
+                    break
+            # vtkRenderWindowInteractor -> GetRenderWindow()
+            if hasattr(c, "GetRenderWindow"):
+                try:
+                    rw = c.GetRenderWindow()
+                    if rw is not None:
+                        break
+                except Exception:
+                    pass
+
+        # 2) Termina interactor (quando existir)
+        iren = getattr(obj, "iren", None) or getattr(obj, "interactor", None)
+        if iren is not None and hasattr(iren, "TerminateApp"):
+            try:
+                iren.TerminateApp()
+            except Exception:
+                pass
+
+        # 3) Finaliza render window ANTES do Qt destruir o contexto OpenGL
+        if rw is not None and hasattr(rw, "Finalize"):
+            try:
+                rw.Finalize()
+            except Exception:
+                pass
+
+        # 4) Fecha widget/janela
+        try:
+            obj.close()
+        except Exception:
+            pass
+
+        # 5) Se for QWidget, agenda destruição
+        try:
+            obj.setParent(None)
+            obj.deleteLater()
+        except Exception:
+            pass
+
+
+    def _cleanup_vtk(self):
+        """Chamável múltiplas vezes sem problema."""
+        if getattr(self, "_vtk_cleaned", False):
+            return
+        self._vtk_cleaned = True
+
+        # principais plotters/widgets (ajusta conforme teus atributos)
+        self._finalize_vtk_widget(getattr(self, "plotter", None))
+        self._finalize_vtk_widget(getattr(self, "uncert_plotter", None))
+
+        # plotters de comparação (se existirem no teu estado)
+        for st in (getattr(self, "active_comp_states", None) or []):
+            try:
+                self._finalize_vtk_widget(st.get("plotter"))
+            except Exception:
+                pass
+
+        # fecha qualquer janela PyVista aberta globalmente (extra)
+        try:
+            import pyvista as pv
+            pv.close_all()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        # limpa VTK/PyVista antes do Qt derrubar o OpenGL context
+        try:
+            self._cleanup_vtk()
+        finally:
+            super().closeEvent(event)
+
+

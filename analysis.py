@@ -788,174 +788,231 @@ def estimate_probe_tolerance_from_grid(grid, factor=0.9):
     return max(1e-6, factor * diag)
 
 
-def _cohen_kappa_from_bins(real_bins, sim_bins, valid_mask=None):
+
+def _profile_to_runs(depth, facies_values):
+    """Converte um perfil (depth, facies) em uma lista de runs (facies, thickness).
+
+    Convenção:
+      - Usa diferenças consecutivas de depth como incrementos de espessura.
+      - A espessura dz entre (i -> i+1) é atribuída à fácies do ponto i.
+      - Ordena por depth crescente e ignora valores não finitos.
+
+    Retorna:
+      runs: list[tuple[int, float]]
+      t_total: float (soma das espessuras nos runs)
     """
-    Calcula Cohen's Kappa a partir de dois vetores categóricos (bins).
-    Retorna (kappa, n_valid).
-    """
-    import numpy as np
+    d = np.asarray(depth, dtype=float).ravel()
+    f = np.asarray(facies_values, dtype=float).ravel()
+    n = min(d.size, f.size)
+    if n < 2:
+        return [], 0.0
 
-    r = np.asarray(real_bins)
-    s = np.asarray(sim_bins)
+    d = d[:n]
+    f = f[:n]
 
-    n = min(r.size, s.size)
-    if n == 0:
-        return 0.0, 0
+    mask = np.isfinite(d) & np.isfinite(f)
+    d = d[mask]
+    f = f[mask].astype(int)
 
-    r = r[:n]
-    s = s[:n]
+    if d.size < 2:
+        return [], 0.0
 
-    if valid_mask is None:
-        valid_mask = np.ones(n, dtype=bool)
-    else:
-        valid_mask = np.asarray(valid_mask, dtype=bool)[:n]
+    # ordena por depth (MD/TVD)
+    order = np.argsort(d)
+    d = d[order]
+    f = f[order]
 
-    r = r[valid_mask]
-    s = s[valid_mask]
+    dz = np.diff(d)
+    dz = np.abs(dz)
+    fac_step = f[:-1]
 
-    if r.size == 0:
-        return 0.0, 0
+    # remove passos com dz ~ 0
+    keep = dz > 1e-12
+    dz = dz[keep]
+    fac_step = fac_step[keep]
 
-    # classes presentes (união)
-    classes = np.unique(np.concatenate([r, s]))
-    k = classes.size
+    if dz.size == 0:
+        return [], 0.0
 
-    if k == 1:
-        return None, int(r.size)
+    runs = []
+    cur_fac = int(fac_step[0])
+    cur_t = float(dz[0])
 
-    idx = {c: i for i, c in enumerate(classes)}
-    conf = np.zeros((k, k), dtype=int)
-    for rr, ss in zip(r, s):
-        conf[idx[rr], idx[ss]] += 1
+    for ff, tt in zip(fac_step[1:], dz[1:]):
+        ff = int(ff)
+        tt = float(tt)
+        if ff == cur_fac:
+            cur_t += tt
+        else:
+            runs.append((cur_fac, cur_t))
+            cur_fac = ff
+            cur_t = tt
+    runs.append((cur_fac, cur_t))
 
-    N = conf.sum()
-    if N == 0:
-        return 0.0, 0
+    t_total = float(sum(t for _, t in runs))
+    return runs, t_total
 
-    p0 = float(np.trace(conf) / N)  # acerto observado
-    pr = conf.sum(axis=1) / N       # marginais real
-    ps = conf.sum(axis=0) / N       # marginais sim
-    pe = float((pr * ps).sum())     # acerto esperado ao acaso
 
-    if (1.0 - pe) <= 1e-12:
-        return 0.0, int(N)
+def _merge_adjacent_same_facies(runs):
+    if not runs:
+        return []
+    out = [runs[0]]
+    for fac, t in runs[1:]:
+        pf, pt = out[-1]
+        if int(fac) == int(pf):
+            out[-1] = (pf, float(pt) + float(t))
+        else:
+            out.append((int(fac), float(t)))
+    return out
 
-    kappa = float((p0 - pe) / (1.0 - pe))
-    return kappa, int(N)
+
+def _merge_thin_runs(runs, t_min):
+    """Mescla runs finos (< t_min) no vizinho (preferindo o vizinho mais espesso)."""
+    if not runs:
+        return []
+    try:
+        t_min = float(t_min)
+    except Exception:
+        t_min = 0.0
+    if t_min <= 0.0 or len(runs) <= 1:
+        return _merge_adjacent_same_facies(runs)
+
+    runs = [(int(f), float(t)) for f, t in runs]
+    runs = _merge_adjacent_same_facies(runs)
+
+    changed = True
+    # iterativo: cada merge pode criar novos runs finos
+    while changed and len(runs) > 1:
+        changed = False
+        for i, (fac, t) in enumerate(runs):
+            if t >= t_min:
+                continue
+
+            # escolhe alvo
+            if i == 0:
+                # merge no próximo
+                f2, t2 = runs[1]
+                runs[1] = (f2, t2 + t)
+                runs.pop(0)
+            elif i == len(runs) - 1:
+                f1, t1 = runs[-2]
+                runs[-2] = (f1, t1 + t)
+                runs.pop(-1)
+            else:
+                fL, tL = runs[i - 1]
+                fR, tR = runs[i + 1]
+                # vai para o vizinho mais espesso (tL vs tR)
+                if tL >= tR:
+                    runs[i - 1] = (fL, tL + t)
+                    runs.pop(i)
+                else:
+                    runs[i + 1] = (fR, tR + t)
+                    runs.pop(i)
+
+            runs = _merge_adjacent_same_facies(runs)
+            changed = True
+            break
+
+    return _merge_adjacent_same_facies(runs)
+
+
+def _runs_to_proportions(runs):
+    """Converte runs (facies, thickness) em proporções por espessura."""
+    if not runs:
+        return {}, 0.0
+    tot = float(sum(t for _, t in runs))
+    if tot <= 1e-12:
+        return {}, 0.0
+    acc = {}
+    for fac, t in runs:
+        fac = int(fac)
+        acc[fac] = acc.get(fac, 0.0) + float(t)
+    props = {fac: float(th / tot) for fac, th in acc.items()}
+    return props, tot
 
 
 def compute_well_match_score_from_profiles(
     real_depth, real_fac,
     sim_depth,  sim_fac,
     *,
-    n_bins=200,
-    w_strat=0.7,
-    w_thick=0.3,
+    t_min=0.30,
     ignore_real_zeros=True,
-    use_kappa=True,
+    **_ignored,
 ):
-    """
-    Score 0..1 para REAL vs SIM, usando:
-      - Fácies via bins normalizados (n_bins)
-      - Espessura total do intervalo
+    """Score 0..1 baseado em PROPORÇÕES por espessura (sem bin-a-bin / sem kappa).
+
+    Pipeline:
+      1) Converte REAL e SIM em runs (facies, thickness) usando diferenças de depth.
+      2) (Opcional) remove facies 0 no REAL (muito comum ser "sem dado") antes de calcular proporções.
+      3) Mescla segmentos finos (< t_min) no vizinho para reduzir ruído estratigráfico.
+      4) Calcula proporções p(f) = T_f / T_total e score por distância L1:
+
+         D = 0.5 * sum_f | p_real(f) - p_sim(f) |
+         Score = 1 - D
 
     Retorna dict com:
-      score, strat_acc, strat_kappa_norm, thick_score, n_valid_bins,
-      t_real, t_sim
+      score, prop_score, prop_distance, t_real, t_sim, t_real_valid, t_sim_valid,
+      runs_real, runs_sim, props_real, props_sim
     """
-    import numpy as np
+    # runs "brutos"
+    runs_r, t_r = _profile_to_runs(real_depth, real_fac)
+    runs_s, t_s = _profile_to_runs(sim_depth,  sim_fac)
 
-    # thickness
-    def _thk(d):
-        if d is None:
-            return 0.0
-        d = np.asarray(d, dtype=float)
-        d = d[np.isfinite(d)]
-        if d.size < 2:
-            return 0.0
-        return float(d.max() - d.min())
+    # ignora zeros no REAL (opcional) *antes* de suavizar
+    if ignore_real_zeros and runs_r:
+        runs_r = [(f, t) for (f, t) in runs_r if int(f) != 0]
 
-    t_real = _thk(real_depth)
-    t_sim  = _thk(sim_depth)
+    # suavização por espessura mínima
+    runs_r_f = _merge_thin_runs(runs_r, t_min=t_min)
+    runs_s_f = _merge_thin_runs(runs_s, t_min=t_min)
 
-    if t_real <= 1e-9:
-        thick_score = 0.0
-    else:
-        rel_err = abs(t_sim - t_real) / t_real
-        thick_score = float(np.clip(1.0 - rel_err, 0.0, 1.0))
+    props_r, t_rv = _runs_to_proportions(runs_r_f)
+    props_s, t_sv = _runs_to_proportions(runs_s_f)
 
-    # bins normalizados (mesma rotina do relatório)
-    r_norm = resample_to_normalized_depth(real_depth, real_fac, n_samples=n_bins).astype(int)
-    s_norm = resample_to_normalized_depth(sim_depth,  sim_fac,  n_samples=n_bins).astype(int)
+    keys = set(props_r.keys()) | set(props_s.keys())
+    l1 = 0.0
+    for k in keys:
+        l1 += abs(float(props_r.get(k, 0.0)) - float(props_s.get(k, 0.0)))
 
-    valid = np.ones(n_bins, dtype=bool)
-    valid &= np.isfinite(r_norm)
-    valid &= (r_norm != -999.25)
-    if ignore_real_zeros:
-        valid &= (r_norm != 0)
+    prop_distance = 0.5 * float(l1)
+    prop_score = float(np.clip(1.0 - prop_distance, 0.0, 1.0))
 
-    n_valid = int(valid.sum())
-    if n_valid == 0:
-        return {
-            "score": 0.0,
-            "strat_acc": 0.0,
-            "strat_kappa_norm": 0.0,
-            "thick_score": thick_score,
-            "n_valid_bins": 0,
-            "t_real": float(t_real),
-            "t_sim": float(t_sim),
-        }
-
-    strat_acc = float((r_norm[valid] == s_norm[valid]).sum() / n_valid)
-
-    kappa_norm = 0.0
-    if use_kappa:
-        kappa, _ = _cohen_kappa_from_bins(r_norm, s_norm, valid_mask=valid)
-
-    if kappa is None:
-        # Kappa não informativo → usa apenas ACC
-        kappa_norm = None
-        strat_score = strat_acc
-    else:
-        kappa_norm = float(np.clip((kappa + 1.0) / 2.0, 0.0, 1.0))
-        strat_score = 0.5 * strat_acc + 0.5 * kappa_norm
-
-
-    w_sum = max(w_strat + w_thick, 1e-9)
-    score = float((w_strat * strat_score + w_thick * thick_score) / w_sum)
-
+    # mantém compatibilidade com campos antigos (não usados no novo ranking)
     return {
-        "score": score,
-        "strat_acc": strat_acc,
-        "strat_kappa_norm": 0.0 if kappa_norm is None else kappa_norm,
-        "thick_score": thick_score,
-        "n_valid_bins": n_valid,
-        "t_real": float(t_real),
-        "t_sim": float(t_sim),
+        "score": prop_score,
+        "prop_score": prop_score,
+        "prop_distance": prop_distance,
+        "props_real": props_r,
+        "props_sim": props_s,
+        "runs_real": runs_r_f,
+        "runs_sim": runs_s_f,
+        "t_real": float(t_r),
+        "t_sim": float(t_s),
+        "t_real_valid": float(t_rv),
+        "t_sim_valid": float(t_sv),
+        # campos legacy:
+        "strat_acc": 0.0,
+        "strat_kappa_norm": 0.0,
+        "thick_score": 0.0,
+        "n_valid_bins": int(max(0.0, t_rv) * 1000.0),  # só pra não virar zero à toa
     }
+
 
 def compute_well_match_score(
     real_depth, real_facies,
     sim_depth, sim_facies,
     *,
-    n_bins=200,
-    w_strat=0.7,
-    w_thick=0.3,
+    t_min=0.30,
     ignore_real_zeros=True,
-    use_kappa=True,
+    **kwargs,
 ):
-    """
-    Backward-compatible alias.
-    Mantém window.py antigo funcionando.
-    """
+    """Alias: mantém window.py funcionando, mas agora usa score por proporção."""
     return compute_well_match_score_from_profiles(
         real_depth, real_facies,
         sim_depth, sim_facies,
-        n_bins=n_bins,
-        w_strat=w_strat,
-        w_thick=w_thick,
+        t_min=t_min,
         ignore_real_zeros=ignore_real_zeros,
-        use_kappa=use_kappa,
+        **kwargs,
     )
 
 
@@ -963,25 +1020,18 @@ def compute_well_fit_score(
     real_depth, real_facies,
     sim_depth, sim_facies,
     *,
-    n_bins=200,
-    w_strat=0.7,
-    w_thick=0.3,
+    t_min=0.30,
     ignore_real_zeros=True,
-    use_kappa=True,
+    **kwargs,
 ):
-    """
-    Alias do score “final” (mesma lógica do match score).
-    """
+    """Alias do score final (mesma lógica do match score)."""
     return compute_well_match_score(
         real_depth, real_facies,
         sim_depth, sim_facies,
-        n_bins=n_bins,
-        w_strat=w_strat,
-        w_thick=w_thick,
+        t_min=t_min,
         ignore_real_zeros=ignore_real_zeros,
-        use_kappa=use_kappa,
+        **kwargs,
     )
-
 
 def generate_detailed_metrics_df(facies_array, target_grid=None):
     """Gera DataFrame detalhado com volumes baseados no grid fornecido."""
