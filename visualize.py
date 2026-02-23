@@ -254,7 +254,11 @@ def run(
     grid_base.cell_data["Facies"] = use_facies
 
     # Aplica exagero Z
-    grid_base.points[:, 2] *= z_exag
+    # grid_base.points[:, 2] *= z_exag
+
+    state.setdefault("base_bounds", grid_base.bounds)   # bounds no z_exag = 1
+    state.setdefault("bounds_actor", None)
+    state.setdefault("last_bounds_z", None)
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
@@ -267,17 +271,29 @@ def run(
     state.setdefault("j_min", 0)
     state.setdefault("j_max", ny - 1)
     
-    state["thickness_presets"] = {
+    default_presets = {
         "Espessura": ("vert_Ttot_reservoir", "Espessura total reservatório (m)"),
-        "NTG coluna": ("vert_NTG_col_reservoir", "NTG coluna (reservatório)"),
-        "NTG envelope": ("vert_NTG_env_reservoir", "NTG envelope (reservatório)"),
-        "Maior pacote": ("vert_Tpack_max_reservoir", "Maior pacote vertical (m)"),
-        "Nº pacotes": ("vert_n_packages_reservoir", "Número de pacotes verticais"),
-        "ICV": ("vert_ICV_reservoir", "Índice de continuidade vertical (ICV)"),
-        "Qv": ("vert_Qv_reservoir", "Índice combinado Qv"),
-        "Qv absoluto": ("vert_Qv_abs_reservoir", "Índice de qualidade vertical absoluta (Qv_abs)"),
+        "Proporção de fácies (coluna)": ("vert_NTG_col_reservoir", "Proporção de fácies (coluna)"),
+        "Proporção de fácies (envelope)": ("vert_NTG_env_reservoir", "Proporção de fácies (envelope)"),
+        "Maior pacote": ("vert_Tpack_max_reservoir", "Maior pacote (m)"),
+        "Nº pacotes": ("vert_n_packages_reservoir", "Nº pacotes"),
+        "ICV": ("vert_ICV_reservoir", "ICV"),
+        "Qv": ("vert_Qv_reservoir", "Qv"),
+        "Qv absoluto": ("vert_Qv_abs_reservoir", "Qv absoluto"),
     }
-    state.setdefault("thickness_mode", "Espessura")
+
+
+    existing = state.get("thickness_presets")
+    if not isinstance(existing, dict):
+        existing = {}
+
+    merged = dict(existing)
+    for k, v in default_presets.items():
+        merged.setdefault(k, v)
+
+    state["thickness_presets"] = merged
+
+    # state.setdefault("thickness_mode", "Espessura")
 
     def attach_cell_data_from_original(clipped, original):
         if "vtkOriginalCellIds" not in clipped.cell_data: return clipped
@@ -339,18 +355,41 @@ def run(
     def _update_thickness_from_state():
         presets = state.get("thickness_presets") or {}
         mode_label = state.get("thickness_mode", "Espessura")
-        
-        if mode_label in presets:
-            s_name, s_title = presets[mode_label]
-            state["current_thickness_scalar"] = s_name
-            state["current_thickness_title"] = s_title
-            
-            if s_name in grid_base.cell_data:
-                arr = grid_base.cell_data[s_name]
-                vmin = 1e-6
-                vmax = float(np.nanmax(arr)) 
-                if np.isnan(vmax): vmax = 1.0
-                state["thickness_clim"] = (vmin, vmax if vmax > vmin else vmin + 1)
+
+        if mode_label not in presets:
+            return
+
+        s_name, s_title = presets[mode_label]
+        state["current_thickness_scalar"] = s_name
+        state["current_thickness_title"] = s_title
+
+        if state.get("thickness_clim_manual", False):
+            return
+
+        if s_name in grid_base.cell_data:
+            arr = grid_base.cell_data[s_name]
+            finite = arr[np.isfinite(arr)]
+            if finite.size == 0:
+                state["thickness_clim"] = (0.0, 1.0)
+                return
+
+            if ("Proporção de fácies" in s_name) or ("ICV" in s_name) or ("Qv" in s_name):
+                state["thickness_clim"] = (0.0, 1.0)
+                return
+
+            if ("Ttot" in s_name) or ("thickness" in s_name.lower()) or ("Espessura" in mode_label):
+                vmax = float(np.nanmax(finite))
+                if not np.isfinite(vmax) or vmax <= 0:
+                    vmax = 1.0
+                state["thickness_clim"] = (0.0, vmax)
+                return
+
+            vmin = float(np.nanmin(finite))
+            vmax = float(np.nanmax(finite))
+            if not np.isfinite(vmin): vmin = 0.0
+            if not np.isfinite(vmax) or vmax <= vmin: vmax = vmin + 1e-6
+            state["thickness_clim"] = (vmin, vmax)
+
 
     state["update_thickness"] = _update_thickness_from_state
     
@@ -470,50 +509,68 @@ def run(
             color_main = "lightcoral"
 
         elif mode == "thickness_local":
+            # Atualiza scalar/título conforme preset selecionado (sem pisar em clim manual)
             _update_thickness_from_state()
+
             s_name = state.get("current_thickness_scalar", THICKNESS_SCALAR_NAME)
             bar_title = state.get("current_thickness_title", THICKNESS_SCALAR_TITLE)
-            
+
             if s_name in mesh.cell_data:
                 try:
                     mesh_bg = mesh.threshold(1e-6, invert=True, scalars=s_name)
                     mesh_main = mesh.threshold(1e-6, scalars=s_name)
-                except: mesh_bg, mesh_main = mesh, None
-                
+                except:
+                    mesh_bg, mesh_main = mesh, None
+
                 scalar_name = s_name
                 cmap = state.get("thickness_cmap", "plasma")
-                
-                # Se a comparação quiser uma escala global (mesmo vmax para todos),
-                # ela pode preencher state["thickness_global_clim"].
+
+                # 1) comparação pode setar global_clim
                 if state.get("thickness_global_clim") is not None:
                     clim = state["thickness_global_clim"]
-                elif mesh_main and mesh_main.n_cells > 0:
-                    arr = mesh_main.cell_data[s_name]
-                    vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-                    # para espessura, vmin em geral deve ser >= 0
-                    if not np.isfinite(vmin) or vmin < 0: vmin = 0.0
-                    if not np.isfinite(vmax) or vmax <= vmin: vmax = vmin + 1e-6
-                    clim = (float(vmin), float(vmax))
                 else:
-                    clim = (0.0, 1.0)
+                    # 2) caso normal: usa sempre o clim do STATE (calculado no grid inteiro)
+                    clim = state.get("thickness_clim")
+                    if clim is None and (s_name in grid_base.cell_data):
+                        arr = grid_base.cell_data[s_name]
+                        finite = arr[np.isfinite(arr)]
+                        if finite.size > 0:
+                            clim = (float(np.nanmin(finite)), float(np.nanmax(finite)))
+                        else:
+                            clim = (0.0, 1.0)
+            else:
+                mesh_main = mesh
+                show_scalar = False
 
         elif mode == "scalar":
             s_name = state.get("current_scalar_name")
             bar_title = state.get("current_scalar_title", s_name)
-            
+
             if s_name and s_name in mesh.cell_data:
-                mesh_main = mesh # Mostra geometria completa (incluindo zeros)
+                mesh_main = mesh
                 scalar_name = s_name
                 cmap = state.get("current_scalar_cmap", "viridis")
-                clim = state.get("current_scalar_clim", None)
-                
+
+                clim = state.get("current_scalar_clim")
                 if clim is None:
-                    arr = mesh.cell_data[s_name]
-                    v_valid = arr[np.isfinite(arr)]
-                    if v_valid.size > 0:
-                        clim = (float(v_valid.min()), float(v_valid.max()))
+                    # pega do grid inteiro (não do mesh cortado), para a legenda não variar com slices
+                    if s_name in grid_base.cell_data:
+                        arr_src = grid_base.cell_data[s_name]
                     else:
+                        arr_src = mesh.cell_data[s_name]
+
+                    finite = arr_src[np.isfinite(arr_src)]
+                    if finite.size == 0:
                         clim = (0.0, 1.0)
+                    else:
+                        vmin = float(np.nanmin(finite))
+                        vmax = float(np.nanmax(finite))
+                        if vmax <= vmin:
+                            vmax = vmin + 1e-6
+                        clim = (vmin, vmax)
+
+                    # salva para o 2D/compare usar igual
+                    state["current_scalar_clim"] = clim
             else:
                 mesh_main = mesh
                 show_scalar = False
@@ -571,7 +628,26 @@ def run(
         if main_actor: 
             main_actor.SetScale(1.0, 1.0, z_scale)
             if (mode == "thickness_local" or mode == "scalar") and bar_title:
-                plotter.add_scalar_bar(title=bar_title, mapper=main_actor.mapper, n_labels=5, fmt="%.1f")
+                plotter.add_scalar_bar(title=bar_title, mapper=main_actor.mapper, n_labels=5, fmt="%.1f", title_font_size=14, label_font_size=12)
+
+        if state.get("bounds_actor") is None:
+            state["bounds_actor"] = plotter.show_bounds(
+                grid="back",
+                location="outer",
+                ticks="outside",
+                color='gray',
+                minor_ticks=True,
+                n_xlabels=5,
+                n_ylabels=5,
+                n_zlabels=5,
+                font_size=8,
+                fmt="%.0f",
+            )
+        
+        if state["last_bounds_z"] != z_scale:
+            xmin, xmax, ymin, ymax, zmin, zmax = state["base_bounds"]
+            state["bounds_actor"].SetBounds(xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
+            state["last_bounds_z"] = z_scale
 
     def _refresh():
         new_source = state.get("current_grid_source")
@@ -650,65 +726,3 @@ def run(
     state["refresh"] = _refresh
     return plotter, state
 
-def show_thickness_2d(surf, scalar_name, title=None):
-    # 1) limpa valores negativos (viram NaN)
-    arr = surf.cell_data[scalar_name]
-    arr = np.where(arr < 0, np.nan, arr)
-    surf.cell_data[scalar_name] = arr
-
-    # 2) descobre o nome base (sem _2d) para buscar a faixa padrão
-    base_name = scalar_name[:-4] if scalar_name.endswith("_2d") else scalar_name
-    clim = get_2d_clim(base_name, arr)
-
-    # 3) plota usando clim fixo (se houver)
-    p = pv.Plotter(window_size=(1000, 800))
-    p.add_mesh(
-        surf,
-        scalars=scalar_name,
-        cmap="plasma",
-        show_edges=True,
-        edge_color="black",
-        line_width=0.5,
-        show_scalar_bar=False,
-        nan_color="white",
-        preference="cell",
-        clim=clim,  # << chave para padronizar cores
-    )
-    p.view_xy()
-    p.enable_parallel_projection()
-    p.enable_image_style()
-    p.set_background("white")
-    p.add_scalar_bar(title=title if title else scalar_name)
-    p.show()
-
-
-def update_2d_plot(plotter, array_name_3d, title="Mapa 2D"):
-    surf = make_thickness_2d_from_grid(array_name_3d, array_name_3d + "_2d")
-    scalar_name_2d = array_name_3d + "_2d"
-
-    # limpa negativos
-    arr = surf.cell_data[scalar_name_2d]
-    arr = np.where(arr < 0, np.nan, arr)
-    surf.cell_data[scalar_name_2d] = arr
-
-    # usa a mesma lógica de faixa fixa
-    clim = get_2d_clim(array_name_3d, arr)
-
-    plotter.clear()
-    plotter.add_mesh(
-        surf,
-        scalars=scalar_name_2d,
-        cmap="plasma",
-        show_edges=True,
-        edge_color="black",
-        line_width=0.5,
-        nan_color="white",
-        show_scalar_bar=False,
-        preference="cell",
-        clim=clim,
-    )
-    plotter.view_xy()
-    plotter.enable_parallel_projection()
-    plotter.set_background("white")
-    plotter.add_scalar_bar(title=title)
-    plotter.reset_camera()
