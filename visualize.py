@@ -465,6 +465,11 @@ def run(
 
         mesh = apply_slices_filter(mesh)
 
+        try:
+            state["base_bounds"] = mesh.bounds
+        except Exception:
+            pass
+
         _clean_all_bars(plotter)
         mesh_main = None
         mesh_bg = None
@@ -644,10 +649,36 @@ def run(
                 fmt="%.0f",
             )
         
-        if state["last_bounds_z"] != z_scale:
-            xmin, xmax, ymin, ymax, zmin, zmax = state["base_bounds"]
+        base_bounds = state.get("base_bounds")
+        last_bb = state.get("last_base_bounds")
+        last_z = state.get("last_bounds_z")
+
+        need_update = False
+
+        if base_bounds is not None:
+            # compara base_bounds com o último aplicado (tolerância pequena)
+            if last_bb is None:
+                need_update = True
+            else:
+                try:
+                    tol = 1e-6
+                    for a, b in zip(base_bounds, last_bb):
+                        if abs(float(a) - float(b)) > tol:
+                            need_update = True
+                            break
+                except Exception:
+                    need_update = True
+
+        # se z_scale mudou, também precisa atualizar
+        if last_z != z_scale:
+            need_update = True
+
+        if need_update and (state.get("bounds_actor") is not None) and base_bounds is not None:
+            xmin, xmax, ymin, ymax, zmin, zmax = base_bounds
             state["bounds_actor"].SetBounds(xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
+
             state["last_bounds_z"] = z_scale
+            state["last_base_bounds"] = tuple(base_bounds)
 
     def _refresh():
         new_source = state.get("current_grid_source")

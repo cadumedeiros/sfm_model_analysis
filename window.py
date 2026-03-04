@@ -369,50 +369,137 @@ class FaciesGroupingDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Erro", f"Falha ao salvar configuração:\n{e}")
 
+class ProportionPropsDialog(QtWidgets.QDialog):
+    """Diálogo para o usuário marcar quais propriedades são proporções (0–1)."""
+
+    def __init__(self, prop_names, current_set=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Propriedades que são proporção (fixar 0–1)")
+        self.resize(520, 520)
+
+        self._prop_names = list(prop_names or [])
+        self._prop_names.sort(key=lambda s: str(s).lower())
+        self._current = set(current_set or set())
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        info = QtWidgets.QLabel(
+            "Marque as propriedades que representam proporções (0 a 1).\n"
+            "Na aba Comparação, estas propriedades terão legenda fixada em 0–1."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.txt_filter = QtWidgets.QLineEdit()
+        self.txt_filter.setPlaceholderText("Filtrar... (ex.: Sand, NTG, Qv, ICV)")
+        layout.addWidget(self.txt_filter)
+
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        layout.addWidget(self.listw, 1)
+
+        btns_top = QtWidgets.QHBoxLayout()
+        self.btn_all = QtWidgets.QPushButton("Marcar tudo")
+        self.btn_none = QtWidgets.QPushButton("Desmarcar tudo")
+        btns_top.addWidget(self.btn_all)
+        btns_top.addWidget(self.btn_none)
+        btns_top.addStretch(1)
+        layout.addLayout(btns_top)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_ok = QtWidgets.QPushButton("OK")
+        self.btn_cancel = QtWidgets.QPushButton("Cancelar")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+        layout.addLayout(btns)
+
+        self._rebuild_list()
+
+        self.txt_filter.textChanged.connect(self._rebuild_list)
+        self.btn_all.clicked.connect(self._mark_all)
+        self.btn_none.clicked.connect(self._mark_none)
+
+    def _rebuild_list(self):
+        self.listw.blockSignals(True)
+        try:
+            self.listw.clear()
+            flt = (self.txt_filter.text() or "").strip().lower()
+
+            for name in self._prop_names:
+                s = str(name)
+                if flt and flt not in s.lower():
+                    continue
+
+                it = QtWidgets.QListWidgetItem(s)
+                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+                it.setCheckState(QtCore.Qt.Checked if s in self._current else QtCore.Qt.Unchecked)
+                self.listw.addItem(it)
+        finally:
+            self.listw.blockSignals(False)
+
+    def _mark_all(self):
+        for i in range(self.listw.count()):
+            self.listw.item(i).setCheckState(QtCore.Qt.Checked)
+
+    def _mark_none(self):
+        for i in range(self.listw.count()):
+            self.listw.item(i).setCheckState(QtCore.Qt.Unchecked)
+
+    def get_selected(self):
+        out = set()
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            if it.checkState() == QtCore.Qt.Checked:
+                out.add(str(it.text()))
+        return out
+
 
 class MainWindow(QtWidgets.QMainWindow):
 
-    # ------------------------------------------------------------------
-    # Compat: open_compare_dialog (some builds call this from the menu)
-    # ------------------------------------------------------------------
-    def open_compare_dialog(self):
-        """Abrir diálogo para carregar modelos adicionais (comparação)."""
-        # Prefer an existing dedicated dialog if present
-        fn = getattr(self, "open_compare_models_dialog", None)
-        if callable(fn):
-            return fn()
+    # # ------------------------------------------------------------------
+    # # Compat: open_compare_dialog (some builds call this from the menu)
+    # # ------------------------------------------------------------------
+    # def open_compare_dialog(self):
+    #     """Abrir diálogo para carregar modelos adicionais (comparação)."""
+    #     # Prefer an existing dedicated dialog if present
+    #     fn = getattr(self, "open_compare_models_dialog", None)
+    #     if callable(fn):
+    #         return fn()
 
-        # Fallback: file picker + load_compare_model if available
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
-        )
-        if not paths:
-            return
+    #     # Fallback: file picker + load_compare_model if available
+    #     paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+    #         self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
+    #     )
+    #     if not paths:
+    #         return
 
-        study_name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Novo Estudo",
-            "Nome do Estudo / Grupo de Calibração:",
-            text="Importação Recente",
-        )
-        if not ok or not study_name.strip():
-            study_name = "Importação Recente"
+    #     study_name, ok = QtWidgets.QInputDialog.getText(
+    #         self,
+    #         "Novo Estudo",
+    #         "Nome do Estudo / Grupo de Calibração:",
+    #         text="Importação Recente",
+    #     )
+    #     if not ok or not study_name.strip():
+    #         study_name = "Importação Recente"
 
-        loader = getattr(self, "load_compare_model", None)
-        if not callable(loader):
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Função indisponível",
-                "load_compare_model não está disponível nesta versão do window.py.",
-            )
-            return
+    #     loader = getattr(self, "load_compare_model", None)
+    #     if not callable(loader):
+    #         QtWidgets.QMessageBox.warning(
+    #             self,
+    #             "Função indisponível",
+    #             "load_compare_model não está disponível nesta versão do window.py.",
+    #         )
+    #         return
 
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            for path in paths:
-                loader(path, study_name=study_name)
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+    #     QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+    #     try:
+    #         for path in paths:
+    #             loader(path, study_name=study_name)
+    #     finally:
+    #         QtWidgets.QApplication.restoreOverrideCursor()
 
     def __init__(self, mode="facies", z_exag=15.0, show_scalar_bar=True, reservoir_facies=None):
         super().__init__()
@@ -486,6 +573,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
         self.state["reservoir_facies"] = set(self.state_reservoir_raw)
         self.state["current_facies_raw"] = np.asarray(facies).ravel().astype(np.int32)
+
+        self.state["lock_axes_bounds"] = True
 
         self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
         self.compare_path = None
@@ -1285,9 +1374,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not getattr(self, "wells", None):
             return
 
+        import numpy as np
+        from PyQt5 import QtWidgets, QtCore
+
         z_exag = float(self.state.get("z_exag", 1.0))
 
-        # 1. Identifica quais poços devem estar visíveis
+        # ---------- quais poços estão marcados ----------
         checked = set()
         it = QtWidgets.QTreeWidgetItemIterator(self.project_tree)
         while it.value():
@@ -1299,135 +1391,157 @@ class MainWindow(QtWidgets.QMainWindow):
                     checked.add(str(wn))
             it += 1
 
-        # Otimização de estado
+        # ---------- cache ----------
         state_key = (tuple(sorted(checked)), z_exag)
         if getattr(self, "_wells_draw_state", None) == state_key:
+            # garante que a caixa esteja travada corretamente (pode ter sido recriada em outro refresh)
+            self._lock_axes_bounds_to_grid(self.state)
             return
         self._wells_draw_state = state_key
 
         if not hasattr(self, "_well_actors"):
             self._well_actors = {}
 
-        # 2. LIMPEZA: Remove atores antigos
-        for wn in list(self._well_actors.keys()):
-            if wn not in checked:
-                actors_list = self._well_actors.pop(wn)
-                if not isinstance(actors_list, list):
-                    actors_list = [actors_list]
-                
-                for actor in actors_list:
-                    try:
-                        self.plotter.remove_actor(actor)
-                    except Exception:
-                        pass
-
-        # 3. DESENHO
-        markers_db = getattr(self, "markers_db", {})
-
-        for well_name in sorted(checked):
-            if well_name in self._well_actors:
-                continue
-
-            well = self.wells.get(well_name)
-            if well is None:
-                continue
-
-            current_well_actors = []
-
+        def _exclude_from_bounds(actor):
+            """Impede que este ator influencie o cálculo de bounds do renderer/cube-axes."""
             try:
-                # --- A) TUBO DO POÇO ---
-                mesh = well.get_vtk_polydata(z_exag)
-                
-                if mesh is not None and mesh.n_points > 0:
-                    # A.1 Tubo
-                    if "Facies_Real" in mesh.point_data and self.pv_cmap is not None:
-                        # Aplica agrupamento (config de fácies) também aos poços carregados
-                        scal_name = "Facies_Real"
-                        if getattr(self, "use_facies_grouping", False) and getattr(self, "facies_grouping_map", None):
-                            try:
-                                fr = np.asarray(mesh.point_data["Facies_Real"]).astype(np.int32)
-                                frg = self.apply_facies_grouping(fr)
-                                mesh.point_data["Facies_Real_Group"] = frg
-                                scal_name = "Facies_Real_Group"
-                            except Exception:
-                                scal_name = "Facies_Real"
-                        actor_tube = self.plotter.add_mesh(
-                            mesh,
-                            scalars=scal_name,
-                            cmap=self.pv_cmap,
-                            clim=self.clim,
-                            line_width=3,
-                            name=f"well_{well_name}",
-                            reset_camera=False,
-                            show_scalar_bar=False
-                        )
-                    else:
-                        actor_tube = self.plotter.add_mesh(
-                            mesh,
-                            color="black",
-                            line_width=3,
-                            name=f"well_{well_name}",
-                            reset_camera=False,
-                        )
-                    current_well_actors.append(actor_tube)
+                if actor is None:
+                    return
+                if hasattr(actor, "SetUseBounds"):
+                    actor.SetUseBounds(False)
+            except Exception:
+                pass
 
-                    # --- A.2 RÓTULO DO NOME DO POÇO ---
-                    # Pega o primeiro ponto (topo do poço)
-                    top_point = mesh.points[0]
-                    
+        
+        try:
+            self.plotter.disable_render()
+        except Exception:
+            pass
+
+        try:
+            # ---------- remove atores de poços desmarcados ----------
+            for wn in list(self._well_actors.keys()):
+                if wn not in checked:
+                    actors = self._well_actors.pop(wn)
+                    if not isinstance(actors, list):
+                        actors = [actors]
+                    for a in actors:
+                        try:
+                            self.plotter.remove_actor(a)
+                        except Exception:
+                            pass
+
+            markers_db = getattr(self, "markers_db", {})
+
+            # ---------- desenha poços marcados ----------
+            for well_name in sorted(checked):
+                if well_name in self._well_actors:
+                    continue
+
+                well = self.wells.get(well_name)
+                if well is None:
+                    continue
+
+                well_actors = []
+
+                try:
+                    mesh = well.get_vtk_polydata(z_exag)
+                    if mesh is None or getattr(mesh, "n_points", 0) == 0:
+                        continue
+
+                    top_point = np.array(mesh.points[0], dtype=float)
+
+                    actor_line = self.plotter.add_mesh(
+                        mesh,
+                        color="saddlebrown",
+                        line_width=3,
+                        name=f"well_{well_name}",
+                        reset_camera=False,
+                        show_scalar_bar=False
+                    )
+                    _exclude_from_bounds(actor_line)
+                    well_actors.append(actor_line)
+
                     actor_name = self.plotter.add_point_labels(
-                        [top_point],           
-                        [well_name],           
-                        font_size=10,          
+                        [top_point],
+                        [well_name],
+                        font_size=10,
                         text_color="black",
                         shape="rounded_rect",
                         shape_color="white",
-                        shape_opacity=0.3,     
-                        show_points=False,     
+                        shape_opacity=0.25,
+                        show_points=False,
                         reset_camera=False,
-                        always_visible=True,   # <--- CORREÇÃO AQUI: Garante que não pisca/some
+                        always_visible=True,
                         name=f"name_{well_name}"
                     )
-                    current_well_actors.append(actor_name)
+                    _exclude_from_bounds(actor_name)
+                    well_actors.append(actor_name)
 
-                # --- B) MARCADORES (Se houver) ---
-                m_list = markers_db.get(well_name, [])
-                if m_list:
-                    m_mesh, m_labels = well.get_markers_mesh(m_list, z_exag)
-                    
-                    if m_mesh is not None and m_mesh.n_points > 0:
-                        # B.1 Esferas dos Marcadores
-                        actor_markers = self.plotter.add_mesh(
-                            m_mesh,
-                            color="red",
-                            render_points_as_spheres=False,
-                            reset_camera=False,
-                            name=f"markers_{well_name}"
-                        )
-                        current_well_actors.append(actor_markers)
+                    # Marcadores (1 mesh + 1 labels por poço, leve)
+                    m_list = markers_db.get(well_name, [])
+                    if m_list:
+                        m_mesh, m_labels = well.get_markers_mesh(m_list, z_exag)
+                        if m_mesh is not None and getattr(m_mesh, "n_points", 0) > 0:
+                            actor_markers = self.plotter.add_mesh(
+                                m_mesh,
+                                color="red",
+                                render_points_as_spheres=True,
+                                point_size=8,
+                                reset_camera=False,
+                                name=f"markers_{well_name}"
+                            )
+                            _exclude_from_bounds(actor_markers)
+                            well_actors.append(actor_markers)
 
-                        # B.2 Texto dos Marcadores
-                        # Nota: Se quiser que os textos dos marcadores também nunca sumam
-                        # (mesmo dentro da terra), adicione always_visible=True aqui também.
-                        # Por padrão, deixei sem para dar noção de profundidade.
-                        actor_labels = self.plotter.add_point_labels(
-                            m_mesh.points,
-                            m_labels,
-                            font_size=12,
-                            point_color="red",
-                            text_color="black",
-                            show_points=False,
-                            reset_camera=False,
-                            shape_opacity=0.5,
-                            # always_visible=True, # Descomente se quiser ver labels através do grid
-                            name=f"labels_{well_name}"
-                        )
-                        current_well_actors.append(actor_labels)
+                            enriched = []
+                            for i, base_txt in enumerate(m_labels):
+                                depth = None
+                                try:
+                                    item = m_list[i] if i < len(m_list) else None
+                                    if isinstance(item, dict):
+                                        for k in ("md", "MD", "tvd", "TVD", "depth", "Depth"):
+                                            if k in item:
+                                                depth = float(item[k])
+                                                break
+                                    elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                                        depth = float(item[1])
+                                except Exception:
+                                    depth = None
 
-                self._well_actors[well_name] = current_well_actors
+                                if depth is not None and np.isfinite(depth):
+                                    enriched.append(f"{base_txt} ({depth:.0f} m)")
+                                else:
+                                    enriched.append(str(base_txt))
 
-            except Exception as e:
-                print(f"[WARN] Falha ao desenhar poço {well_name}: {e}")
+                            actor_labels = self.plotter.add_point_labels(
+                                m_mesh.points,
+                                enriched,
+                                font_size=10,
+                                point_color="red",
+                                text_color="black",
+                                show_points=False,
+                                reset_camera=False,
+                                shape_opacity=0.15,
+                                always_visible=True,
+                                name=f"mlabels_{well_name}"
+                            )
+                            _exclude_from_bounds(actor_labels)
+                            well_actors.append(actor_labels)
+
+                    self._well_actors[well_name] = well_actors
+
+                except Exception as e:
+                    print(f"[WARN] Falha ao desenhar poço {well_name}: {e}")
+
+            
+            self._lock_axes_bounds_to_grid(self.state)
+
+        finally:
+            try:
+                self.plotter.enable_render()
+            except Exception:
+                pass
 
         try:
             self.plotter.render()
@@ -2043,11 +2157,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Lista inicial (idêntica ao seu código original para garantir que inicie correto)
         modes = [
-            ("Fácies", "facies"), 
-            ("Reservatório", "reservoir"), 
-            ("Clusters", "clusters"), 
+            ("Fácies (Global)", "facies"), 
+            ("Seletor de Fácies", "reservoir"), 
+            ("Clusters (conectividade)", "clusters"), 
             ("Maior Cluster", "largest"), 
-            ("Espessura Local", "thickness_local"),
+            ("Métricas Por Coluna", "thickness_local"),
             ("Entropia (Incerteza)", "entropy")
         ]
         
@@ -2255,17 +2369,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def populate_mode_menu(self):
         """Reconstrói o menu de Modos/Propriedades baseado no grid atual."""
-
         menu = self.btn_mode.menu()
         menu.clear()
 
-        # Removido "Entropia" daqui. Agora é uma View separada.
         modes_std = [
             ("Fácies (Global)", "facies"),
             ("Seletor de Fácies", "reservoir"),
             ("Clusters (Conectividade)", "clusters"),
             ("Maior Cluster", "largest"),
-            ("Métricas Por Coluna", "thickness_local"),
+            ("Métricas Por Coluna", "thickness_local")
         ]
 
         menu.addSection("Análise Estrutural")
@@ -2273,38 +2385,20 @@ class MainWindow(QtWidgets.QMainWindow):
             action = menu.addAction(text)
             action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
 
-        # 2) Propriedades do Grid (Dinâmico)
-        # Em Visualização: usa o grid ativo.
-        # Em Comparação: monta a UNIÃO de propriedades entre os modelos selecionados (checados).
+        # Propriedades do Grid (união em comparação / grid ativo em visualização)
         grids = []
-
-        in_comparison = bool(getattr(self, "central_stack", None) and self.central_stack.currentIndex() == 1)
-
-        if in_comparison:
-            checked = []
-            try:
-                checked = self.get_checked_models()
-            except Exception:
-                checked = []
-
-            for it in (checked or []):
-                if isinstance(it, (tuple, list)):
-                    mk = str(it[0])
-                else:
-                    mk = str(it)
-
-                g, _ = self._get_model_payload(mk)
+        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and hasattr(self, "active_comp_states") and self.active_comp_states:
+            for st in self.active_comp_states:
+                g = st.get("current_grid_source")
                 if g is not None:
                     grids.append(g)
         else:
             g = self.state.get("current_grid_source")
-            if g is None:
-                # fallback: base
-                g, _ = self._get_model_payload("base")
+            if g is None and "base" in self.models:
+                g = self.models["base"].get("grid")
             if g is not None:
                 grids.append(g)
 
-        # União de cell_data keys
         all_cell_keys = set()
         for g in grids:
             try:
@@ -2313,24 +2407,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
         if all_cell_keys:
-            # Lista de nomes EXATOS para ignorar (já tratados acima ou internos)
             exact_ignore = {
                 "vtkOriginalCellIds", "vtkOriginalPointIds",
                 "Facies", "facies", "Entropy", "Texture Coordinates",
+                "StratigraphicThickness", "cell_thickness",
                 "Reservoir", "reservoir", "Clusters", "clusters",
-                "LargestCluster", "Volume", "NTG_local",
+                "LargestCluster", "Volume", "NTG_local"
             }
 
             found_any = False
-
             for name in sorted(all_cell_keys):
                 if name in exact_ignore:
                     continue
-                if name.endswith("_index"):
+                if str(name).endswith("_index"):
                     continue
-                if name.startswith("vert_"):
+                if str(name).startswith("vert_"):
                     continue
-                if "Ghost" in name:
+                if "Ghost" in str(name):
                     continue
 
                 if not found_any:
@@ -2339,37 +2432,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 action = menu.addAction(f"{name}")
                 action.triggered.connect(lambda ch, n=name: self.change_scalar_view(n))
+
+        # Config
+        menu.addSeparator()
+        menu.addSection("Configurações")
+        act_cfg = menu.addAction("Selecionar propriedades que são proporção (0–1)...")
+        act_cfg.triggered.connect(self.open_proportion_props_dialog)
     
     def change_scalar_view(self, scalar_name):
-        """Visualiza uma propriedade escalar arbitrária (PORO, PERM, etc)."""
+        """Visualiza uma propriedade escalar arbitrária (PORO, PERM, Sand, Carbo_Mud, etc)."""
         import numpy as np
 
         self.btn_mode.setText(f"Prop:\n{scalar_name}")
 
         grid = self.state.get("current_grid_source")
-        if grid is None:
-            if "base" in self.models:
-                grid = self.models["base"].get("grid")
+        if grid is None and "base" in self.models:
+            grid = self.models["base"].get("grid")
 
         if grid is None or scalar_name not in grid.cell_data:
             return
 
-        arr = grid.cell_data[scalar_name]
-
-        # Configura como um Preset de Espessura (hack)
+        # Configura como um Preset de Métricas por Coluna (hack já existente)
         presets = self.state.get("thickness_presets", {})
         presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
         self.state["thickness_presets"] = presets
         self.state["thickness_mode"] = scalar_name
 
-        # Escala automática baseada no GRID inteiro
-        valid_arr = arr[np.isfinite(arr)]
-        if valid_arr.size > 0:
-            vmin, vmax = float(np.min(valid_arr)), float(np.max(valid_arr))
-            if vmax <= vmin:
-                vmax = vmin + 1e-6
-        else:
+        # --- CLIM ---
+        # Se for proporção => 0–1
+        if self._is_fraction_property(scalar_name):
             vmin, vmax = 0.0, 1.0
+        else:
+            arr = np.asarray(grid.cell_data[scalar_name], dtype=float)
+            valid_arr = arr[np.isfinite(arr)]
+            if valid_arr.size > 0:
+                vmin, vmax = float(np.min(valid_arr)), float(np.max(valid_arr))
+                if vmax <= vmin:
+                    vmax = vmin + 1e-6
+            else:
+                vmin, vmax = 0.0, 1.0
 
         self.state["thickness_clim"] = (vmin, vmax)
         self.state["thickness_clim_manual"] = True
@@ -2378,50 +2479,61 @@ class MainWindow(QtWidgets.QMainWindow):
         # Ativa modo
         self.state["mode"] = "thickness_local"
 
-        # Propaga para comparação (se estiver ativa)
-        if hasattr(self, "active_comp_states"):
+        # --- Se estiver em COMPARAÇÃO: padroniza globalmente ---
+        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and hasattr(self, "active_comp_states") and self.active_comp_states:
+            # garante que todos tenham o preset
             for st in self.active_comp_states:
                 try:
                     st_presets = st.get("thickness_presets", {})
                     st_presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
                     st["thickness_presets"] = st_presets
                     st["thickness_mode"] = scalar_name
-
-                    st["thickness_clim"] = (vmin, vmax)
-                    st["thickness_clim_manual"] = True
-                    st["thickness_global_clim"] = None
-
-                    st["thickness_cmap"] = self.state.get("thickness_cmap", st.get("thickness_cmap", "plasma"))
                     st["mode"] = "thickness_local"
-
-                    if "update_thickness" in st:
-                        st["update_thickness"]()
-                    if "refresh" in st:
-                        st["refresh"]()
-                    if "plotter_ref" in st:
-                        st["plotter_ref"].render()
+                    st["thickness_cmap"] = self.state.get("thickness_cmap", st.get("thickness_cmap", "plasma"))
+                    st["current_scalar_cmap"] = self.state.get("current_scalar_cmap", st.get("current_scalar_cmap", st["thickness_cmap"]))
                 except Exception:
                     pass
 
-        # Refresh principal
+            # aplica CLIM global (0–1 ou min/max global)
+            self._apply_global_clim_to_active_comparison()
+
+        else:
+            # Visualização (1 modelo): aplica no próprio estado 3D atual
+            if hasattr(self, "active_comp_states"):
+                for st in self.active_comp_states:
+                    try:
+                        st_presets = st.get("thickness_presets", {})
+                        st_presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
+                        st["thickness_presets"] = st_presets
+                        st["thickness_mode"] = scalar_name
+                        st["thickness_clim"] = (vmin, vmax)
+                        st["thickness_clim_manual"] = True
+                        st["thickness_global_clim"] = None
+                        st["mode"] = "thickness_local"
+                        if "update_thickness" in st:
+                            st["update_thickness"]()
+                        if "refresh" in st:
+                            st["refresh"]()
+                        if "plotter_ref" in st:
+                            st["plotter_ref"].render()
+                    except Exception:
+                        pass
+
+        # Refresh 3D
         refresh = self.state.get("refresh")
         if callable(refresh):
             refresh()
 
+        # Refresh 2D
         if hasattr(self, "update_2d_map"):
             self.update_2d_map()
 
-        # ✅ se estiver na comparação, garante que a aba ativa (3D/2D/Métricas) reflita a nova propriedade
+        # Se estiver vendo 2D na comparação, reconstrói com a escala global
         try:
-            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
-                if hasattr(self, "refresh_comparison_active_view"):
-                    self.refresh_comparison_active_view()
-                if hasattr(self, "populate_mode_menu"):
-                    self.populate_mode_menu()
+            if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1 and self.compare_stack.currentIndex() == 2:
+                self.update_dynamic_comparison_2d(self.get_checked_models())
         except Exception:
             pass
-
-    
 
     def _on_global_window_size_changed(self):
         """Callback quando o tamanho da janela global (Ribbon) é alterado."""
@@ -5287,7 +5399,6 @@ class MainWindow(QtWidgets.QMainWindow):
         from visualize import run
         from PyQt5 import QtWidgets, QtCore
 
-        # --- 1. PREPARAÇÃO DA LISTA ---
         if checked_models is None:
             checked_models = self.get_checked_models()
 
@@ -5309,7 +5420,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.update_multi_model_filter_table(final_list)
 
-        # --- 2. LIMPEZA ---
+        # --- LIMPEZA ---
         if hasattr(self, "active_comp_plotters"):
             for p in self.active_comp_plotters:
                 try:
@@ -5325,18 +5436,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        # Parâmetros Globais
+        # Globais
         mode = self.state.get("mode", "facies")
         thickness_mode = self.state.get("thickness_mode", "Espessura")
-        thickness_presets = dict(self.state.get("thickness_presets") or {})
-        thickness_clim = self.state.get("thickness_clim", None)
-        thickness_clim_manual = bool(self.state.get("thickness_clim_manual", False))
-        thickness_global_clim = self.state.get("thickness_global_clim", None)
-
         z_exag = float(self.state.get("z_exag", 15.0))
         show_scalar_bar = bool(self.state.get("show_scalar_bar", True))
 
-        # --- 3. LAYOUT GRID ---
+        # Layout
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -5350,8 +5456,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cols = 2 if n_models > 1 else 1
 
         if n_models == 0:
-            lbl = QtWidgets.QLabel("Nenhum modelo selecionado.")
-            self.comp_layout_3d.addWidget(lbl)
+            self.comp_layout_3d.addWidget(QtWidgets.QLabel("Nenhum modelo selecionado."))
             return
 
         for idx, (model_key, model_name) in enumerate(final_list):
@@ -5382,24 +5487,14 @@ class MainWindow(QtWidgets.QMainWindow):
             v_lay.addWidget(plotter_widget)
             grid_layout.addWidget(w_container, row, col)
 
-            # --- 4. CARREGA DADOS ---
+            # Dados
             grid_obj, facies_obj = self._get_model_payload(model_key)
 
             if grid_obj is None:
-                try:
-                    plotter.add_text("GRID OFF", font_size=12)
-                    plotter.render()
-                except:
-                    pass
+                plotter.add_text("GRID OFF", font_size=12)
             else:
-                # ✅ IMPORTANTE: copiar presets/estado de thickness do self.state pro estado local do plotter
                 local_state = {
-                    "thickness_presets": dict(thickness_presets),
                     "thickness_mode": thickness_mode,
-                    "thickness_clim": thickness_clim,
-                    "thickness_clim_manual": thickness_clim_manual,
-                    "thickness_global_clim": thickness_global_clim,
-
                     "thickness_cmap": self.state.get("thickness_cmap", "plasma"),
                     "current_scalar_cmap": self.state.get("current_scalar_cmap", self.state.get("thickness_cmap", "plasma")),
                 }
@@ -5413,41 +5508,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_grid=grid_obj,
                     target_facies=facies_obj,
                 )
-
                 local_state["model_key"] = model_key
                 local_state["plotter_ref"] = plotter
 
-                
                 rf = set()
                 if hasattr(self, "models") and model_key in self.models:
                     rf = self.models[model_key].get("reservoir_facies", set()) or set()
-
                 local_state["reservoir_facies"] = rf
 
-                # Recalcula campos derivados e força refresh
                 if "update_reservoir_fields" in local_state:
-                    try:
-                        local_state["update_reservoir_fields"](rf)
-                    except Exception:
-                        pass
-
-                if "update_thickness" in local_state and callable(local_state["update_thickness"]):
-                    # garante que o scalar atual reflita o preset escolhido (incluindo propriedades)
-                    try:
-                        local_state["update_thickness"]()
-                    except Exception:
-                        pass
-
-                if "refresh" in local_state and callable(local_state["refresh"]):
-                    try:
-                        local_state["refresh"]()
-                    except Exception:
-                        pass
-
-                try:
-                    plotter.render()
-                except Exception:
-                    pass
+                    local_state["update_reservoir_fields"](rf)
 
                 self.active_comp_states.append(local_state)
                 self.compare_states_multi[str(model_key)] = local_state
@@ -5459,6 +5529,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if len(self.active_comp_plotters) > 1:
             self.sync_multi_cameras(self.active_comp_plotters)
+
+        try:
+            self._apply_global_clim_to_active_comparison()
+        except Exception:
+            pass
 
     def _build_multi_model_filter_table(self, checked_models):
         """Constrói a tabela matriz: Linhas = Fácies, Colunas = Modelos."""
@@ -5749,8 +5824,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     
     def update_dynamic_comparison_2d(self, checked_models):
-        """Reconstrói a visualização de Mapas 2D (comparação) usando plotter embutido estável."""
-        from PyQt5 import QtWidgets, QtCore
+        """Reconstrói a visualização de Mapas 2D."""
+
+        import numpy as np
+        from PyQt5 import QtWidgets
 
         # --- LIMPEZA ---
         if hasattr(self, 'active_comp_2d_plotters'):
@@ -5770,20 +5847,14 @@ class MainWindow(QtWidgets.QMainWindow):
         normalized = []
         for m in (checked_models or []):
             if isinstance(m, (tuple, list)):
-                model_key = str(m[0])
+                model_key = m[0]
                 model_name = m[1] if len(m) > 1 else self.models.get(model_key, {}).get("name", str(model_key))
             else:
-                model_key = str(m)
+                model_key = m
                 model_name = self.models.get(model_key, {}).get("name", str(model_key))
 
             if model_key in self.models:
                 normalized.append((model_key, model_name))
-
-        # mantém tabela do filtro sincronizada
-        try:
-            self.update_multi_model_filter_table(normalized)
-        except Exception:
-            pass
 
         if not normalized:
             self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
@@ -5799,7 +5870,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_layout.setSpacing(2)
         self.comp_2d_layout.addWidget(grid_container)
 
-        # Configuração de espessura/propriedade
+        # Recupera preset atual
         presets = self.state.get("thickness_presets") or {}
         thick_mode = self.state.get("thickness_mode", "Espessura")
         if thick_mode not in presets and presets:
@@ -5809,11 +5880,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         scalar, title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
 
-        # Base grid seguro
+        # base grid seguro
         from load_data import grid as global_grid
         base_grid = self.models.get("base", {}).get("grid") or self.state.get("current_grid_source") or global_grid
 
-        # --- prepara grids e (re)calcula métricas verticais ---
+        # Pré-prepara grids
         prepared = []
         for (model_key, model_name) in normalized:
             model_data = self.models.get(model_key, {})
@@ -5824,23 +5895,21 @@ class MainWindow(QtWidgets.QMainWindow):
             temp_grid = src_grid.copy(deep=True)
             temp_grid.cell_data["Facies"] = model_data.get("facies")
 
+            # Recalcula métricas verticais se necessário
             try:
-                self.recalc_vertical_metrics(
-                    temp_grid,
-                    model_data.get("facies"),
-                    model_data.get("reservoir_facies"),
-                )
+                self.recalc_vertical_metrics(temp_grid, model_data.get("facies"), model_data.get("reservoir_facies"))
             except Exception as e:
                 print(f"[compare_2d] recalc_vertical_metrics falhou para {model_name}: {e}")
 
             prepared.append((model_key, model_name, temp_grid))
 
-        # Escala global para “thickness-like”
+        # --- CLIM GLOBAL 2D ---
         clim_override = None
-        thickness_like = {"vert_Ttot_reservoir", "vert_Tpack_max_reservoir", "vert_n_packages_reservoir"}
-        if scalar in thickness_like:
-            import numpy as np
 
+        if self._is_fraction_property(scalar):
+            clim_override = (0.0, 1.0)
+        else:
+            # calcula global usando a MESMA redução do _draw_2d_map_local (max > 0 na coluna)
             def _infer_dims(g):
                 try:
                     dims_pts = getattr(g, "dimensions", None)
@@ -5856,68 +5925,74 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     return None
 
-            vmax_global = 0.0
-            for _, _, g in prepared:
+            all_vals = []
+            for _k, _n, g in prepared:
                 if g is None or scalar not in getattr(g, "cell_data", {}):
                     continue
                 dims = _infer_dims(g)
                 if not dims:
                     continue
-                nx, ny, nz = dims
+                nx_, ny_, nz_ = dims
                 try:
-                    arr = np.asarray(g.cell_data[scalar], dtype=float).reshape((nx, ny, nz), order="F")
-                    arr = np.where(arr > 0, arr, np.nan)
-                    vmax = float(np.nanmax(arr))
-                    if np.isfinite(vmax) and vmax > vmax_global:
-                        vmax_global = vmax
+                    arr3d = np.asarray(g.cell_data[scalar], dtype=float).reshape((nx_, ny_, nz_), order="F")
+                    out2d = np.full((nx_, ny_), np.nan, dtype=float)
+                    for ix in range(nx_):
+                        for iy in range(ny_):
+                            colv = arr3d[ix, iy, :]
+                            colv = colv[colv > 0]
+                            if colv.size > 0:
+                                out2d[ix, iy] = float(np.nanmax(colv))
+                    flat = out2d[np.isfinite(out2d)]
+                    if flat.size:
+                        all_vals.append(flat)
                 except Exception:
                     continue
 
-            if np.isfinite(vmax_global) and vmax_global > 0:
-                clim_override = (0.0, vmax_global)
+            if all_vals:
+                allv = np.concatenate(all_vals)
+                vmin = float(np.nanmin(allv))
+                vmax = float(np.nanmax(allv))
+                if not np.isfinite(vmin) or not np.isfinite(vmax):
+                    clim_override = None
+                else:
+                    if vmax <= vmin:
+                        vmax = vmin + 1e-6
+                    if vmin >= 0.0:
+                        vmin = 0.0
+                    clim_override = (vmin, vmax)
 
-        # --- DESENHO ---
+        # --- DESENHA ---
         for idx, (model_key, model_name, temp_grid) in enumerate(prepared):
+            # Paleta atual
+            cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
+
             row, col = idx // cols, idx % cols
 
-            w_container = QtWidgets.QWidget()
-            v_lay = QtWidgets.QVBoxLayout(w_container)
-            v_lay.setContentsMargins(0, 0, 0, 0)
-            v_lay.setSpacing(0)
+            p2d = BackgroundPlotter(show=False)
+            self.active_comp_2d_plotters.append(p2d)
 
-            lbl = QtWidgets.QLabel(f"{model_name} ({thick_mode})")
-            lbl.setStyleSheet("font-weight: bold; background-color: #ddd; padding: 4px;")
-            lbl.setAlignment(QtCore.Qt.AlignCenter)
-            lbl.setFixedHeight(24)
-            v_lay.addWidget(lbl)
+            self._draw_2d_map_local(
+                p2d,
+                temp_grid,
+                scalar,
+                title,
+                cmap=cmap_use,
+                show_scalar_bar=True,
+                scalar_bar_title=title,
+                clim_override=clim_override,
+            )
 
-            # ✅ plotter embutido estável (QtInteractor)
-            plotter_2d, widget_2d = self._make_embedded_plotter(parent=w_container)
-            v_lay.addWidget(widget_2d, 1)
+            w = QtWidgets.QWidget()
+            vl = QtWidgets.QVBoxLayout(w)
+            vl.setContentsMargins(0, 0, 0, 0)
+            vl.setSpacing(0)
 
-            grid_layout.addWidget(w_container, row, col)
+            lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
+            lbl.setStyleSheet("background: #ddd; font-weight: bold;")
+            vl.addWidget(lbl)
+            vl.addWidget(p2d.interactor)
 
-            # Paleta
-            if scalar.startswith("vert_"):
-                cmap_use = self.state.get("thickness_cmap") or self.state.get("current_scalar_cmap") or "plasma"
-            else:
-                cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
-
-            try:
-                self._draw_2d_map_local(
-                    plotter_2d,
-                    temp_grid,
-                    scalar,
-                    title,
-                    cmap=cmap_use,
-                    show_scalar_bar=True,
-                    scalar_bar_title=title,
-                    clim_override=clim_override,
-                )
-            except Exception as e:
-                print(f"[compare_2d] erro ao desenhar {model_name}: {e}")
-
-            self.active_comp_2d_plotters.append(plotter_2d)
+            grid_layout.addWidget(w, row, col)
 
     def on_tree_item_changed(self, item, column):
         """Lida com alterações na árvore (Modelos, Studies e Poços) com lógica Pai/Filho manual."""
@@ -8180,6 +8255,260 @@ class MainWindow(QtWidgets.QMainWindow):
         if callable(refresh): refresh()
         
         if hasattr(self, "update_2d_map"): self.update_2d_map()
+    
+    def _get_union_grid_property_names(self):
+        """
+        Retorna união de propriedades (cell_data keys) entre:
+        - em visualização: grid ativo
+        - em comparação: grids ativos da comparação (active_comp_states)
+        """
+        grids = []
+
+        # Comparação ativa (central_stack index 1) -> união
+        try:
+            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and getattr(self, "active_comp_states", None):
+                for st in self.active_comp_states:
+                    g = st.get("current_grid_source")
+                    if g is not None:
+                        grids.append(g)
+            else:
+                g = self.state.get("current_grid_source")
+                if g is None and "base" in getattr(self, "models", {}):
+                    g = self.models["base"].get("grid")
+                if g is not None:
+                    grids.append(g)
+        except Exception:
+            pass
+
+        all_keys = set()
+        for g in grids:
+            try:
+                all_keys |= set(g.cell_data.keys())
+            except Exception:
+                pass
+
+        # Mesma limpeza que você já faz no menu
+        exact_ignore = {
+            "vtkOriginalCellIds", "vtkOriginalPointIds",
+            "Facies", "facies", "Entropy", "Texture Coordinates",
+            "StratigraphicThickness", "cell_thickness",
+            "Reservoir", "reservoir", "Clusters", "clusters",
+            "LargestCluster", "Volume", "NTG_local"
+        }
+
+        cleaned = []
+        for name in all_keys:
+            if name in exact_ignore:
+                continue
+            if str(name).endswith("_index"):
+                continue
+            if str(name).startswith("vert_"):
+                continue
+            if "Ghost" in str(name):
+                continue
+            cleaned.append(str(name))
+
+        return sorted(cleaned, key=lambda s: s.lower())
+
+
+    def open_proportion_props_dialog(self):
+        """
+        Abre diálogo para usuário escolher quais propriedades devem ser tratadas como proporção (0–1).
+        Armazena em self.state['fraction_props'] (set de nomes).
+        """
+        props = self._get_union_grid_property_names()
+        current = set(self.state.get("fraction_props", set()) or set())
+
+        dlg = ProportionPropsDialog(props, current_set=current, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        self.state["fraction_props"] = set(dlg.get_selected())
+
+        # Se estiver em comparação, reaplica escala global imediatamente
+        try:
+            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
+                # 3D comparação
+                if hasattr(self, "active_comp_states") and self.active_comp_states:
+                    self._apply_global_clim_to_active_comparison()
+                # 2D comparação
+                if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 2:
+                    self.update_dynamic_comparison_2d(self.get_checked_models())
+        except Exception:
+            pass
+
+
+    def _is_fraction_property(self, scalar_name):
+        """
+        Decide se um scalar deve ser fixado em 0–1.
+        - Usuário marca em self.state['fraction_props'].
+        - Também fixa automaticamente os vert_* normalizados (NTG/ICV/Qv etc).
+        """
+        s = str(scalar_name)
+
+        user_set = set(self.state.get("fraction_props", set()) or set())
+        if s in user_set:
+            return True
+
+        # Defaults do seu "Métricas por Coluna" que são normalizadas
+        if s in ("vert_NTG_col_reservoir", "vert_NTG_env_reservoir", "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"):
+            return True
+
+        return False
+
+
+    def _compute_global_clim_for_scalar(self, scalar_name, grids):
+        """
+        Retorna (vmin, vmax) global para comparação 3D.
+        - Se for proporção: (0, 1)
+        - Caso contrário: (min_global, max_global) e se todos >=0 => (0, max_global)
+        """
+        import numpy as np
+
+        if self._is_fraction_property(scalar_name):
+            return (0.0, 1.0)
+
+        vals = []
+        for g in (grids or []):
+            try:
+                if g is None or scalar_name not in g.cell_data:
+                    continue
+                arr = np.asarray(g.cell_data[scalar_name], dtype=float)
+                finite = arr[np.isfinite(arr)]
+                if finite.size:
+                    vals.append(finite)
+            except Exception:
+                continue
+
+        if not vals:
+            return (0.0, 1.0)
+
+        allv = np.concatenate(vals)
+        vmin = float(np.nanmin(allv))
+        vmax = float(np.nanmax(allv))
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            return (0.0, 1.0)
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+        if vmin >= 0.0:
+            vmin = 0.0
+
+        return (vmin, vmax)
+
+
+    def _apply_global_clim_to_active_comparison(self):
+        """
+        Aplica escala GLOBAL nos plotters 3D da comparação para o scalar atual (thickness_mode).
+        """
+        # descobre scalar atual via presets
+        presets = self.state.get("thickness_presets") or {}
+        thick_mode = self.state.get("thickness_mode", "Espessura")
+        if thick_mode not in presets and presets:
+            thick_mode = list(presets.keys())[0]
+        scalar, _title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
+
+        # coleta grids ativos
+        grids = []
+        for st in (getattr(self, "active_comp_states", []) or []):
+            g = st.get("current_grid_source")
+            if g is not None:
+                grids.append(g)
+
+        clim = self._compute_global_clim_for_scalar(scalar, grids)
+
+        # aplica em cada estado
+        for st in (getattr(self, "active_comp_states", []) or []):
+            try:
+                st["thickness_clim"] = clim
+                st["thickness_clim_manual"] = True
+                st["thickness_global_clim"] = None  # garante que não tenha override “velho”
+
+                if "update_thickness" in st and callable(st["update_thickness"]):
+                    st["update_thickness"]()
+                if "refresh" in st and callable(st["refresh"]):
+                    st["refresh"]()
+                if "plotter_ref" in st:
+                    st["plotter_ref"].render()
+            except Exception:
+                pass
+
+    def _lock_axes_bounds_to_grid(self, state=None):
+        """
+        Trava a caixa de eixos (vtkCubeAxesActor) para os bounds do GRID JÁ ESCALADO (z_exag),
+        evitando pegar bounds de poços e evitando ficar “como z_exag=1”.
+        """
+        try:
+            st = state or self.state
+            ba = st.get("bounds_actor", None)
+            if ba is None:
+                return
+
+            # Preferência: bounds do ator principal já escalado
+            main_actor = st.get("main_actor", None) or st.get("bg_actor", None)
+            bounds = None
+
+            if main_actor is not None and hasattr(main_actor, "GetBounds"):
+                b = main_actor.GetBounds()
+                # b é tuple (xmin,xmax,ymin,ymax,zmin,zmax)
+                if b and len(b) == 6:
+                    bounds = b
+
+            # Fallback: bounds do plotter (mas isso pode incluir poços se UseBounds não estiver certo)
+            if bounds is None:
+                try:
+                    bounds = self.plotter.bounds
+                except Exception:
+                    bounds = None
+
+            if bounds is not None:
+                ba.SetBounds(bounds)
+
+        except Exception:
+            pass
+
+    def _maybe_update_axes_bounds(self, state=None, rel_tol=0.01, abs_tol=0.5):
+        """
+        Atualiza bounds do CubeAxes só se mudou o suficiente.
+        - rel_tol: tolerância relativa (1% default)
+        - abs_tol: tolerância absoluta (em unidades do seu modelo; 0.5 default)
+        """
+        try:
+            st = state or self.state
+            ba = st.get("bounds_actor", None)
+            if ba is None:
+                return
+
+            main_actor = st.get("main_actor", None) or st.get("bg_actor", None)
+            if main_actor is None or not hasattr(main_actor, "GetBounds"):
+                return
+
+            newb = main_actor.GetBounds()
+            if not newb or len(newb) != 6:
+                return
+
+            oldb = st.get("_last_axes_bounds", None)
+            if oldb is None:
+                ba.SetBounds(newb)
+                st["_last_axes_bounds"] = tuple(newb)
+                return
+
+            # decide se mudou "o suficiente"
+            changed = False
+            for i in range(6):
+                a = float(oldb[i])
+                b = float(newb[i])
+                span = max(abs(a), abs(b), 1.0)
+                if abs(a - b) > max(abs_tol, rel_tol * span):
+                    changed = True
+                    break
+
+            if changed:
+                ba.SetBounds(newb)
+                st["_last_axes_bounds"] = tuple(newb)
+
+        except Exception:
+            pass
 
     def _finalize_vtk_widget(self, obj):
         """Fecha plotters/QtInteractors de forma agressiva para evitar erros do VTK no shutdown."""
@@ -8276,5 +8605,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cleanup_vtk()
         finally:
             super().closeEvent(event)
+    
+
 
 
