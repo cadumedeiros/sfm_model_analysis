@@ -262,6 +262,7 @@ def run(
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
+    state.setdefault("main_actor_data", None)
     
     # --- ESTADOS DE CORTE ---
     state.setdefault("k_min", 0)
@@ -599,6 +600,14 @@ def run(
             
             actor.SetVisibility(True)
             actor.mapper.SetInputData(mesh_data)
+            # cache do dataset atual para inspeção/picking
+            if actor_key == 'main_actor':
+                state['main_actor_data'] = mesh_data
+            # cache do dataset atual do ator (necessário para picking/inspector)
+            try:
+                state[f"{actor_key}_data"] = mesh_data
+            except Exception:
+                pass
             
             if is_bg: return actor
 
@@ -748,6 +757,472 @@ def run(
 
     if "box_widget" in state: del state["box_widget"]
 
+
+    # ============================================================
+    # Selection Mode (3D picking): None | "cell" | "column"
+    # ============================================================
+    state.setdefault("pick_mode", None)
+    state.setdefault("_pick_observer_added", False)
+    state.setdefault("_pick_highlight_cell", None)
+    state.setdefault("_pick_highlight_column", None)
+
+    def _clear_pick_highlights(render=True):
+        for k in ("_pick_highlight_cell", "_pick_highlight_column"):
+            a = state.get(k)
+            if a is None:
+                continue
+            try:
+                plotter.remove_actor(a)
+            except Exception:
+                try:
+                    a.SetVisibility(False)
+                except Exception:
+                    pass
+            state[k] = None
+        if render:
+            try:
+                plotter.render()
+            except Exception:
+                pass
+
+    state["clear_pick"] = _clear_pick_highlights
+
+    def _ensure_pick_observer():
+        if state.get("_pick_observer_added", False):
+            return
+
+        iren = getattr(plotter, "iren", None)
+        if iren is None:
+            iren = getattr(plotter, "interactor", None)
+        if iren is None:
+            try:
+                iren = plotter.ren_win.GetInteractor()
+            except Exception:
+                iren = None
+        if iren is None:
+            return
+
+        picker = vtk.vtkCellPicker()
+        picker.SetTolerance(0.0005)
+
+        def _do_pick(x, y):
+            mode_pick = state.get("pick_mode", None)
+            if mode_pick not in ("cell", "column"):
+                return False
+
+            main_actor = state.get("main_actor")
+            mesh_data = state.get("main_actor_data")
+            if main_actor is None or mesh_data is None or getattr(mesh_data, "n_cells", 0) == 0:
+                return False
+
+            try:
+                picker.InitializePickList()
+                picker.AddPickList(main_actor)
+                picker.PickFromListOn()
+            except Exception:
+                pass
+
+            ren = getattr(plotter, "renderer", None)
+            if ren is None:
+                try:
+                    ren = plotter.renderers.active_renderer
+                except Exception:
+                    ren = None
+            if ren is None:
+                return False
+
+            # Tenta coordenadas em diferentes convenções (top/bottom origin, HiDPI)
+            cand = []
+            try:
+                xx = int(x)
+                yy = int(y)
+                cand.append((xx, yy))
+            except Exception:
+                cand.append((x, y))
+
+            try:
+                wsize = None
+                try:
+                    wsize = plotter.ren_win.GetSize()
+                except Exception:
+                    wsize = None
+                if wsize and len(wsize) == 2 and int(wsize[1]) > 0:
+                    H = int(wsize[1])
+                    cand.append((cand[0][0], H - cand[0][1]))
+            except Exception:
+                pass
+
+            picked = False
+            cid = -1
+            for xx, yy in cand:
+                try:
+                    ok = picker.Pick(float(xx), float(yy), 0.0, ren)
+                except Exception:
+                    ok = False
+                if not ok:
+                    continue
+                try:
+                    cid = int(picker.GetCellId())
+                except Exception:
+                    cid = -1
+                if 0 <= cid < int(getattr(mesh_data, "n_cells", 0)):
+                    picked = True
+                    break
+
+            # feedback opcional para UI (status bar)
+            try:
+                cb_status = state.get("status_callback", None)
+                if callable(cb_status):
+                    cb_status(
+                        f"Pick: cell_id={cid}" if picked else "Pick: nenhuma célula (clique na malha)",
+                        1500,
+                    )
+            except Exception:
+                pass
+
+            if not picked:
+                return False
+
+            def _safe_get(name):
+                try:
+                    arr = mesh_data.cell_data.get(name, None)
+                    if arr is None:
+                        return None
+                    return arr[cid]
+                except Exception:
+                    return None
+
+            i0 = _safe_get("i_index")
+            j0 = _safe_get("j_index")
+            k0 = _safe_get("k_index")
+
+            props = {}
+            try:
+                for name in list(mesh_data.cell_data.keys()):
+                    v = _safe_get(name)
+                    if v is None:
+                        continue
+                    try:
+                        if hasattr(v, "item"):
+                            v = v.item()
+                    except Exception:
+                        pass
+                    props[name] = v
+            except Exception:
+                pass
+
+            info = {
+                "mode": mode_pick,
+                "cell_id": cid,
+                "i": None if i0 is None else int(i0),
+                "j": None if j0 is None else int(j0),
+                "k": None if k0 is None else int(k0),
+                "props": props,
+            }
+
+            # --- Resumo geométrico da célula selecionada (para o inspector) ---
+            try:
+                _sel_geom = mesh_data.extract_cells([cid])
+                b = getattr(_sel_geom, "bounds", None)
+                if b and len(b) == 6:
+                    xmin, xmax, ymin, ymax, zmin, zmax = map(float, b)
+                    geom = {
+                        "length": float(xmax - xmin),
+                        "width": float(ymax - ymin),
+                        "height": float(zmax - zmin),
+                        "center_x": float((xmin + xmax) * 0.5),
+                        "center_y": float((ymin + ymax) * 0.5),
+                        "center_z": float((zmin + zmax) * 0.5),
+                        "bounds": (xmin, xmax, ymin, ymax, zmin, zmax),
+                    }
+                    # Volume (best-effort)
+                    try:
+                        _cs = _sel_geom.compute_cell_sizes(length=False, area=False, volume=True)
+                        vv = _cs.cell_data.get("Volume", None)
+                        if vv is not None and len(vv) > 0:
+                            geom["volume"] = float(vv[0])
+                    except Exception:
+                        pass
+                    info["geom"] = geom
+            except Exception:
+                pass
+
+            # ------------------ HIGHLIGHT (sem flicker) ------------------
+            def _add_mesh_no_render(*args, **kwargs):
+                # evita 1 frame com scale=1 antes do SetScale()
+                try:
+                    kwargs.setdefault("render", False)
+                    return plotter.add_mesh(*args, **kwargs)
+                except TypeError:
+                    # versões antigas podem não ter 'render'
+                    kwargs.pop("render", None)
+                    return plotter.add_mesh(*args, **kwargs)
+
+            def _inherit_transform(actor):
+                if actor is None:
+                    return
+                try:
+                    actor.SetScale(*main_actor.GetScale())
+                    actor.SetPosition(*main_actor.GetPosition())
+                    actor.SetOrientation(*main_actor.GetOrientation())
+                except Exception:
+                    pass
+
+            # desliga render enquanto remove/insere os highlights
+            _disabled = False
+            try:
+                plotter.disable_render()
+                _disabled = True
+            except Exception:
+                _disabled = False
+
+            try:
+                _clear_pick_highlights(render=False)
+
+                col = None
+                ids = None
+
+                if mode_pick == "cell":
+                    sel = mesh_data.extract_cells([cid])
+                    state["_pick_highlight_cell"] = _add_mesh_no_render(
+                        sel, style="wireframe", line_width=4, color="yellow", reset_camera=False
+                    )
+                    _inherit_transform(state.get("_pick_highlight_cell"))
+
+                elif mode_pick == "column":
+                    if i0 is None or j0 is None:
+                        sel = mesh_data.extract_cells([cid])
+                        state["_pick_highlight_cell"] = _add_mesh_no_render(
+                            sel, style="wireframe", line_width=4, color="yellow", reset_camera=False
+                        )
+                        _inherit_transform(state.get("_pick_highlight_cell"))
+                        info["mode"] = "cell"
+                    else:
+                        import numpy as _np
+                        i0i, j0i = int(i0), int(j0)
+
+                        ii = mesh_data.cell_data.get("i_index", None)
+                        jj = mesh_data.cell_data.get("j_index", None)
+
+                        if ii is None or jj is None:
+                            sel = mesh_data.extract_cells([cid])
+                            state["_pick_highlight_cell"] = _add_mesh_no_render(
+                                sel, style="wireframe", line_width=4, color="yellow", reset_camera=False
+                            )
+                            _inherit_transform(state.get("_pick_highlight_cell"))
+                            info["mode"] = "cell"
+                        else:
+                            ii = _np.asarray(ii).astype(int)
+                            jj = _np.asarray(jj).astype(int)
+                            mask = (ii == i0i) & (jj == j0i)
+                            ids = _np.where(mask)[0]
+
+                            if ids.size > 0:
+                                col = mesh_data.extract_cells(ids)
+
+                                state["_pick_highlight_column"] = _add_mesh_no_render(
+                                    col, style="wireframe", line_width=3, color="cyan", reset_camera=False
+                                )
+                                _inherit_transform(state.get("_pick_highlight_column"))
+
+                                sel = mesh_data.extract_cells([cid])
+                                state["_pick_highlight_cell"] = _add_mesh_no_render(
+                                    sel, style="wireframe", line_width=5, color="yellow", reset_camera=False
+                                )
+                                _inherit_transform(state.get("_pick_highlight_cell"))
+                            else:
+                                sel = mesh_data.extract_cells([cid])
+                                state["_pick_highlight_cell"] = _add_mesh_no_render(
+                                    sel, style="wireframe", line_width=4, color="yellow", reset_camera=False
+                                )
+                                _inherit_transform(state.get("_pick_highlight_cell"))
+                                info["mode"] = "cell"
+
+            finally:
+                if _disabled:
+                    try:
+                        plotter.enable_render()
+                    except Exception:
+                        pass
+
+            # ------------------ RESUMO + TABELA DA COLUNA ------------------
+            if info.get("mode") == "column" and col is not None and ids is not None:
+                import numpy as _np
+
+                # facies counts
+                try:
+                    fac = col.cell_data.get("Facies", None)
+                    if fac is not None:
+                        fac = _np.asarray(fac).astype(int)
+                        uniq, cnt = _np.unique(fac, return_counts=True)
+                        info["column_facies_counts"] = {int(u): int(c) for u, c in zip(uniq, cnt)}
+                except Exception:
+                    pass
+
+                # thickness sum + nome do campo thickness
+                th_name = None
+                try:
+                    for nm in ("StratigraphicThickness", "cell_thickness", "Thickness", "thickness_local"):
+                        if nm in col.cell_data:
+                            th_name = nm
+                            break
+                except Exception:
+                    th_name = None
+
+                if th_name is not None:
+                    try:
+                        th = _np.asarray(col.cell_data[th_name], dtype=float)
+                        info["column_thickness_name"] = th_name
+                        info["column_thickness_sum"] = float(_np.nansum(th))
+                    except Exception:
+                        pass
+
+                try:
+                    # 1 linha por k, 1 coluna por propriedade
+                    kcol = col.cell_data.get("k_index", None)
+                    if kcol is not None:
+                        kcol = _np.asarray(kcol).astype(int)
+
+                    # ordem (k crescente)
+                    try:
+                        order = _np.argsort(kcol) if kcol is not None else _np.arange(int(getattr(col, "n_cells", 0)))
+                    except Exception:
+                        order = _np.arange(int(getattr(col, "n_cells", 0)))
+
+                    # bounds topo/base
+                    try:
+                        bb = getattr(col, "bounds", None)
+                        if bb and len(bb) == 6:
+                            xmin, xmax, ymin, ymax, zmin, zmax = map(float, bb)
+                            info["column_bounds"] = (xmin, xmax, ymin, ymax, zmin, zmax)
+                            info["column_top_z"] = float(zmax)
+                            info["column_base_z"] = float(zmin)
+                    except Exception:
+                        pass
+
+                    # propriedades disponíveis
+                    excluded = {
+                        "vtkOriginalCellIds",
+                        "vtkOriginalPointIds",
+                        "vtkGhostType",
+                        "i_index",
+                        "j_index",
+                    }
+
+                    prop_names = []
+                    try:
+                        for nm in list(col.cell_data.keys()):
+                            if nm in excluded:
+                                continue
+                            prop_names.append(nm)
+                    except Exception:
+                        prop_names = []
+
+                    # ordem preferida
+                    preferred = []
+                    for nm in ("Facies", th_name, "StratigraphicThickness", "cell_thickness", "Thickness",
+                            "Reservoir", "Clusters", "LargestCluster"):
+                        if nm and (nm in prop_names) and (nm not in preferred):
+                            preferred.append(nm)
+
+                    ordered_cols = []
+                    for nm in preferred:
+                        if nm in prop_names and nm not in ordered_cols:
+                            ordered_cols.append(nm)
+                    for nm in prop_names:
+                        if nm == "k_index":
+                            continue
+                        if nm in ordered_cols:
+                            continue
+                        ordered_cols.append(nm)
+
+                    info["column_columns"] = ["k_index"] + ordered_cols
+
+                    rows_dict = []
+                    profile = []
+
+                    for idx2 in list(order):
+                        row = {}
+                        try:
+                            row_k = int(kcol[idx2]) if kcol is not None else int(idx2)
+                        except Exception:
+                            row_k = int(idx2)
+                        row["k_index"] = row_k
+
+                        for nm in ordered_cols:
+                            try:
+                                arr = col.cell_data.get(nm, None)
+                                if arr is None:
+                                    continue
+                                v = arr[idx2]
+                                if hasattr(v, "item"):
+                                    v = v.item()
+                                row[nm] = v
+                            except Exception:
+                                continue
+
+                        # perfil compacto (k, facies, thickness)
+                        f_ = row.get("Facies", None)
+                        t_ = None
+                        try:
+                            if th_name is not None and th_name in row:
+                                t_ = row.get(th_name)
+                            elif "StratigraphicThickness" in row:
+                                t_ = row.get("StratigraphicThickness")
+                            elif "cell_thickness" in row:
+                                t_ = row.get("cell_thickness")
+                            elif "Thickness" in row:
+                                t_ = row.get("Thickness")
+                        except Exception:
+                            t_ = None
+
+                        profile.append((row_k, f_, t_))
+                        rows_dict.append(row)
+
+                    info["column_profile"] = profile
+                    info["column_rows"] = rows_dict
+                    info["column_ncells"] = int(len(rows_dict))
+                except Exception:
+                    pass
+
+            cb = state.get("on_cell_picked", None)
+            if callable(cb):
+                try:
+                    cb(info)
+                except Exception:
+                    pass
+
+            try:
+                plotter.render()
+            except Exception:
+                pass
+
+            return True
+
+        def _handler(*args):
+            try:
+                x, y = iren.GetEventPosition()
+            except Exception:
+                return
+            _do_pick(x, y)
+
+        # Permite que a UI (Qt) dispare picks de forma confiável (sem depender do VTK observer)
+        state["_pick_perform"] = _do_pick
+
+
+        try:
+            if hasattr(iren, 'AddObserver'):
+                iren.AddObserver('LeftButtonPressEvent', _handler)
+            elif hasattr(iren, 'add_observer'):
+                iren.add_observer('LeftButtonPressEvent', _handler)
+            state['_pick_observer_added'] = True
+            state['_vtk_cell_picker'] = picker
+        except Exception:
+            pass
+
+    _ensure_pick_observer()
+
+
     plotter.enable_lightkit()
     plotter.add_axes()
     
@@ -756,4 +1231,3 @@ def run(
     
     state["refresh"] = _refresh
     return plotter, state
-

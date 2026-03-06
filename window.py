@@ -459,47 +459,47 @@ class ProportionPropsDialog(QtWidgets.QDialog):
 
 class MainWindow(QtWidgets.QMainWindow):
 
-    # # ------------------------------------------------------------------
-    # # Compat: open_compare_dialog (some builds call this from the menu)
-    # # ------------------------------------------------------------------
-    # def open_compare_dialog(self):
-    #     """Abrir diálogo para carregar modelos adicionais (comparação)."""
-    #     # Prefer an existing dedicated dialog if present
-    #     fn = getattr(self, "open_compare_models_dialog", None)
-    #     if callable(fn):
-    #         return fn()
+    # ------------------------------------------------------------------
+    # Compat: open_compare_dialog (some builds call this from the menu)
+    # ------------------------------------------------------------------
+    def open_compare_dialog(self):
+        """Abrir diálogo para carregar modelos adicionais (comparação)."""
+        # Prefer an existing dedicated dialog if present
+        fn = getattr(self, "open_compare_models_dialog", None)
+        if callable(fn):
+            return fn()
 
-    #     # Fallback: file picker + load_compare_model if available
-    #     paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-    #         self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
-    #     )
-    #     if not paths:
-    #         return
+        # Fallback: file picker + load_compare_model if available
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
+        )
+        if not paths:
+            return
 
-    #     study_name, ok = QtWidgets.QInputDialog.getText(
-    #         self,
-    #         "Novo Estudo",
-    #         "Nome do Estudo / Grupo de Calibração:",
-    #         text="Importação Recente",
-    #     )
-    #     if not ok or not study_name.strip():
-    #         study_name = "Importação Recente"
+        study_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Novo Estudo",
+            "Nome do Estudo / Grupo de Calibração:",
+            text="Importação Recente",
+        )
+        if not ok or not study_name.strip():
+            study_name = "Importação Recente"
 
-    #     loader = getattr(self, "load_compare_model", None)
-    #     if not callable(loader):
-    #         QtWidgets.QMessageBox.warning(
-    #             self,
-    #             "Função indisponível",
-    #             "load_compare_model não está disponível nesta versão do window.py.",
-    #         )
-    #         return
+        loader = getattr(self, "load_compare_model", None)
+        if not callable(loader):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Função indisponível",
+                "load_compare_model não está disponível nesta versão do window.py.",
+            )
+            return
 
-    #     QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-    #     try:
-    #         for path in paths:
-    #             loader(path, study_name=study_name)
-    #     finally:
-    #         QtWidgets.QApplication.restoreOverrideCursor()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for path in paths:
+                loader(path, study_name=study_name)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
 
     def __init__(self, mode="facies", z_exag=15.0, show_scalar_bar=True, reservoir_facies=None):
         super().__init__()
@@ -594,6 +594,24 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         
         self.state["on_slice_changed"] = self.on_plotter_slice_changed
+
+        # --- 3D Selection (Cell/Column) ---
+        # visualize.run instala um picker VTK que dispara state["on_cell_picked"]
+        # quando pick_mode está ativo.
+        self.state["on_cell_picked"] = self._on_3d_pick
+        # callback simples para feedback na status bar (opcional)
+        try:
+            self.state['status_callback'] = lambda msg, ms=4000: self.statusBar().showMessage(str(msg), int(ms))
+        except Exception:
+            pass
+        self.state.setdefault("pick_mode", None)
+
+        # instala filtro Qt para capturar clique (robusto em QtInteractor embedado)
+        try:
+            self._install_3d_pick_filter()
+        except Exception:
+            pass
+
         
         # --- 4. CONFIGURAÇÃO FINAL ---
         self.update_2d_map()
@@ -656,6 +674,7 @@ class MainWindow(QtWidgets.QMainWindow):
  
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
+        self.showMaximized()
 
         menubar = self.menuBar()
 
@@ -2244,6 +2263,47 @@ class MainWindow(QtWidgets.QMainWindow):
         
         g_wells_row.addLayout(v_box_combo)
         g_wells_row.addWidget(self.btn_debug_all)
+
+        # ==================== SELEÇÃO 3D (Célula / Coluna) ====================
+        # Ative um modo de seleção para clicar no grid 3D e inspecionar.
+        try:
+            sep_sel = QtWidgets.QFrame()
+            sep_sel.setFrameShape(QtWidgets.QFrame.VLine)
+            sep_sel.setFrameShadow(QtWidgets.QFrame.Sunken)
+            sep_sel.setFixedWidth(1)
+            g_wells_row.addWidget(sep_sel)
+        except Exception:
+            pass
+
+        self.btn_pick_cell = make_tool_btn(
+            "Selecionar\nCélula",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogYesButton),
+            checkable=True,
+        )
+        self.btn_pick_cell.setToolTip("Ativa modo de seleção de CÉLULA no 3D (clique em uma célula).")
+
+        self.btn_pick_column = make_tool_btn(
+            "Selecionar\nColuna",
+            self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp),
+            checkable=True,
+        )
+        self.btn_pick_column.setToolTip("Ativa modo de seleção de COLUNA (I,J) no 3D (clique em uma célula da coluna).")
+
+        self.btn_pick_clear = make_tool_btn(
+            "Limpar\nSeleção",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton),
+            checkable=False,
+        )
+        self.btn_pick_clear.setToolTip("Remove o destaque e limpa o inspector.")
+
+        self.btn_pick_cell.clicked.connect(lambda checked: self.set_pick_mode("cell" if checked else None))
+        self.btn_pick_column.clicked.connect(lambda checked: self.set_pick_mode("column" if checked else None))
+        self.btn_pick_clear.clicked.connect(self.clear_pick_selection)
+
+        g_wells_row.addWidget(self.btn_pick_cell)
+        g_wells_row.addWidget(self.btn_pick_column)
+        g_wells_row.addWidget(self.btn_pick_clear)
+
 
         # --- GRUPO RELATÓRIOS (Movido para View) ---
         g_rep, g_rep_row = make_group("Relatórios")
@@ -8575,6 +8635,730 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
 
+
+
+    # ============================================================
+    # 3D Selection Mode + Inspector (Cell / Column)
+    # ============================================================
+
+    def _install_3d_pick_filter(self):
+        """Instala um eventFilter Qt no widget do 3D para disparar picking quando pick_mode está ativo.
+
+        Isso é um fallback/solução robusta para casos em que o VTK AddObserver não recebe o evento
+        em QtInteractor embedado.
+        """
+        if getattr(self, "_pick_filter_installed", False):
+            return
+        self._pick_filter_installed = True
+        self._pick_press_pos = None
+        self._pick_dragging = False
+
+        targets = []
+        try:
+            targets.append(self.plotter)
+        except Exception:
+            pass
+        try:
+            w = getattr(self.plotter, "interactor", None)
+            if w is not None:
+                targets.append(w)
+        except Exception:
+            pass
+
+        for t in targets:
+            try:
+                t.installEventFilter(self)
+            except Exception:
+                pass
+    def _qt_trigger_pick(self, widget, pos):
+            """Converte coordenadas Qt (origem topo-esq) -> VTK/RenderWindow (origem base-esq) e dispara o pick.
+
+            Observação: no Windows/HiDPI o tamanho do RenderWindow pode diferir do tamanho do widget Qt.
+            Aqui a conversão usa a razão (RenderWindowSize / WidgetSize), que costuma ser o mais robusto.
+            """
+            try:
+                fn = self.state.get("_pick_perform", None)
+            except Exception:
+                fn = None
+            if not callable(fn):
+                try:
+                    self.statusBar().showMessage("Pick: handler não instalado (state['_pick_perform'] ausente)", 2500)
+                except Exception:
+                    pass
+                return
+
+            # Sempre tenta usar o widget do interactor (onde o VTK realmente desenha)
+            inter = None
+            try:
+                inter = getattr(self.plotter, "interactor", None)
+            except Exception:
+                inter = None
+            if inter is None:
+                inter = widget
+
+            # Normaliza posição para o referencial do interactor
+            p = pos
+            try:
+                if widget is not inter and hasattr(inter, "mapFrom"):
+                    p = inter.mapFrom(widget, pos)
+            except Exception:
+                p = pos
+
+            # Escala para o tamanho real do RenderWindow (pixels do VTK)
+            try:
+                rw, rh = self.plotter.ren_win.GetSize()
+            except Exception:
+                rw, rh = None, None
+
+            try:
+                qw = int(inter.width())
+                qh = int(inter.height())
+            except Exception:
+                qw, qh = None, None
+
+            try:
+                if rw and rh and qw and qh and qw > 0 and qh > 0:
+                    sx = float(rw) / float(qw)
+                    sy = float(rh) / float(qh)
+                    x = float(p.x()) * sx
+                    y = float(qh - p.y()) * sy  # VTK origin: bottom-left
+                else:
+                    x = float(p.x())
+                    y = float(p.y())
+            except Exception:
+                return
+
+            ok = False
+            try:
+                ok = bool(fn(int(x), int(y)))
+            except Exception:
+                ok = False
+
+            if not ok:
+                try:
+                    self.statusBar().showMessage("Pick: nenhuma célula encontrada (tente clicar nas faces/arestas da malha)", 1500)
+                except Exception:
+                    pass
+
+    def eventFilter(self, obj, event):
+        """Captura clique sem bloquear rotação/zoom.
+
+        - Se o usuário clicar (pressiona/solta) sem arrastar e pick_mode estiver ativo,
+          dispara o pick no release.
+        - Se arrastar (rotacionar), não seleciona.
+        """
+        try:
+            is_target = (obj is getattr(self, "plotter", None)) or (obj is getattr(getattr(self, "plotter", None), "interactor", None))
+        except Exception:
+            is_target = False
+
+        if is_target:
+            try:
+                mode = self.state.get("pick_mode", None)
+            except Exception:
+                mode = None
+
+            if mode in ("cell", "column"):
+                et = event.type()
+                if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+                    self._pick_press_pos = event.pos()
+                    self._pick_dragging = False
+
+                elif et == QtCore.QEvent.MouseMove and getattr(self, "_pick_press_pos", None) is not None:
+                    try:
+                        if (event.pos() - self._pick_press_pos).manhattanLength() > 6:
+                            self._pick_dragging = True
+                    except Exception:
+                        pass
+
+                elif et == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+                    try:
+                        press = getattr(self, "_pick_press_pos", None)
+                        dragging = bool(getattr(self, "_pick_dragging", False))
+                    except Exception:
+                        press = None
+                        dragging = False
+
+                    if press is not None and not dragging:
+                        # dispara pick no release (clique)
+                        self._qt_trigger_pick(obj, event.pos())
+
+                    self._pick_press_pos = None
+                    self._pick_dragging = False
+
+        return super().eventFilter(obj, event)
+    def set_pick_mode(self, mode):
+        # mode: None | 'cell' | 'column'
+        if mode not in (None, 'cell', 'column'):
+            mode = None
+        self.state['pick_mode'] = mode
+
+        # feedback visual + garante foco no 3D
+        try:
+            if hasattr(self, 'plotter') and self.plotter is not None:
+                self.plotter.setFocus()
+                self.plotter.setCursor(QtCore.Qt.CrossCursor if mode else QtCore.Qt.ArrowCursor)
+        except Exception:
+            pass
+        try:
+            sb = self.statusBar() if hasattr(self, 'statusBar') else None
+            if sb:
+                msg = 'Seleção 3D: desligada' if mode is None else ('Seleção 3D: CÉLULA (clique no 3D)' if mode=='cell' else 'Seleção 3D: COLUNA (clique no 3D)')
+                sb.showMessage(msg, 4000)
+        except Exception:
+            pass
+
+        # exclusividade dos botões
+        if hasattr(self, 'btn_pick_cell'):
+            self.btn_pick_cell.blockSignals(True)
+            self.btn_pick_cell.setChecked(mode == 'cell')
+            self.btn_pick_cell.blockSignals(False)
+        if hasattr(self, 'btn_pick_column'):
+            self.btn_pick_column.blockSignals(True)
+            self.btn_pick_column.setChecked(mode == 'column')
+            self.btn_pick_column.blockSignals(False)
+
+        if mode is None:
+            self.clear_pick_selection()
+
+    def clear_pick_selection(self):
+        # remove highlight no 3D e limpa o inspector
+        try:
+            fn = self.state.get('clear_pick')
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, '_inspector_dock', None) is not None:
+                self._update_cell_table(None)
+                self._update_column_tab(None)
+        except Exception:
+            pass
+
+    def _ensure_inspector_dock(self):
+        if getattr(self, '_inspector_dock', None) is not None:
+            return
+
+        dock = QtWidgets.QDockWidget('Inspector (Célula/Coluna)', self)
+        dock.setObjectName('dock_cell_inspector')
+        dock.setAllowedAreas(
+            QtCore.Qt.LeftDockWidgetArea
+            | QtCore.Qt.RightDockWidgetArea
+            | QtCore.Qt.BottomDockWidgetArea
+        )
+
+        root = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(root)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        self._insp_tabs = QtWidgets.QTabWidget()
+
+        # --- TAB: Célula ---
+        tab_cell = QtWidgets.QWidget()
+        vc = QtWidgets.QVBoxLayout(tab_cell)
+        vc.setContentsMargins(0, 0, 0, 0)
+        vc.setSpacing(6)
+
+        self._lbl_cell_title = QtWidgets.QLabel('Nenhuma célula selecionada')
+        f = self._lbl_cell_title.font()
+        f.setBold(True)
+        self._lbl_cell_title.setFont(f)
+
+        # Resumo (geom + localização)
+        self._grp_cell_summary = QtWidgets.QGroupBox('Resumo')
+        gs = QtWidgets.QGridLayout(self._grp_cell_summary)
+        gs.setContentsMargins(8, 8, 8, 8)
+        gs.setHorizontalSpacing(10)
+        gs.setVerticalSpacing(4)
+
+        def _mk_row_cell(r, label):
+            lab = QtWidgets.QLabel(label)
+            val = QtWidgets.QLabel('-')
+            val.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            gs.addWidget(lab, r, 0)
+            gs.addWidget(val, r, 1)
+            return val
+
+        self._val_cell_ijk = _mk_row_cell(0, '(i, j, k)')
+        self._val_cell_length = _mk_row_cell(1, 'Comprimento (ΔX)')
+        self._val_cell_width = _mk_row_cell(2, 'Largura (ΔY)')
+        self._val_cell_thickness = _mk_row_cell(3, 'Thickness (ΔZ)')
+        self._val_cell_volume = _mk_row_cell(4, 'Volume')
+        self._val_cell_center = _mk_row_cell(5, 'Centro (X, Y, Z)')
+
+        self._tbl_cell = QtWidgets.QTableWidget(0, 2)
+        self._tbl_cell.setHorizontalHeaderLabels(['Propriedade', 'Valor'])
+        self._tbl_cell.horizontalHeader().setStretchLastSection(True)
+        self._tbl_cell.verticalHeader().setVisible(False)
+        self._tbl_cell.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._tbl_cell.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+
+        vc.addWidget(self._lbl_cell_title)
+        vc.addWidget(self._grp_cell_summary)
+        vc.addWidget(self._tbl_cell)
+        self._insp_tabs.addTab(tab_cell, 'Célula')
+
+        # --- TAB: Coluna ---
+        tab_col = QtWidgets.QWidget()
+        vcol = QtWidgets.QVBoxLayout(tab_col)
+        vcol.setContentsMargins(0, 0, 0, 0)
+        vcol.setSpacing(6)
+
+        self._lbl_col_title = QtWidgets.QLabel('Nenhuma coluna selecionada')
+        f2 = self._lbl_col_title.font()
+        f2.setBold(True)
+        self._lbl_col_title.setFont(f2)
+        # Resumo da coluna (I,J)
+        self._grp_col_summary = QtWidgets.QGroupBox('Resumo')
+        gc = QtWidgets.QGridLayout(self._grp_col_summary)
+        gc.setContentsMargins(8, 8, 8, 8)
+        gc.setHorizontalSpacing(10)
+        gc.setVerticalSpacing(4)
+
+        def _mk_row_col(r, label):
+            lab = QtWidgets.QLabel(label)
+            val = QtWidgets.QLabel('-')
+            val.setWordWrap(True)
+            val.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            gc.addWidget(lab, r, 0)
+            gc.addWidget(val, r, 1)
+            return val
+
+        self._val_col_ij = _mk_row_col(0, '(i, j)')
+        self._val_col_ncells = _mk_row_col(1, 'N células na coluna')
+        self._val_col_top_base = _mk_row_col(2, 'Z topo / base')
+        self._val_col_th_sum = _mk_row_col(3, 'Soma Thickness')
+        self._val_col_facies = _mk_row_col(4, 'Facies (contagem)')
+
+        # Tabela completa da coluna com primeira coluna "k" fixa
+        self._col_model = QtGui.QStandardItemModel(0, 0, self)
+
+        self._tbl_col_frozen = QtWidgets.QTableView()
+        self._tbl_col_main = QtWidgets.QTableView()
+
+        for tv in (self._tbl_col_frozen, self._tbl_col_main):
+            tv.setModel(self._col_model)
+            tv.verticalHeader().setVisible(False)
+            tv.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            tv.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+            tv.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            tv.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            tv.setWordWrap(False)
+
+        # frozen: sem scroll horizontal e sem barra vertical
+        self._tbl_col_frozen.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._tbl_col_frozen.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._tbl_col_frozen.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # main: scroll normal
+        self._tbl_col_main.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # sincroniza scroll vertical
+        self._syncing_col_scroll = False
+
+        def _sync_main_to_frozen(val):
+            if self._syncing_col_scroll:
+                return
+            self._syncing_col_scroll = True
+            try:
+                self._tbl_col_frozen.verticalScrollBar().setValue(val)
+            finally:
+                self._syncing_col_scroll = False
+
+        def _sync_frozen_to_main(val):
+            if self._syncing_col_scroll:
+                return
+            self._syncing_col_scroll = True
+            try:
+                self._tbl_col_main.verticalScrollBar().setValue(val)
+            finally:
+                self._syncing_col_scroll = False
+
+        self._tbl_col_main.verticalScrollBar().valueChanged.connect(_sync_main_to_frozen)
+        self._tbl_col_frozen.verticalScrollBar().valueChanged.connect(_sync_frozen_to_main)
+
+        col_container = QtWidgets.QWidget()
+        hl = QtWidgets.QHBoxLayout(col_container)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(0)
+        hl.addWidget(self._tbl_col_frozen)
+        hl.addWidget(self._tbl_col_main, 1)
+
+        vcol.addWidget(self._lbl_col_title)
+        vcol.addWidget(self._grp_col_summary)
+        vcol.addWidget(col_container)
+
+
+        self._insp_tabs.addTab(tab_col, 'Coluna (I,J)')
+
+        v.addWidget(self._insp_tabs)
+
+        dock.setWidget(root)
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
+        try:
+            # coloca abaixo do Project Explorer
+            if hasattr(self, "dock_explorer") and self.dock_explorer is not None:
+                self.splitDockWidget(self.dock_explorer, dock, QtCore.Qt.Vertical)
+                self.resizeDocks([self.dock_explorer, dock], [320, 260], QtCore.Qt.Vertical)
+        except Exception:
+            pass
+        dock.hide()
+
+        self._inspector_dock = dock
+
+    def _on_3d_pick(self, info):
+        # callback do picker
+        try:
+            self._ensure_inspector_dock()
+            self._inspector_dock.show()
+            self._inspector_dock.raise_()
+        except Exception:
+            pass
+
+        mode = None
+        try:
+            mode = None if info is None else info.get('mode')
+        except Exception:
+            mode = None
+
+        if mode == 'cell':
+            self._update_cell_table(info)
+            try: self._insp_tabs.setCurrentIndex(0)
+            except Exception: pass
+        elif mode == 'column':
+            self._update_cell_table(info)
+            self._update_column_tab(info)
+            try: self._insp_tabs.setCurrentIndex(1)
+            except Exception: pass
+        else:
+            self._update_cell_table(None)
+            self._update_column_tab(None)
+
+    def _update_cell_table(self, info):
+        try:
+            if info is None:
+                self._lbl_cell_title.setText('Nenhuma célula selecionada')
+                self._tbl_cell.setRowCount(0)
+                # limpa resumo
+                for w in (getattr(self, '_val_cell_ijk', None),
+                          getattr(self, '_val_cell_length', None),
+                          getattr(self, '_val_cell_width', None),
+                          getattr(self, '_val_cell_thickness', None),
+                          getattr(self, '_val_cell_volume', None),
+                          getattr(self, '_val_cell_center', None)):
+                    try:
+                        if w is not None:
+                            w.setText('-')
+                    except Exception:
+                        pass
+                return
+
+            i = info.get('i'); j = info.get('j'); k = info.get('k'); cid = info.get('cell_id')
+            self._lbl_cell_title.setText(f'Célula selecionada: cell_id={cid} | (i,j,k)=({i},{j},{k})')
+
+            props = info.get('props', {}) or {}
+            geom = info.get('geom', {}) or {}
+
+            # resumo topo
+            try:
+                if getattr(self, '_val_cell_ijk', None) is not None:
+                    self._val_cell_ijk.setText(f'({i}, {j}, {k})')
+            except Exception:
+                pass
+
+            try:
+                dx = geom.get('length', None)
+                dy = geom.get('width', None)
+                dz = geom.get('height', None)
+                vol = geom.get('volume', None)
+                cx = geom.get('center_x', None)
+                cy = geom.get('center_y', None)
+                cz = geom.get('center_z', None)
+
+                # thickness preferencial (propriedade do grid)
+                th = None
+                for nm in ('StratigraphicThickness', 'cell_thickness', 'Thickness', 'thickness_local'):
+                    if nm in props:
+                        th = props.get(nm)
+                        break
+                if th is None:
+                    th = dz
+
+                if getattr(self, '_val_cell_length', None) is not None and dx is not None:
+                    self._val_cell_length.setText(f'{float(dx):.3f}')
+                if getattr(self, '_val_cell_width', None) is not None and dy is not None:
+                    self._val_cell_width.setText(f'{float(dy):.3f}')
+                if getattr(self, '_val_cell_thickness', None) is not None and th is not None:
+                    try:
+                        self._val_cell_thickness.setText(f'{float(th):.3f}')
+                    except Exception:
+                        self._val_cell_thickness.setText(str(th))
+                if getattr(self, '_val_cell_volume', None) is not None and vol is not None:
+                    self._val_cell_volume.setText(f'{float(vol):.3f}')
+                if getattr(self, '_val_cell_center', None) is not None and (cx is not None and cy is not None and cz is not None):
+                    self._val_cell_center.setText(f'({float(cx):.3f}, {float(cy):.3f}, {float(cz):.3f})')
+            except Exception:
+                pass
+
+            # tabela de propriedades (depois do resumo)
+            excluded = set([
+                'i_index','j_index','k_index','vtkOriginalCellIds','vtkOriginalPointIds','vtkGhostType',
+                'StratigraphicThickness','cell_thickness','Thickness','thickness_local'
+            ])
+
+            ordered = []
+            if 'Facies' in props:
+                ordered.append(('Facies', props.get('Facies')))
+            for key in sorted(props.keys()):
+                if key in excluded or key == 'Facies':
+                    continue
+                ordered.append((key, props.get(key)))
+
+            self._tbl_cell.setRowCount(len(ordered))
+            for r,(kname,v) in enumerate(ordered):
+                self._tbl_cell.setItem(r,0,QtWidgets.QTableWidgetItem(str(kname)))
+                self._tbl_cell.setItem(r,1,QtWidgets.QTableWidgetItem(str(v)))
+            try:
+                self._tbl_cell.resizeColumnsToContents()
+            except Exception:
+                pass
+        except Exception:
+            pass
+    def _update_column_tab(self, info):
+        try:
+            if info is None or info.get('mode') != 'column':
+                self._lbl_col_title.setText('Nenhuma coluna selecionada')
+                for w in (getattr(self, '_val_col_ij', None),
+                        getattr(self, '_val_col_ncells', None),
+                        getattr(self, '_val_col_top_base', None),
+                        getattr(self, '_val_col_th_sum', None),
+                        getattr(self, '_val_col_facies', None)):
+                    try:
+                        if w is not None:
+                            w.setText('-')
+                    except Exception:
+                        pass
+                try:
+                    if hasattr(self, "_col_model"):
+                        self._col_model.clear()
+                    elif hasattr(self, "_tbl_col"):
+                        self._tbl_col.setRowCount(0)
+                        self._tbl_col.setColumnCount(0)
+                except Exception:
+                    pass
+                return
+
+            i = info.get('i')
+            j = info.get('j')
+            self._lbl_col_title.setText(f'Coluna selecionada: (i,j)=({i},{j})')
+
+            try:
+                if getattr(self, '_val_col_ij', None) is not None:
+                    self._val_col_ij.setText(f'({i}, {j})')
+            except Exception:
+                pass
+
+            nc = info.get('column_ncells', None)
+            try:
+                if getattr(self, '_val_col_ncells', None) is not None and nc is not None:
+                    self._val_col_ncells.setText(str(nc))
+            except Exception:
+                pass
+
+            try:
+                topz = info.get('column_top_z', None)
+                basez = info.get('column_base_z', None)
+                if getattr(self, '_val_col_top_base', None) is not None and (topz is not None or basez is not None):
+                    if topz is not None and basez is not None:
+                        self._val_col_top_base.setText(f'{float(topz):.3f} / {float(basez):.3f}')
+                    else:
+                        self._val_col_top_base.setText(f'{topz} / {basez}')
+            except Exception:
+                pass
+
+            try:
+                if getattr(self, '_val_col_th_sum', None) is not None:
+                    if 'column_thickness_sum' in info:
+                        nm = info.get('column_thickness_name', 'Thickness')
+                        try:
+                            self._val_col_th_sum.setText(f'{nm}: {float(info.get("column_thickness_sum")):.3f}')
+                        except Exception:
+                            self._val_col_th_sum.setText(f'{nm}: {info.get("column_thickness_sum")}')
+                    else:
+                        self._val_col_th_sum.setText('-')
+            except Exception:
+                pass
+
+            try:
+                fc = info.get('column_facies_counts') or {}
+                if getattr(self, '_val_col_facies', None) is not None:
+                    if fc:
+                        items = sorted(fc.items(), key=lambda kv: kv[0])
+                        self._val_col_facies.setText(', '.join([f'{k}:{v}' for k, v in items]))
+                    else:
+                        self._val_col_facies.setText('-')
+            except Exception:
+                pass
+
+            rows = info.get('column_rows') or []
+            cols = info.get('column_columns') or []
+
+            if not cols and rows:
+                keys = set()
+                for r in rows:
+                    try:
+                        keys.update(r.keys())
+                    except Exception:
+                        pass
+                cols = ['k_index'] + sorted([k for k in keys if k != 'k_index'])
+
+            def _fmt(v):
+                try:
+                    if v is None:
+                        return ''
+                    if isinstance(v, float):
+                        return f'{v:.3f}'
+                    return str(v)
+                except Exception:
+                    return str(v)
+
+            def _is_zero_like(v):
+                try:
+                    if v is None:
+                        return True
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if s == '':
+                            return True
+                        return float(s) == 0.0
+                    return float(v) == 0.0
+                except Exception:
+                    return False
+
+            # remove colunas inteiras de zero/vazio, exceto k_index e Facies
+            filtered_cols = []
+            for coln in cols:
+                if coln in ('k_index', 'Facies'):
+                    filtered_cols.append(coln)
+                    continue
+
+                vals = []
+                for r in rows:
+                    try:
+                        vals.append(r.get(coln, None))
+                    except Exception:
+                        vals.append(None)
+
+                if vals and all(_is_zero_like(v) for v in vals):
+                    continue
+
+                filtered_cols.append(coln)
+
+            cols = filtered_cols
+
+            # modo com k fixo
+            if hasattr(self, "_col_model") and hasattr(self, "_tbl_col_main") and hasattr(self, "_tbl_col_frozen"):
+                m = self._col_model
+                m.clear()
+                m.setRowCount(len(rows))
+                m.setColumnCount(len(cols))
+                m.setHorizontalHeaderLabels([('k' if str(c) == 'k_index' else str(c)) for c in cols])
+
+                for r_i, row in enumerate(rows):
+                    for c_i, coln in enumerate(cols):
+                        try:
+                            v = row.get(coln, '')
+                        except Exception:
+                            v = ''
+
+                        item = QtGui.QStandardItem(_fmt(v))
+
+                        # cor na coluna de facies
+                        if str(coln) == 'Facies':
+                            try:
+                                fac = int(float(v))
+                                if hasattr(self, 'facies_colors_dict'):
+                                    color_rgb = self.facies_colors_dict.get(fac, None)
+                                else:
+                                    color_rgb = None
+
+                                if color_rgb is not None:
+                                    if len(color_rgb) >= 3:
+                                        qcolor = QtGui.QColor(
+                                            int(float(color_rgb[0]) * 255),
+                                            int(float(color_rgb[1]) * 255),
+                                            int(float(color_rgb[2]) * 255)
+                                        )
+                                        item.setBackground(QtGui.QBrush(qcolor))
+
+                                        lum = 0.299 * qcolor.red() + 0.587 * qcolor.green() + 0.114 * qcolor.blue()
+                                        txt = QtGui.QColor(0, 0, 0) if lum > 160 else QtGui.QColor(255, 255, 255)
+                                        item.setForeground(QtGui.QBrush(txt))
+                            except Exception:
+                                pass
+
+                        m.setItem(r_i, c_i, item)
+
+                # frozen mostra só coluna 0; main esconde coluna 0
+                for c in range(len(cols)):
+                    if c == 0:
+                        self._tbl_col_frozen.setColumnHidden(c, False)
+                        self._tbl_col_main.setColumnHidden(c, True)
+                    else:
+                        self._tbl_col_frozen.setColumnHidden(c, True)
+                        self._tbl_col_main.setColumnHidden(c, False)
+
+                # largura fina do k
+                try:
+                    max_k = 0
+                    try:
+                        max_k = max(int(r.get("k_index", 0)) for r in rows) if rows else 0
+                    except Exception:
+                        max_k = 0
+
+                    fm = self._tbl_col_frozen.fontMetrics()
+                    w0 = fm.horizontalAdvance(str(max_k)) + 10
+                    w0 = max(22, min(w0, 36))
+
+                    self._tbl_col_frozen.setColumnWidth(0, w0)
+                    self._tbl_col_frozen.setMinimumWidth(w0 + 2)
+                    self._tbl_col_frozen.setMaximumWidth(w0 + 2)
+                except Exception:
+                    pass
+
+                try:
+                    for c in range(1, min(len(cols), 12)):
+                        self._tbl_col_main.resizeColumnToContents(c)
+                except Exception:
+                    pass
+
+                return
+
+            # fallback antigo, se necessário
+            if hasattr(self, "_tbl_col"):
+                self._tbl_col.setRowCount(len(rows))
+                self._tbl_col.setColumnCount(len(cols))
+                self._tbl_col.setHorizontalHeaderLabels([('k' if str(c) == 'k_index' else str(c)) for c in cols])
+
+                for r_i, row in enumerate(rows):
+                    for c_i, coln in enumerate(cols):
+                        try:
+                            v = row.get(coln, '')
+                        except Exception:
+                            v = ''
+                        self._tbl_col.setItem(r_i, c_i, QtWidgets.QTableWidgetItem(_fmt(v)))
+
+                try:
+                    self._tbl_col.resizeColumnsToContents()
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+
     def _cleanup_vtk(self):
         """Chamável múltiplas vezes sem problema."""
         if getattr(self, "_vtk_cleaned", False):
@@ -8606,6 +9390,4 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             super().closeEvent(event)
     
-
-
 
