@@ -6,6 +6,7 @@ import numpy as np
 import os
 import pandas as pd
 import json
+import re
 from scipy.ndimage import label, generate_binary_structure
 from matplotlib.colors import ListedColormap
 
@@ -374,7 +375,7 @@ class ProportionPropsDialog(QtWidgets.QDialog):
 
     def __init__(self, prop_names, current_set=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Propriedades que são proporção (fixar 0–1)")
+        self.setWindowTitle("Propriedades proporcionais por célula")
         self.resize(520, 520)
 
         self._prop_names = list(prop_names or [])
@@ -611,7 +612,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._install_3d_pick_filter()
         except Exception:
             pass
-
+        
+        self._map2d_hover_targets = {}
+        self._last_2d_hover_msg = ""
         
         # --- 4. CONFIGURAÇÃO FINAL ---
         self.update_2d_map()
@@ -728,6 +731,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.view_menu.addAction(self.dock_explorer.toggleViewAction())
         self.view_menu.addAction(self.dock_props.toggleViewAction())
+        self.view_menu.addAction(self.dock_map2d_summary.toggleViewAction())
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.ribbon_toolbar.toggleViewAction())
 
@@ -747,9 +751,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map2d_tab = QtWidgets.QWidget()
         ml = QtWidgets.QVBoxLayout(self.map2d_tab)
         ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(6)
         self.plotter_2d, plotter_2d_widget = self._make_embedded_plotter(parent=self.map2d_tab)
-        ml.addWidget(plotter_2d_widget)
+        ml.addWidget(plotter_2d_widget, 1)
+
         self.viz_container.addWidget(self.map2d_tab)
+
+        self.plotter_2d._hover2d_model_name = None
+        self.plotter_2d._map2d_summary_target = getattr(self, "map2d_summary_text", None)
+        self._install_2d_hover_filter(self.plotter_2d, model_name=None)
+        self._sync_context_docks_visibility()
 
         # Pag 2: Métricas
         self.details_tab = QtWidgets.QWidget()
@@ -2201,12 +2212,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_thick.setAutoRaise(True)
         
         menu_thick = QtWidgets.QMenu(self.btn_thick)
-        thickness_opts = ["Espessura", "Proporção de fácies (coluna)", "Proporção de fácies (envelope)", "Maior pacote", "Nº pacotes", "ICV", "Qv", "Qv absoluto"]
+        thickness_opts = [
+            "Espessura total da coluna",
+            "Espessura",
+            "Proporção de fácies (coluna)",
+            "Proporção de fácies (envelope)",
+            "Maior pacote",
+            "Nº pacotes",
+            "ICV",
+            "Qv",
+            "Qv absoluto",
+        ]
         for label in thickness_opts:
             action = menu_thick.addAction(label)
             action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
         self.btn_thick.setMenu(menu_thick)
-        self._update_thick_btn("Espessura")
+        self._update_thick_btn("Espessura total da coluna")
         g_esp_row.addWidget(self.btn_thick)
 
         # --- NOVO GRUPO: ESTILO (CORES) ---
@@ -2221,8 +2242,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_colormap.setIconSize(QtCore.QSize(80, 14))
         self.cmb_colormap.setFixedWidth(92)
         self._init_colormap_combo(
-            ["plasma", "viridis", "magma", "cividis", "turbo", "jet", "seismic", "coolwarm"],
-            default_name="plasma"
+            ["jet", "viridis", "magma", "cividis", "turbo", "plasma", "seismic", "coolwarm"],
+            default_name="jet"
         )
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
         
@@ -2340,7 +2361,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             cmap = cm.get_cmap(cmap_name)
         except Exception:
-            cmap = cm.get_cmap("plasma")
+            cmap = cm.get_cmap("jet")
 
         grad = np.linspace(0, 1, w, dtype=float)
         rgba = (cmap(grad) * 255).astype(np.uint8)  # (w,4)
@@ -2351,7 +2372,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pix = QtGui.QPixmap.fromImage(qimg)
         return QtGui.QIcon(pix)
 
-    def _init_colormap_combo(self, cmap_names, default_name="plasma"):
+    def _init_colormap_combo(self, cmap_names, default_name="jet"):
         """Preenche o combo de paletas com amostras (ícones) em vez de texto."""
         from PyQt5 import QtCore
 
@@ -2500,7 +2521,7 @@ class MainWindow(QtWidgets.QMainWindow):
         act_cfg.triggered.connect(self.open_proportion_props_dialog)
     
     def change_scalar_view(self, scalar_name):
-        """Visualiza uma propriedade escalar arbitrária (PORO, PERM, Sand, Carbo_Mud, etc)."""
+        """Visualiza uma propriedade escalar arbitrária (PORO, PERM, Sand, Basement, etc)."""
         import numpy as np
 
         self.btn_mode.setText(f"Prop:\n{scalar_name}")
@@ -2509,88 +2530,89 @@ class MainWindow(QtWidgets.QMainWindow):
         if grid is None and "base" in self.models:
             grid = self.models["base"].get("grid")
 
-        if grid is None or scalar_name not in grid.cell_data:
+        if grid is None or scalar_name not in getattr(grid, "cell_data", {}):
             return
 
-        # Configura como um Preset de Métricas por Coluna (hack já existente)
+        arr = np.asarray(grid.cell_data[scalar_name], dtype=float)
+        finite = arr[np.isfinite(arr)]
+
+        if self._is_normalized_property(scalar_name):
+            clim = (0.0, 1.0)
+        elif finite.size > 0:
+            vmin = float(np.nanmin(finite))
+            vmax = float(np.nanmax(finite))
+            if vmin >= 0.0:
+                vmin = 0.0
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+            clim = (vmin, vmax)
+        else:
+            clim = (0.0, 1.0)
+
+        title = f"Propriedade: {scalar_name}"
+        cmap_use = self.state.get(
+            "current_scalar_cmap",
+            self.state.get("thickness_cmap", "jet")
+        )
+
+        # Compatibilidade com o fluxo antigo do 2D/comparação
         presets = self.state.get("thickness_presets", {})
-        presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
+        presets[scalar_name] = (scalar_name, title)
         self.state["thickness_presets"] = presets
         self.state["thickness_mode"] = scalar_name
-
-        # --- CLIM ---
-        # Se for proporção => 0–1
-        if self._is_fraction_property(scalar_name):
-            vmin, vmax = 0.0, 1.0
-        else:
-            arr = np.asarray(grid.cell_data[scalar_name], dtype=float)
-            valid_arr = arr[np.isfinite(arr)]
-            if valid_arr.size > 0:
-                vmin, vmax = float(np.min(valid_arr)), float(np.max(valid_arr))
-                if vmax <= vmin:
-                    vmax = vmin + 1e-6
-            else:
-                vmin, vmax = 0.0, 1.0
-
-        self.state["thickness_clim"] = (vmin, vmax)
+        self.state["thickness_clim"] = clim
         self.state["thickness_clim_manual"] = True
         self.state["thickness_global_clim"] = None
 
-        # Ativa modo
-        self.state["mode"] = "thickness_local"
+        # Fluxo correto para propriedade escalar genérica
+        self.state["mode"] = "scalar"
+        self.state["current_scalar_name"] = scalar_name
+        self.state["current_scalar_title"] = title
+        self.state["current_scalar_clim"] = clim
+        self.state["current_scalar_cmap"] = cmap_use
 
-        # --- Se estiver em COMPARAÇÃO: padroniza globalmente ---
-        if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and hasattr(self, "active_comp_states") and self.active_comp_states:
-            # garante que todos tenham o preset
-            for st in self.active_comp_states:
-                try:
-                    st_presets = st.get("thickness_presets", {})
-                    st_presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
-                    st["thickness_presets"] = st_presets
-                    st["thickness_mode"] = scalar_name
-                    st["mode"] = "thickness_local"
-                    st["thickness_cmap"] = self.state.get("thickness_cmap", st.get("thickness_cmap", "plasma"))
-                    st["current_scalar_cmap"] = self.state.get("current_scalar_cmap", st.get("current_scalar_cmap", st["thickness_cmap"]))
-                except Exception:
-                    pass
+        # Sincroniza estados ativos da comparação 3D
+        for st in getattr(self, "active_comp_states", []) or []:
+            try:
+                st_presets = st.get("thickness_presets", {})
+                st_presets[scalar_name] = (scalar_name, title)
+                st["thickness_presets"] = st_presets
+                st["thickness_mode"] = scalar_name
+                st["thickness_clim"] = clim
+                st["thickness_clim_manual"] = True
+                st["thickness_global_clim"] = None
 
-            # aplica CLIM global (0–1 ou min/max global)
-            self._apply_global_clim_to_active_comparison()
+                st["mode"] = "scalar"
+                st["current_scalar_name"] = scalar_name
+                st["current_scalar_title"] = title
+                st["current_scalar_clim"] = clim
+                st["current_scalar_cmap"] = cmap_use
+            except Exception:
+                pass
 
-        else:
-            # Visualização (1 modelo): aplica no próprio estado 3D atual
-            if hasattr(self, "active_comp_states"):
-                for st in self.active_comp_states:
-                    try:
-                        st_presets = st.get("thickness_presets", {})
-                        st_presets[scalar_name] = (scalar_name, f"Propriedade: {scalar_name}")
-                        st["thickness_presets"] = st_presets
-                        st["thickness_mode"] = scalar_name
-                        st["thickness_clim"] = (vmin, vmax)
-                        st["thickness_clim_manual"] = True
-                        st["thickness_global_clim"] = None
-                        st["mode"] = "thickness_local"
-                        if "update_thickness" in st:
-                            st["update_thickness"]()
-                        if "refresh" in st:
-                            st["refresh"]()
-                        if "plotter_ref" in st:
-                            st["plotter_ref"].render()
-                    except Exception:
-                        pass
+        # Se estiver em comparação, padroniza a escala global entre os modelos
+        try:
+            if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1:
+                self._apply_global_clim_to_active_comparison()
+        except Exception:
+            pass
 
-        # Refresh 3D
+        # Refresh 3D principal
         refresh = self.state.get("refresh")
         if callable(refresh):
             refresh()
 
-        # Refresh 2D
+        # Refresh 2D principal
         if hasattr(self, "update_2d_map"):
             self.update_2d_map()
 
-        # Se estiver vendo 2D na comparação, reconstrói com a escala global
+        # Refresh 2D comparação
         try:
-            if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1 and self.compare_stack.currentIndex() == 2:
+            if (
+                hasattr(self, "compare_stack")
+                and self.central_stack.currentIndex() == 1
+                and self.compare_stack.currentIndex() == 2
+            ):
                 self.update_dynamic_comparison_2d(self.get_checked_models())
         except Exception:
             pass
@@ -3017,6 +3039,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.btn_view_type.setText("Métricas")
                 self.btn_view_type.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
                 self.compare_stack.setCurrentIndex(0) # Página 3D
+            self._sync_context_docks_visibility()
 
     def _update_mode_btn(self, text, data):
         # Texto do botão (ribbon)
@@ -3054,6 +3077,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.refresh_comparison_active_view()
             except Exception as e:
                 print(f"[show_main_3d_view] erro comp 3D: {e}")
+            self._sync_context_docks_visibility()
             return
 
         # Caso contrário, força perspectiva de Visualização
@@ -3067,9 +3091,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.switch_main_view_to_model(model_key)
             except Exception:
                 pass
+        self._sync_context_docks_visibility()
 
     def show_map2d_view(self):
         """Alterna para Mapas 2D respeitando a perspectiva atual."""
+        try:
+            if self.state.get("mode", "facies") != "scalar":
+                self._update_thick_btn("Espessura total da coluna")
+        except Exception:
+            pass
+
         # COMPARAÇÃO: abre a página 2D da comparação
         if hasattr(self, "compare_stack") and self.central_stack.currentIndex() == 1:
             self.compare_stack.setCurrentIndex(2)  # comp_page_2d
@@ -3077,6 +3108,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.update_dynamic_comparison_2d(self.get_checked_models())
             except Exception as e:
                 print(f"[show_map2d_view] erro comp 2D: {e}")
+            self._sync_context_docks_visibility()
             return
 
         # VISUALIZAÇÃO: abre a página 2D da visualização
@@ -3091,6 +3123,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.update_2d_map()
             except Exception:
                 pass
+        self._sync_context_docks_visibility()
 
     def show_metrics_view(self):
         """Alterna para Métricas (Força a perspectiva de Visualização)."""
@@ -3102,6 +3135,7 @@ class MainWindow(QtWidgets.QMainWindow):
             model_key = self.state.get("active_model_key", "base")
             try: self.update_metrics_view_content(model_key)
             except: pass
+        self._sync_context_docks_visibility()
 
     def show_ranking_view(self):
         """Alterna para a visão de Ranking (Força a perspectiva de Visualização)."""
@@ -3113,6 +3147,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viz_container.setCurrentIndex(3)
             # Atualiza o conteúdo do ranking
             self.update_ranking_view_content()
+        self._sync_context_docks_visibility()
 
     def _wrap_expanding(self, widget):
             """Helper: força o widget a ocupar toda a área do dock."""
@@ -3124,6 +3159,28 @@ class MainWindow(QtWidgets.QMainWindow):
             container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
             return container
+
+    def _sync_context_docks_visibility(self):
+        """Mostra/esconde docks contextuais conforme a vista ativa."""
+        show_map2d_summary = False
+
+        try:
+            if self.current_perspective != "uncertainty":
+                if self.central_stack.currentIndex() == 0 and hasattr(self, "viz_container"):
+                    show_map2d_summary = (self.viz_container.currentIndex() == 1)
+                elif self.central_stack.currentIndex() == 1 and hasattr(self, "compare_stack"):
+                    show_map2d_summary = (self.compare_stack.currentIndex() == 2)
+        except Exception:
+            show_map2d_summary = False
+
+        dock = getattr(self, "dock_map2d_summary", None)
+        if dock is not None:
+            try:
+                dock.setVisible(bool(show_map2d_summary))
+                if show_map2d_summary:
+                    dock.raise_()
+            except Exception:
+                pass
 
 
     def setup_docks(self, nx, ny, nz):
@@ -3143,8 +3200,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
         self.project_tree.itemChanged.connect(self.on_tree_item_changed)
 
-        self.dock_explorer.setWidget(self.project_tree)
+        explorer_container = QtWidgets.QWidget()
+        explorer_layout = QtWidgets.QVBoxLayout(explorer_container)
+        explorer_layout.setContentsMargins(0, 0, 0, 0)
+        explorer_layout.setSpacing(0)
+        explorer_layout.addWidget(self.project_tree, 1)
+
+        self.dock_explorer.setWidget(explorer_container)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_explorer)
+
+        self.dock_map2d_summary = QtWidgets.QDockWidget("Resumo da coluna 2D", self)
+        self.dock_map2d_summary.setObjectName("dock_map2d_summary")
+        self.dock_map2d_summary.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        self.dock_map2d_summary.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetFloatable |
+            QtWidgets.QDockWidget.DockWidgetClosable
+        )
+
+        self.map2d_summary_text = QtWidgets.QTextBrowser()
+        self.map2d_summary_text.setReadOnly(True)
+        self.map2d_summary_text.setOpenExternalLinks(False)
+        self.map2d_summary_text.setMinimumHeight(150)
+        self.map2d_summary_text.setHtml(
+            "<span style='color:#666'>Clique em uma célula do mapa 2D para ver o resumo da coluna.</span>"
+        )
+        self.dock_map2d_summary.setWidget(self._wrap_expanding(self.map2d_summary_text))
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock_map2d_summary)
+        try:
+            self.splitDockWidget(self.dock_explorer, self.dock_map2d_summary, QtCore.Qt.Vertical)
+        except Exception:
+            pass
+        self.dock_map2d_summary.hide()
 
         # Modelos (top-level) + Poços (top-level)
         self.add_model_to_tree("base", "Modelo Base")
@@ -3893,23 +3980,40 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
 
     def update_2d_map(self):
-        """Atualiza o plotter 2D principal usando o Grid Ativo (com filtros aplicados)."""
+        """Atualiza o plotter 2D principal usando o Grid Ativo."""
         if not hasattr(self, "plotter_2d"):
             return
-
-        presets = self.state.get("thickness_presets") or {}
-        mode = self.state.get("thickness_mode", "Espessura")
-        if mode not in presets:
-            if "Espessura" in presets:
-                mode = "Espessura"
-            else:
-                return
-
-        scalar_name, title = presets[mode]
 
         active_grid = self.state.get("current_grid_source")
         if active_grid is None:
             from load_data import grid as active_grid
+
+        mode_3d = self.state.get("mode", "facies")
+
+        if mode_3d == "scalar" and self.state.get("current_scalar_name"):
+            scalar_name = self.state.get("current_scalar_name")
+            title = self.state.get("current_scalar_title", scalar_name)
+            cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap", "jet")
+            clim_override = self.state.get("current_scalar_clim")
+        else:
+            presets = self.state.get("thickness_presets") or {}
+            mode = self.state.get("thickness_mode", "Espessura total da coluna")
+            if mode not in presets:
+                if "Espessura" in presets:
+                    mode = "Espessura"
+                else:
+                    return
+
+            scalar_name, title = presets[mode]
+            cmap_use = self.state.get("thickness_cmap", "jet")
+            clim_override = self.state.get("thickness_clim")
+
+        if scalar_name == "__total_column_thickness__":
+            clim_override = None
+            title = "Espessura total da coluna (m)"
+        elif self._is_equivalent_2d_property(scalar_name):
+            clim_override = None
+            title = f"{scalar_name} equivalente (m)"
 
         try:
             self._draw_2d_map_local(
@@ -3917,8 +4021,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 active_grid,
                 scalar_name,
                 title,
-                cmap=self.state.get("thickness_cmap", "plasma"),
-                clim_override=self.state.get("thickness_clim"),  # << UNIFICADO
+                cmap=cmap_use,
+                clim_override=clim_override,
                 show_scalar_bar=True,
                 scalar_bar_title=title,
             )
@@ -3928,36 +4032,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_compare_2d_maps(self):
         """Atualiza os mapas 2D de todos os modelos ativos na comparação."""
-        if not hasattr(self, "state"): return
-        
-        # 1. Descobre qual o modo de espessura atual
-        presets = self.state.get("thickness_presets", {})
-        mode = self.state.get("thickness_mode", "Espessura")
-        
-        if mode not in presets: 
-            if presets: mode = list(presets.keys())[0]
-            else: return
+        if not hasattr(self, "state"):
+            return
 
-        scalar, title_suffix = presets[mode]
-        
-        # 2. Se houver plotters 2D de comparação ativos (se você reativar essa feature)
-        # Como o layout dinâmico atual foca no 3D, esta função serve para garantir
-        # que o loop de atualização não quebre e esteja pronto para uso futuro.
-        
+        mode_3d = self.state.get("mode", "facies")
+
+        if mode_3d == "scalar" and self.state.get("current_scalar_name"):
+            scalar = self.state.get("current_scalar_name")
+            title_suffix = self.state.get("current_scalar_title", scalar)
+            cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap", "jet")
+        else:
+            presets = self.state.get("thickness_presets", {})
+            mode = self.state.get("thickness_mode", "Espessura total da coluna")
+
+            if mode not in presets:
+                if presets:
+                    mode = list(presets.keys())[0]
+                else:
+                    return
+
+            scalar, title_suffix = presets[mode]
+            cmap_use = self.state.get("thickness_cmap", "jet")
+
+        if scalar == "__total_column_thickness__":
+            title_suffix = "Espessura total da coluna (m)"
+        elif self._is_equivalent_2d_property(scalar):
+            title_suffix = f"{scalar} equivalente (m)"
+
+        grids = []
+        if hasattr(self, "active_comp_states"):
+            for st in self.active_comp_states:
+                g = st.get("current_grid_source")
+                if g is not None:
+                    grids.append(g)
+
+        clim_override = self._compute_global_2d_clim(grids, scalar)
+
         if hasattr(self, "active_comp_2d_plotters") and hasattr(self, "active_comp_states"):
             for plotter, state in zip(self.active_comp_2d_plotters, self.active_comp_states):
                 grid = state.get("current_grid_source")
-                model_key = state.get("model_key", "?")
-                
-                # Busca nome amigável
-                model_name = str(model_key)
-                if model_key in self.models:
-                    model_name = self.models[model_key].get("name", str(model_key))
-                
-                full_title = f"{title_suffix}"  # nome do modelo já aparece no painel
-                
-                if grid:
-                    self._draw_2d_map_local(plotter, grid, scalar, full_title, show_scalar_bar=True, scalar_bar_title=title_suffix)
+                if grid is None:
+                    continue
+
+                self._draw_2d_map_local(
+                    plotter,
+                    grid,
+                    scalar,
+                    title_suffix,
+                    cmap=cmap_use,
+                    show_scalar_bar=True,
+                    scalar_bar_title=title_suffix,
+                    clim_override=clim_override,
+                )
 
     def _draw_2d_map_local(
         self,
@@ -3971,73 +4097,66 @@ class MainWindow(QtWidgets.QMainWindow):
         scalar_bar_title=None,
         clim_override=None,
     ):
-        """Desenha um mapa 2D (coluna) no BackgroundPlotter, usando a paleta do estado."""
+        """Desenha um mapa 2D (redução por coluna) no plotter."""
         import pyvista as pv
         import numpy as np
+        from visualize import get_2d_clim
 
-        # Limpa o plotter antes de desenhar
         plotter.clear()
-        # Remove barras antigas (pyvista pode manter widgets após clear)
         try:
             plotter.remove_scalar_bar()
         except Exception:
             pass
 
-        if grid_source is None or scalar_name_3d not in getattr(grid_source, "cell_data", {}):
+        if grid_source is None:
             plotter.render()
             return
 
-        # Inferir (nx, ny, nz) do próprio grid (cells = (dims_pts-1))
-        nx = ny = nz = None
-        try:
-            dims_pts = getattr(grid_source, "dimensions", None)
-            if dims_pts and len(dims_pts) == 3:
-                cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
-                if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == grid_source.n_cells):
-                    nx, ny, nz = cx, cy, cz
-        except Exception:
-            pass
-        if nx is None:
-            try:
-                from load_data import nx as lnx, ny as lny, nz as lnz
-                nx, ny, nz = int(lnx), int(lny), int(lnz)
-            except Exception:
-                plotter.render()
-                return
+        dims = self._infer_grid_cell_dims(grid_source)
+        if not dims:
+            plotter.render()
+            return
 
-        arr3d = np.asarray(grid_source.cell_data[scalar_name_3d], dtype=float).reshape((nx, ny, nz), order="F")
-        thickness_2d = np.full((nx, ny), np.nan, dtype=float)
+        nx, ny, nz = dims
 
-        # Coluna: usa o máximo (>0) como no seu código original
-        for ix in range(nx):
-            for iy in range(ny):
-                col = arr3d[ix, iy, :]
-                col = col[col > 0]
-                if col.size > 0:
-                    thickness_2d[ix, iy] = float(np.nanmax(col))
+        map_2d = self._reduce_grid_scalar_to_2d(grid_source, scalar_name_3d)
+        if map_2d is None:
+            plotter.render()
+            return
 
-        # Cria o grid estruturado 2D no topo
+        total_thickness_2d = self._reduce_total_column_thickness_to_2d(grid_source)
+
         x_min, x_max, y_min, y_max, _, z_max = grid_source.bounds
         xs = np.linspace(x_min, x_max, nx)
-        ys = np.linspace(y_max, y_min, ny)  # invertido
+        ys = np.linspace(y_max, y_min, ny)
         xs, ys = np.meshgrid(xs, ys, indexing="ij")
         zs = np.full_like(xs, z_max)
 
         surf = pv.StructuredGrid(xs, ys, zs)
         name2d = scalar_name_3d + "_2d"
-        surf.cell_data[name2d] = thickness_2d[:nx-1, :ny-1].ravel(order="F")
+        surf.cell_data[name2d] = map_2d[:nx-1, :ny-1].ravel(order="F")
 
-        # Trata NaNs / negativos
         arr = np.asarray(surf.cell_data[name2d], dtype=float)
-        arr = np.where(arr < 0, np.nan, arr)
+        arr = np.where(np.isfinite(arr), arr, np.nan)
         surf.cell_data[name2d] = arr
 
-        # Limites de cor
-        clim = clim_override if clim_override is not None else get_2d_clim(scalar_name_3d, arr)
+        if scalar_name_3d == "__total_column_thickness__" or self._is_equivalent_2d_property(scalar_name_3d):
+            finite = arr[np.isfinite(arr)]
+            if finite.size > 0:
+                vmin = float(np.nanmin(finite))
+                vmax = float(np.nanmax(finite))
+                if vmin >= 0.0:
+                    vmin = 0.0
+                if vmax <= vmin:
+                    vmax = vmin + 1e-6
+                clim = (vmin, vmax)
+            else:
+                clim = (0.0, 1.0)
+        else:
+            clim = clim_override if clim_override is not None else get_2d_clim(base_scalar_name=scalar_name_3d, arr=arr)
 
-        # Paleta: usa a do estado se não vier explícita
         if cmap is None:
-            cmap = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
+            cmap = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "jet"
 
         plotter.add_mesh(
             surf,
@@ -4047,7 +4166,7 @@ class MainWindow(QtWidgets.QMainWindow):
             edge_color="black",
             line_width=0.5,
             nan_color="white",
-            show_scalar_bar=False,  # adicionamos abaixo (opcional)
+            show_scalar_bar=False,
             clim=clim,
         )
 
@@ -4060,21 +4179,53 @@ class MainWindow(QtWidgets.QMainWindow):
             grid="front",
             location="outer",
             ticks="outside",
-            color='gray',
+            color="gray",
             minor_ticks=True,
             n_xlabels=4,
             n_ylabels=4,
-            font_size=8,        
-            fmt="%.0f",         
+            font_size=8,
+            fmt="%.0f",
             xtitle="X",
             ytitle="Y",
-          
         )
 
-        if show_scalar_bar:
-            plotter.add_scalar_bar(title=(scalar_bar_title or title), n_labels=5, fmt="%.1f", title_font_size=14, label_font_size=12)
+        bar_title = scalar_bar_title or title
+        if scalar_name_3d == "__total_column_thickness__":
+            bar_title = "Espessura total da coluna (m)"
+        elif self._is_equivalent_2d_property(scalar_name_3d):
+            bar_title = f"{scalar_name_3d} equivalente (m)"
 
-        # plotter.reset_camera()
+        if show_scalar_bar:
+            plotter.add_scalar_bar(
+                title=bar_title,
+                n_labels=5,
+                fmt="%.3g",
+                title_font_size=14,
+                label_font_size=12,
+            )
+
+        try:
+            plotter._map2d_hover_meta = {
+                "surf": surf,
+                "name2d": name2d,
+                "label": bar_title,
+                "model_name": getattr(plotter, "_hover2d_model_name", None),
+                "grid_source": grid_source,
+                "scalar_name_3d": scalar_name_3d,
+                "dims": (nx, ny, nz),
+                "total_thickness_2d": total_thickness_2d,
+            }
+        except Exception:
+            pass
+
+        try:
+            self._install_2d_hover_filter(
+                plotter,
+                model_name=getattr(plotter, "_hover2d_model_name", None),
+            )
+        except Exception:
+            pass
+
         plotter.render()
 
 
@@ -4968,6 +5119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["thickness_global_clim"] = None
 
         self.state["thickness_mode"] = label
+        is_total_column_mode = (label == "Espessura total da coluna")
 
         # 1. Atualiza Visualização PRINCIPAL
         if "update_thickness" in self.state and callable(self.state["update_thickness"]):
@@ -4980,6 +5132,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Atualiza 2D Main
         if hasattr(self, "update_2d_map") and callable(self.update_2d_map):
             self.update_2d_map()
+
+        if is_total_column_mode:
+            try:
+                if hasattr(self, "central_stack") and self.central_stack.currentIndex() == 0 and hasattr(self, "viz_container"):
+                    self.viz_container.setCurrentIndex(1)
+                elif hasattr(self, "central_stack") and self.central_stack.currentIndex() == 1 and hasattr(self, "compare_stack"):
+                    self.compare_stack.setCurrentIndex(2)
+            except Exception:
+                pass
 
         # 2. ATUALIZA COMPARAÇÃO
         if hasattr(self, "active_comp_states"):
@@ -5297,9 +5458,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- CONTROLE DE VISIBILIDADE DOS DOCKS ---
         if mode == "uncertainty":
-            # Esconde Explorer e Inspector
+            # Esconde Explorer, Inspector e resumo 2D
             if hasattr(self, "dock_explorer"): self.dock_explorer.hide()
             if hasattr(self, "dock_props"): self.dock_props.hide()
+            if hasattr(self, "dock_map2d_summary"): self.dock_map2d_summary.hide()
         else:
             # Mostra Explorer e Inspector nos outros modos
             if hasattr(self, "dock_explorer"): self.dock_explorer.show()
@@ -5328,7 +5490,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.act_persp_comp.setChecked(False)
             if hasattr(self, "act_view_uncert"): self.act_view_uncert.setChecked(True)
 
-    
+        self._sync_context_docks_visibility()
+
     def update_comparison_tables_multi(self, checked_models):
         """
         Atualiza as tabelas de comparação (Global, Fácies, Reservatório)
@@ -5498,7 +5661,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Globais
         mode = self.state.get("mode", "facies")
-        thickness_mode = self.state.get("thickness_mode", "Espessura")
+        thickness_mode = self.state.get("thickness_mode", "Espessura total da coluna")
         z_exag = float(self.state.get("z_exag", 15.0))
         show_scalar_bar = bool(self.state.get("show_scalar_bar", True))
 
@@ -5555,8 +5718,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 local_state = {
                     "thickness_mode": thickness_mode,
-                    "thickness_cmap": self.state.get("thickness_cmap", "plasma"),
-                    "current_scalar_cmap": self.state.get("current_scalar_cmap", self.state.get("thickness_cmap", "plasma")),
+                    "thickness_cmap": self.state.get("thickness_cmap", "jet"),
+                    "current_scalar_cmap": self.state.get("current_scalar_cmap", self.state.get("thickness_cmap", "jet")),
                 }
 
                 _, local_state = run(
@@ -5748,6 +5911,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.compare_stack.setCurrentIndex(index)
         self.refresh_comparison_active_view()
+        self._sync_context_docks_visibility()
     
     def get_checked_wells(self):
         """Retorna a lista de nomes dos poços marcados (Checked) na árvore."""
@@ -5885,16 +6049,14 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def update_dynamic_comparison_2d(self, checked_models):
         """Reconstrói a visualização de Mapas 2D."""
-
         import numpy as np
         from PyQt5 import QtWidgets
 
-        # --- LIMPEZA ---
-        if hasattr(self, 'active_comp_2d_plotters'):
+        if hasattr(self, "active_comp_2d_plotters"):
             for p in self.active_comp_2d_plotters:
                 try:
                     p.close()
-                except:
+                except Exception:
                     pass
         self.active_comp_2d_plotters = []
 
@@ -5903,7 +6065,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        # --- NORMALIZA checked_models ---
         normalized = []
         for m in (checked_models or []):
             if isinstance(m, (tuple, list)):
@@ -5920,7 +6081,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.comp_2d_layout.addWidget(QtWidgets.QLabel("Selecione modelos."))
             return
 
-        # --- GRID LAYOUT ---
         n_models = len(normalized)
         cols = 2 if n_models > 1 else 1
 
@@ -5930,21 +6090,66 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_layout.setSpacing(2)
         self.comp_2d_layout.addWidget(grid_container)
 
-        # Recupera preset atual
-        presets = self.state.get("thickness_presets") or {}
-        thick_mode = self.state.get("thickness_mode", "Espessura")
-        if thick_mode not in presets and presets:
-            thick_mode = list(presets.keys())[0]
-        if thick_mode not in presets:
-            thick_mode = "Espessura"
+        mode_3d = self.state.get("mode", "facies")
+        is_scalar_mode = (mode_3d == "scalar" and bool(self.state.get("current_scalar_name")))
 
-        scalar, title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
+        if is_scalar_mode:
+            scalar = self.state.get("current_scalar_name")
+            title = self.state.get("current_scalar_title", scalar)
+            cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap", "jet")
+        else:
+            presets = self.state.get("thickness_presets") or {}
+            thick_mode = self.state.get("thickness_mode", "Espessura total da coluna")
+            if thick_mode not in presets and presets:
+                thick_mode = list(presets.keys())[0]
+            if thick_mode not in presets:
+                thick_mode = "Espessura"
 
-        # base grid seguro
+            scalar, title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
+            cmap_use = self.state.get("thickness_cmap", "jet")
+
         from load_data import grid as global_grid
         base_grid = self.models.get("base", {}).get("grid") or self.state.get("current_grid_source") or global_grid
 
-        # Pré-prepara grids
+        def _infer_dims(g):
+            try:
+                dims_pts = getattr(g, "dimensions", None)
+                if dims_pts and len(dims_pts) == 3:
+                    cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
+                    if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == g.n_cells):
+                        return cx, cy, cz
+            except Exception:
+                pass
+            try:
+                from load_data import nx as lnx, ny as lny, nz as lnz
+                return int(lnx), int(lny), int(lnz)
+            except Exception:
+                return None
+
+        def _reduce_grid_to_2d(g, scalar_name):
+            if g is None or scalar_name not in getattr(g, "cell_data", {}):
+                return None
+
+            dims = _infer_dims(g)
+            if not dims:
+                return None
+
+            nx_, ny_, nz_ = dims
+
+            try:
+                arr3d = np.asarray(g.cell_data[scalar_name], dtype=float).reshape((nx_, ny_, nz_), order="F")
+            except Exception:
+                return None
+
+            out2d = np.full((nx_, ny_), np.nan, dtype=float)
+            for ix in range(nx_):
+                for iy in range(ny_):
+                    colv = arr3d[ix, iy, :]
+                    finite = colv[np.isfinite(colv)]
+                    if finite.size > 0:
+                        out2d[ix, iy] = float(np.nanmax(finite))
+            return out2d
+
         prepared = []
         for (model_key, model_name) in normalized:
             model_data = self.models.get(model_key, {})
@@ -5953,83 +6158,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
 
             temp_grid = src_grid.copy(deep=True)
-            temp_grid.cell_data["Facies"] = model_data.get("facies")
 
-            # Recalcula métricas verticais se necessário
-            try:
-                self.recalc_vertical_metrics(temp_grid, model_data.get("facies"), model_data.get("reservoir_facies"))
-            except Exception as e:
-                print(f"[compare_2d] recalc_vertical_metrics falhou para {model_name}: {e}")
+            fac = model_data.get("facies")
+            if fac is not None:
+                temp_grid.cell_data["Facies"] = fac
+
+            # Só recalcula métricas verticais quando o scalar depende disso
+            if str(scalar).startswith("vert_") or scalar in ("Reservoir", "Clusters", "LargestCluster", "NTG_local"):
+                try:
+                    self.recalc_vertical_metrics(temp_grid, fac, model_data.get("reservoir_facies"))
+                except Exception as e:
+                    print(f"[compare_2d] recalc_vertical_metrics falhou para {model_name}: {e}")
 
             prepared.append((model_key, model_name, temp_grid))
 
-        # --- CLIM GLOBAL 2D ---
-        clim_override = None
+        clim_override = self._compute_global_2d_clim(
+            [g for (_k, _n, g) in prepared],
+            scalar
+        )
 
-        if self._is_fraction_property(scalar):
-            clim_override = (0.0, 1.0)
-        else:
-            # calcula global usando a MESMA redução do _draw_2d_map_local (max > 0 na coluna)
-            def _infer_dims(g):
-                try:
-                    dims_pts = getattr(g, "dimensions", None)
-                    if dims_pts and len(dims_pts) == 3:
-                        cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
-                        if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == g.n_cells):
-                            return cx, cy, cz
-                except Exception:
-                    pass
-                try:
-                    from load_data import nx as lnx, ny as lny, nz as lnz
-                    return int(lnx), int(lny), int(lnz)
-                except Exception:
-                    return None
+        if scalar == "__total_column_thickness__":
+            title = "Espessura total da coluna (m)"
+        elif self._is_equivalent_2d_property(scalar):
+            title = f"{scalar} equivalente (m)"
 
-            all_vals = []
-            for _k, _n, g in prepared:
-                if g is None or scalar not in getattr(g, "cell_data", {}):
-                    continue
-                dims = _infer_dims(g)
-                if not dims:
-                    continue
-                nx_, ny_, nz_ = dims
-                try:
-                    arr3d = np.asarray(g.cell_data[scalar], dtype=float).reshape((nx_, ny_, nz_), order="F")
-                    out2d = np.full((nx_, ny_), np.nan, dtype=float)
-                    for ix in range(nx_):
-                        for iy in range(ny_):
-                            colv = arr3d[ix, iy, :]
-                            colv = colv[colv > 0]
-                            if colv.size > 0:
-                                out2d[ix, iy] = float(np.nanmax(colv))
-                    flat = out2d[np.isfinite(out2d)]
-                    if flat.size:
-                        all_vals.append(flat)
-                except Exception:
-                    continue
-
-            if all_vals:
-                allv = np.concatenate(all_vals)
-                vmin = float(np.nanmin(allv))
-                vmax = float(np.nanmax(allv))
-                if not np.isfinite(vmin) or not np.isfinite(vmax):
-                    clim_override = None
-                else:
-                    if vmax <= vmin:
-                        vmax = vmin + 1e-6
-                    if vmin >= 0.0:
-                        vmin = 0.0
-                    clim_override = (vmin, vmax)
-
-        # --- DESENHA ---
         for idx, (model_key, model_name, temp_grid) in enumerate(prepared):
-            # Paleta atual
-            cmap_use = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "plasma"
-
             row, col = idx // cols, idx % cols
 
             p2d = BackgroundPlotter(show=False)
             self.active_comp_2d_plotters.append(p2d)
+            p2d._hover2d_model_name = model_name
+            p2d._map2d_summary_target = getattr(self, "map2d_summary_text", None)
+            self._install_2d_hover_filter(p2d, model_name=model_name)
 
             self._draw_2d_map_local(
                 p2d,
@@ -6047,7 +6207,12 @@ class MainWindow(QtWidgets.QMainWindow):
             vl.setContentsMargins(0, 0, 0, 0)
             vl.setSpacing(0)
 
-            lbl = QtWidgets.QLabel(f"  {model_name} ({thick_mode})")
+            mode_label = self.state.get("thickness_mode", scalar) if not is_scalar_mode else scalar
+            if scalar == "__total_column_thickness__":
+                mode_label = "Espessura total da coluna (m)"
+            elif self._is_equivalent_2d_property(scalar):
+                mode_label = f"{scalar} equivalente (m)"
+            lbl = QtWidgets.QLabel(f"  {model_name} ({mode_label})")
             lbl.setStyleSheet("background: #ddd; font-weight: bold;")
             vl.addWidget(lbl)
             vl.addWidget(p2d.interactor)
@@ -6254,14 +6419,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return pd.DataFrame(data_list)
 
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
-        """Recalcula métricas verticais usando a geometria do grid do próprio modelo."""
+        """Recalcula métricas verticais usando a espessura real das células do grid."""
         if target_grid is None or target_grid.n_cells != nx * ny * nz:
             return
 
-        fac_3d = facies_array.reshape((nx, ny, nz), order="F")
+        th = self._get_grid_cell_thickness_array(target_grid)
+        if th is None:
+            return
 
-        centers = target_grid.cell_centers().points
-        z_vals = centers[:, 2].reshape((nx, ny, nz), order="F")
+        try:
+            th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+        except Exception:
+            return
+
+        fac_3d = facies_array.reshape((nx, ny, nz), order="F")
 
         keys = [
             "vert_Ttot_reservoir", "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
@@ -6269,47 +6440,51 @@ class MainWindow(QtWidgets.QMainWindow):
             "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"
         ]
         data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
-        res_list = list(reservoir_set)
+        res_list = list(set(reservoir_set))
 
         for ix in range(nx):
             for iy in range(ny):
                 col_fac = fac_3d[ix, iy, :]
-                mask = np.isin(col_fac, res_list)
+                col_th = th_3d[ix, iy, :]
+                valid_th = np.isfinite(col_th) & (col_th > 0.0)
+                if not np.any(valid_th):
+                    continue
+
+                mask = np.isin(col_fac, res_list) & valid_th
                 if not np.any(mask):
                     continue
 
-                col_z = z_vals[ix, iy, :]
-                z_min, z_max = np.nanmin(col_z), np.nanmax(col_z)
-                T_col = abs(z_max - z_min)
-                if T_col == 0:
+                idx = np.where(mask)[0]
+                T_col = float(np.sum(col_th[valid_th]))
+                if T_col <= 0.0:
                     continue
 
-                dz = T_col / nz
-                idx = np.where(mask)[0]
-                n_res = len(idx)
-                T_tot = n_res * dz
-                T_env = (idx[-1] - idx[0] + 1) * dz if n_res > 0 else 0.0
+                T_tot = float(np.sum(col_th[mask]))
+                start_k, end_k = int(idx[0]), int(idx[-1])
+                env_mask = valid_th.copy()
+                env_mask[:start_k] = False
+                env_mask[end_k + 1:] = False
+                T_env = float(np.sum(col_th[env_mask])) if np.any(env_mask) else 0.0
 
-                NTG_col = T_tot / T_col
-                NTG_env = T_tot / T_env if T_env > 0 else 0.0
+                NTG_col = T_tot / T_col if T_col > 0.0 else 0.0
+                NTG_env = T_tot / T_env if T_env > 0.0 else 0.0
 
-                packages = []
+                package_thicknesses = []
                 start = idx[0]
                 prev = idx[0]
                 for k in idx[1:]:
                     if k == prev + 1:
                         prev = k
                     else:
-                        packages.append(prev - start + 1)
+                        package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
                         start = prev = k
-                packages.append(prev - start + 1)
+                package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
 
-                T_pack_max = max(packages) * dz if packages else 0.0
-                n_packages = len(packages)
-
-                ICV = T_pack_max / T_env if T_env > 0 else 0.0
+                T_pack_max = max(package_thicknesses) if package_thicknesses else 0.0
+                n_packages = len(package_thicknesses)
+                ICV = T_pack_max / T_env if T_env > 0.0 else 0.0
                 Qv = NTG_col * ICV
-                Qv_abs = ICV * (T_pack_max / T_col)
+                Qv_abs = ICV * (T_pack_max / T_col) if T_col > 0.0 else 0.0
 
                 data_map["vert_Ttot_reservoir"][ix, iy, mask] = T_tot
                 data_map["vert_NTG_col_reservoir"][ix, iy, mask] = NTG_col
@@ -8398,11 +8573,11 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
 
-    def _is_fraction_property(self, scalar_name):
+    def _is_normalized_property(self, scalar_name):
         """
-        Decide se um scalar deve ser fixado em 0–1.
-        - Usuário marca em self.state['fraction_props'].
-        - Também fixa automaticamente os vert_* normalizados (NTG/ICV/Qv etc).
+        Propriedade que deve permanecer em 0–1 na legenda/clim.
+        - Inclui as propriedades marcadas pelo usuário como proporção por célula.
+        - Inclui também métricas verticais já normalizadas (NTG/ICV/Qv etc).
         """
         s = str(scalar_name)
 
@@ -8410,11 +8585,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if s in user_set:
             return True
 
-        # Defaults do seu "Métricas por Coluna" que são normalizadas
-        if s in ("vert_NTG_col_reservoir", "vert_NTG_env_reservoir", "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"):
+        if s in (
+            "vert_NTG_col_reservoir",
+            "vert_NTG_env_reservoir",
+            "vert_ICV_reservoir",
+            "vert_Qv_reservoir",
+            "vert_Qv_abs_reservoir",
+        ):
             return True
 
         return False
+
+
+    def _is_equivalent_2d_property(self, scalar_name):
+        """
+        Propriedade que faz sentido converter para metros equivalentes no 2D.
+        Aqui entram apenas as propriedades marcadas pelo usuário como proporção por célula.
+        """
+        s = str(scalar_name)
+        user_set = set(self.state.get("fraction_props", set()) or set())
+        return s in user_set
+
+
+    def _is_fraction_property(self, scalar_name):
+        """Compatibilidade com o código antigo."""
+        return self._is_normalized_property(scalar_name)
 
 
     def _compute_global_clim_for_scalar(self, scalar_name, grids):
@@ -8425,7 +8620,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         import numpy as np
 
-        if self._is_fraction_property(scalar_name):
+        if self._is_normalized_property(scalar_name):
             return (0.0, 1.0)
 
         vals = []
@@ -8459,30 +8654,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_global_clim_to_active_comparison(self):
         """
-        Aplica escala GLOBAL nos plotters 3D da comparação para o scalar atual (thickness_mode).
+        Aplica escala GLOBAL nos plotters 3D da comparação.
+        - Se estiver em modo scalar: usa current_scalar_name/current_scalar_clim
+        - Se estiver em thickness_local: usa thickness_mode/thickness_clim
         """
-        # descobre scalar atual via presets
-        presets = self.state.get("thickness_presets") or {}
-        thick_mode = self.state.get("thickness_mode", "Espessura")
-        if thick_mode not in presets and presets:
-            thick_mode = list(presets.keys())[0]
-        scalar, _title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
+        states = list(getattr(self, "active_comp_states", []) or [])
+        if not states:
+            return
 
-        # coleta grids ativos
+        mode_3d = self.state.get("mode", "facies")
+
         grids = []
-        for st in (getattr(self, "active_comp_states", []) or []):
+        for st in states:
             g = st.get("current_grid_source")
             if g is not None:
                 grids.append(g)
 
+        if mode_3d == "scalar" and self.state.get("current_scalar_name"):
+            scalar = self.state.get("current_scalar_name")
+            title = self.state.get("current_scalar_title", scalar)
+            cmap_use = self.state.get(
+                "current_scalar_cmap",
+                self.state.get("thickness_cmap", "jet")
+            )
+
+            clim = self._compute_global_clim_for_scalar(scalar, grids)
+            self.state["current_scalar_clim"] = clim
+
+            for st in states:
+                try:
+                    st["mode"] = "scalar"
+                    st["current_scalar_name"] = scalar
+                    st["current_scalar_title"] = title
+                    st["current_scalar_clim"] = clim
+                    st["current_scalar_cmap"] = cmap_use
+
+                    if "refresh" in st and callable(st["refresh"]):
+                        st["refresh"]()
+                    if "plotter_ref" in st:
+                        st["plotter_ref"].render()
+                except Exception:
+                    pass
+            return
+
+        presets = self.state.get("thickness_presets") or {}
+        thick_mode = self.state.get("thickness_mode", "Espessura total da coluna")
+        if thick_mode not in presets and presets:
+            thick_mode = list(presets.keys())[0]
+
+        scalar, _title = presets.get(thick_mode, ("vert_Ttot_reservoir", "Espessura"))
         clim = self._compute_global_clim_for_scalar(scalar, grids)
 
-        # aplica em cada estado
-        for st in (getattr(self, "active_comp_states", []) or []):
+        for st in states:
             try:
                 st["thickness_clim"] = clim
                 st["thickness_clim_manual"] = True
-                st["thickness_global_clim"] = None  # garante que não tenha override “velho”
+                st["thickness_global_clim"] = None
 
                 if "update_thickness" in st and callable(st["update_thickness"]):
                     st["update_thickness"]()
@@ -8634,7 +8861,352 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _install_2d_hover_filter(self, plotter, model_name=None):
+        """Instala hover readout no plotter 2D sem bloquear pan/zoom."""
+        if plotter is None:
+            return
 
+        try:
+            plotter._hover2d_model_name = model_name
+        except Exception:
+            pass
+
+        targets = []
+        try:
+            targets.append(plotter)
+        except Exception:
+            pass
+        try:
+            inter = getattr(plotter, "interactor", None)
+            if inter is not None:
+                targets.append(inter)
+        except Exception:
+            pass
+
+        for t in targets:
+            try:
+                t.setMouseTracking(True)
+            except Exception:
+                pass
+            try:
+                t.installEventFilter(self)
+            except Exception:
+                pass
+            try:
+                self._map2d_hover_targets[id(t)] = plotter
+            except Exception:
+                pass
+
+
+    def _qt_pos_to_vtk_xy(self, plotter, widget, pos):
+        """Converte posição Qt -> coordenada de tela VTK."""
+        inter = None
+        try:
+            inter = getattr(plotter, "interactor", None)
+        except Exception:
+            inter = None
+        if inter is None:
+            inter = widget
+
+        p = pos
+        try:
+            if widget is not inter and hasattr(inter, "mapFrom"):
+                p = inter.mapFrom(widget, pos)
+        except Exception:
+            p = pos
+
+        try:
+            rw, rh = plotter.ren_win.GetSize()
+        except Exception:
+            rw, rh = None, None
+
+        try:
+            qw = int(inter.width())
+            qh = int(inter.height())
+        except Exception:
+            qw, qh = None, None
+
+        if rw and rh and qw and qh and qw > 0 and qh > 0:
+            sx = float(rw) / float(qw)
+            sy = float(rh) / float(qh)
+            x = float(p.x()) * sx
+            y = float(qh - p.y()) * sy
+        else:
+            x = float(p.x())
+            y = float(p.y())
+
+        return int(x), int(y)
+
+
+    def _update_2d_hover_status(self, plotter, widget, pos):
+        """Mostra valor/X/Y da célula 2D sob o mouse na status bar."""
+        import numpy as np
+        try:
+            from vtkmodules.vtkRenderingCore import vtkCellPicker
+        except Exception:
+            return
+
+        meta = getattr(plotter, "_map2d_hover_meta", None)
+        if not meta:
+            return
+
+        surf = meta.get("surf")
+        name2d = meta.get("name2d")
+        label = meta.get("label", name2d)
+        model_name = meta.get("model_name", None)
+        scalar_name_3d = meta.get("scalar_name_3d")
+        dims = meta.get("dims")
+        total_thickness_2d = meta.get("total_thickness_2d")
+
+        if surf is None or not name2d or name2d not in getattr(surf, "cell_data", {}):
+            return
+
+        try:
+            x, y = self._qt_pos_to_vtk_xy(plotter, widget, pos)
+        except Exception:
+            return
+
+        try:
+            picker = vtkCellPicker()
+            picker.SetTolerance(0.0005)
+
+            renderer = getattr(plotter, "renderer", None)
+            if renderer is None and hasattr(plotter, "renderers"):
+                try:
+                    renderer = plotter.renderers[0]
+                except Exception:
+                    renderer = None
+            if renderer is None:
+                return
+
+            ok = picker.Pick(x, y, 0, renderer)
+            if not ok:
+                return
+
+            cell_id = int(picker.GetCellId())
+            if cell_id < 0 or cell_id >= surf.n_cells:
+                return
+        except Exception:
+            return
+
+        try:
+            val = float(np.asarray(surf.cell_data[name2d], dtype=float)[cell_id])
+        except Exception:
+            return
+
+        if not np.isfinite(val):
+            return
+
+        try:
+            cell = surf.get_cell(cell_id)
+            pts = np.asarray(cell.points, dtype=float)
+            center = pts.mean(axis=0) if pts.size else np.array([np.nan, np.nan, np.nan], dtype=float)
+            xc = float(center[0])
+            yc = float(center[1])
+        except Exception:
+            xc, yc = np.nan, np.nan
+
+        total_col = None
+        if self._is_equivalent_2d_property(scalar_name_3d) and total_thickness_2d is not None and dims:
+            try:
+                nx2 = int(dims[0] - 1)
+                iy = int(cell_id // nx2)
+                ix = int(cell_id % nx2)
+                total_col = float(total_thickness_2d[ix, iy])
+                if not np.isfinite(total_col):
+                    total_col = None
+            except Exception:
+                total_col = None
+
+        prefix = f"{model_name} | " if model_name else ""
+        if total_col is not None:
+            msg = f"{prefix}{label}: {val:.4g} m | Esp. coluna: {total_col:.4g} m | X={xc:.1f} | Y={yc:.1f}"
+        else:
+            unit = " m" if scalar_name_3d == "__total_column_thickness__" else ""
+            msg = f"{prefix}{label}: {val:.4g}{unit} | X={xc:.1f} | Y={yc:.1f}"
+
+        if msg != self._last_2d_hover_msg:
+            self._last_2d_hover_msg = msg
+            try:
+                self.statusBar().showMessage(msg)
+            except Exception:
+                pass
+
+
+    def _pick_2d_cell_id(self, plotter, widget, pos):
+        """Retorna o cell_id da superfície 2D sob o mouse, ou None."""
+        try:
+            from vtkmodules.vtkRenderingCore import vtkCellPicker
+        except Exception:
+            return None
+
+        meta = getattr(plotter, "_map2d_hover_meta", None)
+        if not meta:
+            return None
+
+        surf = meta.get("surf")
+        if surf is None:
+            return None
+
+        try:
+            x, y = self._qt_pos_to_vtk_xy(plotter, widget, pos)
+        except Exception:
+            return None
+
+        try:
+            picker = vtkCellPicker()
+            picker.SetTolerance(0.0005)
+            renderer = getattr(plotter, "renderer", None)
+            if renderer is None and hasattr(plotter, "renderers"):
+                renderer = plotter.renderers[0]
+            if renderer is None:
+                return None
+            ok = picker.Pick(x, y, 0, renderer)
+            if not ok:
+                return None
+            cid = int(picker.GetCellId())
+            if cid < 0 or cid >= surf.n_cells:
+                return None
+            return cid
+        except Exception:
+            return None
+
+
+    def _surface_cell_id_to_ij(self, cell_id, dims):
+        """Converte cell_id da superfície 2D para índices (i,j) do mapa reduzido."""
+        if dims is None:
+            return None, None
+        nx2 = int(dims[0] - 1)
+        if nx2 <= 0:
+            return None, None
+        iy = int(cell_id // nx2)
+        ix = int(cell_id % nx2)
+        return ix, iy
+
+
+    def _build_2d_column_summary_html(self, plotter, cell_id):
+        import numpy as np
+
+        meta = getattr(plotter, "_map2d_hover_meta", None)
+        if not meta:
+            return None
+
+        surf = meta.get("surf")
+        name2d = meta.get("name2d")
+        label = meta.get("label", name2d)
+        model_name = meta.get("model_name")
+        grid_source = meta.get("grid_source")
+        scalar_name_3d = meta.get("scalar_name_3d")
+        dims = meta.get("dims")
+        total_thickness_2d = meta.get("total_thickness_2d")
+
+        if surf is None or grid_source is None or dims is None:
+            return None
+
+        try:
+            val = float(np.asarray(surf.cell_data[name2d], dtype=float)[cell_id])
+        except Exception:
+            val = np.nan
+
+        try:
+            cell = surf.get_cell(cell_id)
+            pts = np.asarray(cell.points, dtype=float)
+            center = pts.mean(axis=0) if pts.size else np.array([np.nan, np.nan, np.nan], dtype=float)
+            xc = float(center[0])
+            yc = float(center[1])
+        except Exception:
+            xc, yc = np.nan, np.nan
+
+        ix, iy = self._surface_cell_id_to_ij(cell_id, dims)
+        if ix is None or iy is None:
+            return None
+
+        if total_thickness_2d is None:
+            total_thickness_2d = self._reduce_total_column_thickness_to_2d(grid_source)
+        total_th = None
+        try:
+            total_th = float(total_thickness_2d[ix, iy])
+            if not np.isfinite(total_th):
+                total_th = None
+        except Exception:
+            total_th = None
+
+        lines = []
+        title_bits = ["<b>Resumo da coluna 2D</b>"]
+        if model_name:
+            title_bits.append(f"<span style='color:#444'>[{model_name}]</span>")
+        lines.append(" ".join(title_bits))
+        lines.append(f"<span style='color:#555'>X={xc:.1f} | Y={yc:.1f} | i={ix} | j={iy}</span>")
+        lines.append(f"<b>{label}:</b> {val:.4g}{' m' if scalar_name_3d == '__total_column_thickness__' or self._is_equivalent_2d_property(scalar_name_3d) else ''}")
+        if total_th is not None:
+            lines.append(f"<b>Espessura total da coluna:</b> {total_th:.4g} m")
+
+        prop_names = sorted(
+            [p for p in set(self.state.get("fraction_props", set()) or set()) if p in getattr(grid_source, "cell_data", {})],
+            key=lambda s: str(s).lower(),
+        )
+
+        if prop_names:
+            th = self._get_grid_cell_thickness_array(grid_source)
+            dims3 = self._infer_grid_cell_dims(grid_source)
+            if th is not None and dims3:
+                try:
+                    nx, ny, nz = dims3
+                    th3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+                    th_col = th3d[ix, iy, :]
+                except Exception:
+                    th_col = None
+                if th_col is not None:
+                    lines.append("<br><b>Equivalente por propriedade</b>")
+                    for prop in prop_names:
+                        try:
+                            arr3d = np.asarray(grid_source.cell_data[prop], dtype=float).reshape((nx, ny, nz), order="F")
+                            prop_col = arr3d[ix, iy, :]
+                            mask = np.isfinite(prop_col) & np.isfinite(th_col)
+                            if not np.any(mask):
+                                continue
+                            p = np.clip(prop_col[mask], 0.0, 1.0)
+                            t = np.clip(th_col[mask], 0.0, None)
+                            eq_m = float(np.sum(t * p))
+                            mean_p = (eq_m / total_th) if (total_th is not None and total_th > 0.0) else np.nan
+                            if np.isfinite(mean_p):
+                                lines.append(f"• <b>{prop}</b>: {eq_m:.4g} m eq | média ponderada = {mean_p:.4g}")
+                            else:
+                                lines.append(f"• <b>{prop}</b>: {eq_m:.4g} m eq")
+                        except Exception:
+                            continue
+
+        return "<br>".join(lines)
+
+
+    def _on_2d_map_clicked(self, plotter, widget, pos):
+        target = getattr(plotter, "_map2d_summary_target", None)
+        if target is None:
+            return
+
+        cell_id = self._pick_2d_cell_id(plotter, widget, pos)
+        if cell_id is None:
+            return
+
+        html = self._build_2d_column_summary_html(plotter, cell_id)
+        if not html:
+            return
+
+        try:
+            target.setHtml(html)
+        except Exception:
+            try:
+                target.setPlainText(re.sub(r"<[^>]+>", "", html))
+            except Exception:
+                pass
+
+
+    def _clear_2d_hover_status(self):
+        try:
+            self._last_2d_hover_msg = ""
+            self.statusBar().clearMessage()
+        except Exception:
+            pass
 
 
     # ============================================================
@@ -8747,6 +9319,51 @@ class MainWindow(QtWidgets.QMainWindow):
           dispara o pick no release.
         - Se arrastar (rotacionar), não seleciona.
         """
+        # ---------------------------
+        # Hover readout dos mapas 2D
+        # ---------------------------
+        try:
+            plotter2d = self._map2d_hover_targets.get(id(obj), None)
+        except Exception:
+            plotter2d = None
+
+        if plotter2d is not None:
+            et = event.type()
+
+            if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+                self._map2d_press_pos = event.pos()
+                self._map2d_dragging = False
+
+            elif et == QtCore.QEvent.MouseMove:
+                try:
+                    self._update_2d_hover_status(plotter2d, obj, event.pos())
+                except Exception:
+                    pass
+
+                if getattr(self, "_map2d_press_pos", None) is not None:
+                    try:
+                        if (event.pos() - self._map2d_press_pos).manhattanLength() > 6:
+                            self._map2d_dragging = True
+                    except Exception:
+                        pass
+
+            elif et == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+                press = getattr(self, "_map2d_press_pos", None)
+                dragging = bool(getattr(self, "_map2d_dragging", False))
+                if press is not None and not dragging:
+                    try:
+                        self._on_2d_map_clicked(plotter2d, obj, event.pos())
+                    except Exception:
+                        pass
+                self._map2d_press_pos = None
+                self._map2d_dragging = False
+
+            elif et in (QtCore.QEvent.Leave, QtCore.QEvent.Hide):
+                try:
+                    self._clear_2d_hover_status()
+                except Exception:
+                    pass
+
         try:
             is_target = (obj is getattr(self, "plotter", None)) or (obj is getattr(getattr(self, "plotter", None), "interactor", None))
         except Exception:
@@ -8787,6 +9404,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._pick_dragging = False
 
         return super().eventFilter(obj, event)
+    
     def set_pick_mode(self, mode):
         # mode: None | 'cell' | 'column'
         if mode not in (None, 'cell', 'column'):
@@ -9358,6 +9976,210 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
+
+    def _infer_grid_cell_dims(self, grid_source):
+        """Retorna (nx, ny, nz) em células."""
+        try:
+            dims_pts = getattr(grid_source, "dimensions", None)
+            if dims_pts and len(dims_pts) == 3:
+                cx, cy, cz = int(dims_pts[0] - 1), int(dims_pts[1] - 1), int(dims_pts[2] - 1)
+                if cx > 0 and cy > 0 and cz > 0 and (cx * cy * cz == grid_source.n_cells):
+                    return cx, cy, cz
+        except Exception:
+            pass
+
+        try:
+            from load_data import nx as lnx, ny as lny, nz as lnz
+            return int(lnx), int(lny), int(lnz)
+        except Exception:
+            return None
+
+
+    def _get_grid_cell_thickness_array(self, grid_source):
+        """
+        Retorna espessura por célula priorizando:
+        StratigraphicThickness -> cell_thickness -> cálculo a partir dos vértices.
+        """
+        import numpy as np
+
+        g = grid_source
+        if g is None:
+            return None
+
+        for key in ("StratigraphicThickness", "stratigraphic_thickness"):
+            if key in g.cell_data:
+                arr = np.asarray(g.cell_data[key], dtype=float)
+                if arr.size == g.n_cells:
+                    return arr
+
+        for key in ("cell_thickness", "CellThickness", "thickness"):
+            if key in g.cell_data:
+                arr = np.asarray(g.cell_data[key], dtype=float)
+                if arr.size == g.n_cells:
+                    return arr
+
+        # fallback geométrico
+        thick = np.zeros(g.n_cells, dtype=float)
+        for cid in range(g.n_cells):
+            try:
+                cell = g.get_cell(cid)
+                pts = np.asarray(cell.points)
+            except Exception:
+                continue
+
+            if pts.size == 0:
+                continue
+
+            z_vals = pts[:, 2] if pts.ndim == 2 and pts.shape[1] >= 3 else np.asarray(pts)
+            if z_vals.size >= 8:
+                bottom = np.partition(z_vals, 4)[:4].mean()
+                top = np.partition(z_vals, -4)[-4:].mean()
+            else:
+                bottom = float(np.min(z_vals))
+                top = float(np.max(z_vals))
+
+            thick[cid] = max(0.0, float(top - bottom))
+
+        g.cell_data["cell_thickness"] = thick
+        return thick
+
+
+    def _reduce_total_column_thickness_to_2d(self, grid_source):
+        """Retorna mapa 2D com a espessura total da coluna em cada (i,j)."""
+        import numpy as np
+
+        if grid_source is None:
+            return None
+
+        dims = self._infer_grid_cell_dims(grid_source)
+        if not dims:
+            return None
+
+        nx, ny, nz = dims
+
+        th = self._get_grid_cell_thickness_array(grid_source)
+        if th is None:
+            return None
+
+        try:
+            th3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+        except Exception:
+            return None
+
+        out2d = np.full((nx, ny), np.nan, dtype=float)
+
+        for ix in range(nx):
+            for iy in range(ny):
+                col_th = th3d[ix, iy, :]
+                mask = np.isfinite(col_th) & (col_th > 0.0)
+                if np.any(mask):
+                    out2d[ix, iy] = float(np.sum(col_th[mask]))
+
+        return out2d
+
+
+    def _reduce_grid_scalar_to_2d(self, grid_source, scalar_name_3d):
+        """
+        Reduz um campo 3D para 2D por coluna.
+
+        Regras:
+        - __total_column_thickness__: soma das espessuras da coluna
+        - propriedade normal: usa máximo finito da coluna
+        - propriedade marcada como proporção por célula: usa soma(thickness * proportion)
+          => resultado em metros equivalentes
+        """
+        import numpy as np
+
+        if grid_source is None:
+            return None
+
+        if scalar_name_3d == "__total_column_thickness__":
+            return self._reduce_total_column_thickness_to_2d(grid_source)
+
+        if scalar_name_3d not in getattr(grid_source, "cell_data", {}):
+            return None
+
+        dims = self._infer_grid_cell_dims(grid_source)
+        if not dims:
+            return None
+
+        nx, ny, nz = dims
+
+        try:
+            arr3d = np.asarray(grid_source.cell_data[scalar_name_3d], dtype=float).reshape((nx, ny, nz), order="F")
+        except Exception:
+            return None
+
+        out2d = np.full((nx, ny), np.nan, dtype=float)
+
+        if self._is_equivalent_2d_property(scalar_name_3d):
+            th = self._get_grid_cell_thickness_array(grid_source)
+            if th is None:
+                return None
+
+            try:
+                th3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+            except Exception:
+                return None
+
+            for ix in range(nx):
+                for iy in range(ny):
+                    prop_col = arr3d[ix, iy, :]
+                    th_col = th3d[ix, iy, :]
+
+                    mask = np.isfinite(prop_col) & np.isfinite(th_col)
+                    if not np.any(mask):
+                        continue
+
+                    p = np.clip(prop_col[mask], 0.0, 1.0)
+                    t = np.clip(th_col[mask], 0.0, None)
+                    out2d[ix, iy] = float(np.sum(t * p))
+
+            return out2d
+
+        for ix in range(nx):
+            for iy in range(ny):
+                col = arr3d[ix, iy, :]
+                finite = col[np.isfinite(col)]
+                if finite.size > 0:
+                    out2d[ix, iy] = float(np.nanmax(finite))
+
+        return out2d
+
+
+    def _compute_global_2d_clim(self, prepared_grids, scalar_name):
+        """
+        Calcula CLIM global para comparação 2D usando a MESMA redução do mapa.
+        Para propriedades de proporção, isso será em metros equivalentes.
+        """
+        import numpy as np
+
+        vals = []
+        for g in (prepared_grids or []):
+            out2d = self._reduce_grid_scalar_to_2d(g, scalar_name)
+            if out2d is None:
+                continue
+            flat = out2d[np.isfinite(out2d)]
+            if flat.size:
+                vals.append(flat)
+
+        if not vals:
+            return None
+
+        allv = np.concatenate(vals)
+        vmin = float(np.nanmin(allv))
+        vmax = float(np.nanmax(allv))
+
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            return None
+
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+        if vmin >= 0.0:
+            vmin = 0.0
+
+        return (vmin, vmax)    
 
     def _cleanup_vtk(self):
         """Chamável múltiplas vezes sem problema."""

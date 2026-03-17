@@ -3,7 +3,7 @@
 import os
 
 # Configurações de Geometria e Transformação
-ANCHOR_Y = 8923962.0 
+ANCHOR_Y = None
 
 # Se True, aplica a reflexão Y (2*Anchor - Y) em todos os dados (Grid e Poços)
 APPLY_REFLECTION = True
@@ -32,7 +32,7 @@ def load_facies_reference(path=None):
     `facie_id` é `int` quando possível, senão `str`.
     """
     if path is None:
-        path = os.path.join(os.path.dirname(__file__), "assets/color_reference_facies.txt")
+        path = os.path.join(os.path.dirname(__file__), "assets/color_reference_facies_mixed_novo.txt")
 
     ref = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:

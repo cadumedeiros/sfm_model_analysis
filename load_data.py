@@ -24,7 +24,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
+DEFAULT_GRDECL_PATH = "grids/Mixed_BaseModel_20out25-HyperTuningBaseModel_SIM_BaseModel_.grdecl"
 
 
 FLIP_K_DEFAULT = True
@@ -225,7 +225,7 @@ def load_grid_from_grdecl(
     thickness_keyword: str = "StratigraphicThickness",
     flip_k: bool = FLIP_K_DEFAULT,
     apply_reflection: bool = APPLY_REFLECTION,
-    anchor_y: float = ANCHOR_Y,
+    anchor_y: float | None = ANCHOR_Y,
     verbose: bool = VERBOSE_DEFAULT,
 ):
     """
@@ -234,14 +234,20 @@ def load_grid_from_grdecl(
     if verbose:
         print(f"\nLendo Grid: {grdecl_path}...")
 
-    # 1. Leitura da Geometria via PyVista
     g = pv.read_grdecl(grdecl_path)
 
-    # Reflexão em Y (se configurado)
+    raw_bounds = g.bounds
+    if verbose:
+        print("Bounds Brutos:   ", raw_bounds)
+
     if apply_reflection:
+        if anchor_y is None:
+            anchor_y = float(raw_bounds[2])  # y_min bruto
+
         pts = g.points.copy()
         pts[:, 1] = 2.0 * float(anchor_y) - pts[:, 1]
         g.points = pts
+
         if verbose:
             print(f">>> Grid Refletido Y (Pivô {anchor_y})")
 

@@ -23,36 +23,135 @@ class Well:
 
     def _parse_dev(self, path):
         try:
-            # Lê coordenadas puras, sem inventar moda
-            df = pd.read_csv(
-                path, sep=r'\s+', comment='#', header=None,
-                names=["MD", "X", "Y", "Z", "TVD", "DX", "DY", "AZIM", "INCL", "DLS"],
-                engine='python'
-            )
-            df = df.apply(pd.to_numeric, errors='coerce')
-            df.dropna(inplace=True)
-            return df
-        except: return None
+            rows = []
+            cols = ["MD", "X", "Y", "Z", "TVD", "DX", "DY", "AZIM", "INCL", "DLS"]
+
+            with open(path, "r", encoding="latin-1") as f:
+                for line in f:
+                    ls = line.strip()
+                    if not ls:
+                        continue
+                    if ls.startswith("#"):
+                        continue
+
+                    # ignora cabeçalho tipo: MD X Y Z ...
+                    upper = ls.upper()
+                    if upper.startswith("MD " ) or upper == "MD":
+                        continue
+
+                    # normaliza decimal com vírgula
+                    ls = ls.replace(",", ".")
+
+                    parts = ls.split()
+                    if len(parts) < 10:
+                        continue
+
+                    rows.append(parts[:10])
+
+            if not rows:
+                return None
+
+            df = pd.DataFrame(rows, columns=cols)
+            df = df.apply(pd.to_numeric, errors="coerce")
+
+            # exige pelo menos a geometria principal
+            df.dropna(subset=["MD", "X", "Y", "Z"], inplace=True)
+
+            if df.empty:
+                return None
+
+            return df.sort_values("MD").reset_index(drop=True)
+
+        except Exception as e:
+            print(f"Erro ao ler DEV {path}: {e}")
+            return None
 
     def _parse_las(self, path):
+        import re
         data_rows = []
+        curve_names = []
+        in_curve = False
         in_ascii = False
+        null_value = -9999.99
+
         try:
             with open(path, 'r', encoding='latin-1') as f:
                 for line in f:
                     ls = line.strip()
-                    if not ls: continue
-                    if ls.startswith("~Ascii") or ls.startswith("~A"):
-                        in_ascii = True; continue
+                    if not ls:
+                        continue
+
+                    up = ls.upper()
+
+                    # captura NULL do header
+                    if up.startswith("NULL"):
+                        nums = re.findall(r"[-+]?\d*\.?\d+", ls)
+                        if nums:
+                            null_value = float(nums[-1])
+
+                    # início da seção de curvas
+                    if up.startswith("~CURVE"):
+                        in_curve = True
+                        in_ascii = False
+                        continue
+
+                    # início da seção ASCII
+                    if up.startswith("~ASCII") or up.startswith("~A"):
+                        in_ascii = True
+                        in_curve = False
+                        continue
+
+                    # saiu da seção atual
+                    if ls.startswith("~") and not (up.startswith("~CURVE") or up.startswith("~ASCII") or up.startswith("~A")):
+                        in_curve = False
+                        in_ascii = False
+                        continue
+
+                    if in_curve and not ls.startswith("#"):
+                        # pega o nome antes do ponto, ex: DEPT .m
+                        m = re.match(r"([^\.\s]+)", ls)
+                        if m:
+                            curve_names.append(m.group(1).strip())
+
                     if in_ascii and not ls.startswith("#"):
-                        try: data_rows.append([float(x) for x in ls.split()])
-                        except: pass
-            
-            if not data_rows: return None
-            df = pd.DataFrame(data_rows, columns=["DEPT", "fac", "bat", "lito_upscaled"])
-            df.replace(-999.25, np.nan, inplace=True)
+                        try:
+                            data_rows.append([float(x) for x in ls.split()])
+                        except:
+                            pass
+
+            if not data_rows:
+                return None
+
+            ncols = len(data_rows[0])
+
+            # fallback se por algum motivo não conseguiu ler ~CURVE
+            if len(curve_names) != ncols:
+                curve_names = [f"COL_{i}" for i in range(ncols)]
+
+            df = pd.DataFrame(data_rows, columns=curve_names)
+            df.replace(null_value, np.nan, inplace=True)
+
+            # padronizações úteis
+            rename_map = {}
+            for c in df.columns:
+                cu = c.strip().upper()
+                if cu == "DEPT":
+                    rename_map[c] = "DEPT"
+                elif cu == "FAC":
+                    rename_map[c] = "fac"
+                elif cu == "BAT":
+                    rename_map[c] = "bat"
+                elif cu == "LITO_UPSCALED":
+                    rename_map[c] = "lito_upscaled"
+                elif cu == "FAC_DION":
+                    rename_map[c] = "fac_dion"
+
+            df.rename(columns=rename_map, inplace=True)
             return df
-        except: return None
+
+        except Exception as e:
+            print(f"Erro ao ler LAS {path}: {e}")
+            return None
 
     def _merge_spatial_and_logs(self):
         traj = self.trajectory.sort_values("MD")

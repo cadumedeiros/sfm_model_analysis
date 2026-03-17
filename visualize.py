@@ -145,6 +145,74 @@ def prepare_grid_indices(target_grid):
 # =============================================================================
 # CÁLCULO VERTICAL LOCAL
 # =============================================================================
+def _get_cell_thickness_for_grid(target_grid):
+    """Retorna espessura por célula priorizando propriedades já lidas do GRDECL."""
+    g = target_grid
+    if g is None:
+        return None
+
+    for key in ("StratigraphicThickness", "stratigraphic_thickness"):
+        if key in g.cell_data:
+            arr = np.asarray(g.cell_data[key], dtype=float)
+            if arr.size == g.n_cells:
+                return arr
+
+    for key in ("cell_thickness", "CellThickness", "thickness"):
+        if key in g.cell_data:
+            arr = np.asarray(g.cell_data[key], dtype=float)
+            if arr.size == g.n_cells:
+                return arr
+
+    thick = np.zeros(g.n_cells, dtype=float)
+    for cid in range(g.n_cells):
+        try:
+            cell = g.get_cell(cid)
+            pts = np.asarray(cell.points)
+        except Exception:
+            continue
+
+        if pts.size == 0:
+            continue
+
+        z_vals = pts[:, 2] if pts.ndim == 2 and pts.shape[1] >= 3 else np.asarray(pts)
+        if z_vals.size >= 8:
+            z_sorted = np.sort(z_vals)
+            bottom = float(np.mean(z_sorted[:4]))
+            top = float(np.mean(z_sorted[-4:]))
+        else:
+            bottom = float(np.min(z_vals))
+            top = float(np.max(z_vals))
+
+        thick[cid] = max(0.0, top - bottom)
+
+    g.cell_data["cell_thickness"] = thick
+    return thick
+
+
+def _ensure_total_column_thickness_scalar(target_grid):
+    """Cria um escalar por célula com a espessura total da coluna (mesmo valor ao longo da coluna)."""
+    if target_grid is None or target_grid.n_cells != nx * ny * nz:
+        return
+
+    th = _get_cell_thickness_for_grid(target_grid)
+    if th is None:
+        return
+
+    try:
+        th3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+    except Exception:
+        return
+
+    out = np.zeros((nx, ny, nz), dtype=float)
+    for ix in range(nx):
+        for iy in range(ny):
+            col_th = th3d[ix, iy, :]
+            mask = np.isfinite(col_th) & (col_th > 0.0)
+            total = float(np.sum(col_th[mask])) if np.any(mask) else 0.0
+            out[ix, iy, :] = total
+
+    target_grid.cell_data["__total_column_thickness__"] = out.reshape(-1, order="F")
+
 def _calc_vertical_metrics(target_grid, facies_array, reservoir_set):
     keys = [
         "vert_Ttot_reservoir", "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
@@ -153,58 +221,69 @@ def _calc_vertical_metrics(target_grid, facies_array, reservoir_set):
     ]
     data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
 
-    if target_grid.n_cells != nx * ny * nz: return
-        
-    centers = target_grid.cell_centers().points
-    z_vals = centers[:, 2]
-    
+    if target_grid.n_cells != nx * ny * nz:
+        return
+
+    th = _get_cell_thickness_for_grid(target_grid)
+    if th is None:
+        return
+
+    try:
+        th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+    except Exception:
+        return
+
     fac_3d = facies_array.reshape((nx, ny, nz), order="F")
-    z_3d = z_vals.reshape((nx, ny, nz), order="F")
-    res_set = set(reservoir_set)
-    
+    res_list = list(set(reservoir_set))
+
     for ix in range(nx):
         for iy in range(ny):
             col_fac = fac_3d[ix, iy, :]
-            col_z = z_3d[ix, iy, :]
-            mask = np.isin(col_fac, list(res_set))
-            if not np.any(mask): continue
-            
-            z_min, z_max = np.nanmin(col_z), np.nanmax(col_z)
-            T_col = abs(z_max - z_min)
-            if T_col == 0: continue
-            dz = T_col / nz
-            
+            col_th = th_3d[ix, iy, :]
+            valid_th = np.isfinite(col_th) & (col_th > 0.0)
+            if not np.any(valid_th):
+                continue
+
+            mask = np.isin(col_fac, res_list) & valid_th
+            if not np.any(mask):
+                continue
+
             idx = np.where(mask)[0]
-            n_res = len(idx)
-            T_tot = n_res * dz
-            
-            if n_res > 0:
-                T_env = (idx[-1] - idx[0] + 1) * dz
-            else: T_env = 0
-                
-            NTG_col = T_tot / T_col
-            NTG_env = T_tot / T_env if T_env > 0 else 0
-            
-            packages = []
-            if n_res > 0:
-                start = idx[0]
-                prev = idx[0]
-                for k in idx[1:]:
-                    if k == prev + 1: prev = k
-                    else:
-                        packages.append(prev - start + 1)
-                        start = prev = k
-                packages.append(prev - start + 1)
-            
-            T_pack_max = max(packages) * dz if packages else 0
-            ICV = T_pack_max / T_env if T_env > 0 else 0
+            T_col = float(np.sum(col_th[valid_th]))
+            if T_col <= 0.0:
+                continue
+
+            T_tot = float(np.sum(col_th[mask]))
+            start_k, end_k = int(idx[0]), int(idx[-1])
+            env_mask = valid_th.copy()
+            env_mask[:start_k] = False
+            env_mask[end_k + 1:] = False
+            T_env = float(np.sum(col_th[env_mask])) if np.any(env_mask) else 0.0
+
+            NTG_col = T_tot / T_col if T_col > 0.0 else 0.0
+            NTG_env = T_tot / T_env if T_env > 0.0 else 0.0
+
+            package_thicknesses = []
+            start = idx[0]
+            prev = idx[0]
+            for k in idx[1:]:
+                if k == prev + 1:
+                    prev = k
+                else:
+                    package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
+                    start = prev = k
+            package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
+
+            T_pack_max = max(package_thicknesses) if package_thicknesses else 0.0
+            n_packages = len(package_thicknesses)
+            ICV = T_pack_max / T_env if T_env > 0.0 else 0.0
             Qv = NTG_col * ICV
-            Qv_abs = ICV * (T_pack_max / T_col)
+            Qv_abs = ICV * (T_pack_max / T_col) if T_col > 0.0 else 0.0
 
             data_map["vert_Ttot_reservoir"][ix, iy, mask] = T_tot
             data_map["vert_NTG_col_reservoir"][ix, iy, mask] = NTG_col
             data_map["vert_NTG_env_reservoir"][ix, iy, mask] = NTG_env
-            data_map["vert_n_packages_reservoir"][ix, iy, mask] = len(packages)
+            data_map["vert_n_packages_reservoir"][ix, iy, mask] = float(n_packages)
             data_map["vert_Tpack_max_reservoir"][ix, iy, mask] = T_pack_max
             data_map["vert_ICV_reservoir"][ix, iy, mask] = ICV
             data_map["vert_Qv_reservoir"][ix, iy, mask] = Qv
@@ -273,6 +352,7 @@ def run(
     state.setdefault("j_max", ny - 1)
     
     default_presets = {
+        "Espessura total da coluna": ("__total_column_thickness__", "Espessura total da coluna (m)"),
         "Espessura": ("vert_Ttot_reservoir", "Espessura total reservatório (m)"),
         "Proporção de fácies (coluna)": ("vert_NTG_col_reservoir", "Proporção de fácies (coluna)"),
         "Proporção de fácies (envelope)": ("vert_NTG_env_reservoir", "Proporção de fácies (envelope)"),
@@ -293,8 +373,7 @@ def run(
         merged.setdefault(k, v)
 
     state["thickness_presets"] = merged
-
-    # state.setdefault("thickness_mode", "Espessura")
+    state.setdefault("thickness_mode", "Espessura total da coluna")
 
     def attach_cell_data_from_original(clipped, original):
         if "vtkOriginalCellIds" not in clipped.cell_data: return clipped
@@ -343,8 +422,10 @@ def run(
         # Sincroniza campos calculados com o grid base de visualização
         sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies", "i_index", "j_index", "k_index"]
         
+        _ensure_total_column_thickness_scalar(current_g)
+
         for key in current_g.cell_data.keys():
-            if key.startswith("vert_") or key in sync_names:
+            if key.startswith("vert_") or key in sync_names or key == "__total_column_thickness__":
                 grid_base.cell_data[key] = current_g.cell_data[key]
 
         state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(clusters_1d)
@@ -355,7 +436,7 @@ def run(
 
     def _update_thickness_from_state():
         presets = state.get("thickness_presets") or {}
-        mode_label = state.get("thickness_mode", "Espessura")
+        mode_label = state.get("thickness_mode", "Espessura total da coluna")
 
         if mode_label not in presets:
             return
@@ -363,6 +444,12 @@ def run(
         s_name, s_title = presets[mode_label]
         state["current_thickness_scalar"] = s_name
         state["current_thickness_title"] = s_title
+
+        if s_name == "__total_column_thickness__":
+            try:
+                _ensure_total_column_thickness_scalar(grid_base)
+            except Exception:
+                pass
 
         if state.get("thickness_clim_manual", False):
             return
@@ -374,11 +461,14 @@ def run(
                 state["thickness_clim"] = (0.0, 1.0)
                 return
 
-            if ("Proporção de fácies" in s_name) or ("ICV" in s_name) or ("Qv" in s_name):
+            if s_name in (
+                "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
+                "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir",
+            ):
                 state["thickness_clim"] = (0.0, 1.0)
                 return
 
-            if ("Ttot" in s_name) or ("thickness" in s_name.lower()) or ("Espessura" in mode_label):
+            if (s_name == "__total_column_thickness__") or ("Ttot" in s_name) or ("thickness" in s_name.lower()) or ("Espessura" in mode_label):
                 vmax = float(np.nanmax(finite))
                 if not np.isfinite(vmax) or vmax <= 0:
                     vmax = 1.0
@@ -529,7 +619,7 @@ def run(
                     mesh_bg, mesh_main = mesh, None
 
                 scalar_name = s_name
-                cmap = state.get("thickness_cmap", "plasma")
+                cmap = state.get("thickness_cmap", "jet")
 
                 # 1) comparação pode setar global_clim
                 if state.get("thickness_global_clim") is not None:
@@ -555,7 +645,7 @@ def run(
             if s_name and s_name in mesh.cell_data:
                 mesh_main = mesh
                 scalar_name = s_name
-                cmap = state.get("current_scalar_cmap", "viridis")
+                cmap = state.get("current_scalar_cmap", "jet")
 
                 clim = state.get("current_scalar_clim")
                 if clim is None:
@@ -976,6 +1066,42 @@ def run(
             except Exception:
                 _disabled = False
 
+            def _get_full_column_from_source(i_sel, j_sel):
+                src = state.get("current_grid_source", None)
+                if src is None or getattr(src, "n_cells", 0) == 0:
+                    src = mesh_data
+
+                try:
+                    prepare_grid_indices(src)
+                except Exception:
+                    pass
+
+                # garante Facies atual no grid fonte
+                try:
+                    cur_fac = state.get("current_facies", None)
+                    if cur_fac is not None:
+                        cur_fac = np.asarray(cur_fac).astype(int)
+                        if cur_fac.size == src.n_cells:
+                            src.cell_data["Facies"] = cur_fac
+                except Exception:
+                    pass
+
+                try:
+                    ii_src = np.asarray(src.cell_data["i_index"]).astype(int)
+                    jj_src = np.asarray(src.cell_data["j_index"]).astype(int)
+                except Exception:
+                    return None, None
+
+                ids_src = np.where((ii_src == int(i_sel)) & (jj_src == int(j_sel)))[0]
+                if ids_src.size == 0:
+                    return None, None
+
+                try:
+                    col_src = src.extract_cells(ids_src)
+                    return col_src, ids_src
+                except Exception:
+                    return None, None
+
             try:
                 _clear_pick_highlights(render=False)
 
@@ -1017,7 +1143,29 @@ def run(
                             mask = (ii == i0i) & (jj == j0i)
                             ids = _np.where(mask)[0]
 
-                            if ids.size > 0:
+                            col_full = None
+                            ids_full = None
+                            try:
+                                col_full, ids_full = _get_full_column_from_source(i0i, j0i)
+                            except Exception:
+                                col_full, ids_full = None, None
+
+                            if col_full is not None and getattr(col_full, "n_cells", 0) > 0:
+                                col = col_full
+                                ids = ids_full
+
+                                state["_pick_highlight_column"] = _add_mesh_no_render(
+                                    col, style="wireframe", line_width=3, color="cyan", reset_camera=False
+                                )
+                                _inherit_transform(state.get("_pick_highlight_column"))
+
+                                sel = mesh_data.extract_cells([cid])
+                                state["_pick_highlight_cell"] = _add_mesh_no_render(
+                                    sel, style="wireframe", line_width=5, color="yellow", reset_camera=False
+                                )
+                                _inherit_transform(state.get("_pick_highlight_cell"))
+
+                            elif ids.size > 0:
                                 col = mesh_data.extract_cells(ids)
 
                                 state["_pick_highlight_column"] = _add_mesh_no_render(
@@ -1046,12 +1194,13 @@ def run(
                         pass
 
             # ------------------ RESUMO + TABELA DA COLUNA ------------------
-            if info.get("mode") == "column" and col is not None and ids is not None:
+            if info.get("mode") == "column" and col is not None:
                 import numpy as _np
+                col_use = col
 
                 # facies counts
                 try:
-                    fac = col.cell_data.get("Facies", None)
+                    fac = col_use.cell_data.get("Facies", None)
                     if fac is not None:
                         fac = _np.asarray(fac).astype(int)
                         uniq, cnt = _np.unique(fac, return_counts=True)
@@ -1063,7 +1212,7 @@ def run(
                 th_name = None
                 try:
                     for nm in ("StratigraphicThickness", "cell_thickness", "Thickness", "thickness_local"):
-                        if nm in col.cell_data:
+                        if nm in col_use.cell_data:
                             th_name = nm
                             break
                 except Exception:
@@ -1071,7 +1220,7 @@ def run(
 
                 if th_name is not None:
                     try:
-                        th = _np.asarray(col.cell_data[th_name], dtype=float)
+                        th = _np.asarray(col_use.cell_data[th_name], dtype=float)
                         info["column_thickness_name"] = th_name
                         info["column_thickness_sum"] = float(_np.nansum(th))
                     except Exception:
@@ -1079,7 +1228,7 @@ def run(
 
                 try:
                     # 1 linha por k, 1 coluna por propriedade
-                    kcol = col.cell_data.get("k_index", None)
+                    kcol = col_use.cell_data.get("k_index", None)
                     if kcol is not None:
                         kcol = _np.asarray(kcol).astype(int)
 
@@ -1111,7 +1260,7 @@ def run(
 
                     prop_names = []
                     try:
-                        for nm in list(col.cell_data.keys()):
+                        for nm in list(col_use.cell_data.keys()):
                             if nm in excluded:
                                 continue
                             prop_names.append(nm)
@@ -1151,7 +1300,7 @@ def run(
 
                         for nm in ordered_cols:
                             try:
-                                arr = col.cell_data.get(nm, None)
+                                arr = col_use.cell_data.get(nm, None)
                                 if arr is None:
                                     continue
                                 v = arr[idx2]
