@@ -6501,7 +6501,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 
-    def _open_matplotlib_report(self, well_name, sim_model_name, real_depth, real_fac, base_depth, base_fac, sim_depth, sim_fac, best_depth=None, best_fac=None, window_size_str="1x1"):
+    def _open_matplotlib_report(
+            self, well_name, sim_model_name, 
+            real_depth, real_fac, base_depth, 
+            base_fac, sim_depth, sim_fac, 
+            best_depth=None, best_fac=None, 
+            window_size_str="1x1"):
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.patches import Rectangle
@@ -6537,16 +6542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs = QtWidgets.QTabWidget()
         main_layout.addWidget(tabs)
 
-        # =================================================================
-        # ABA 1: LOGS + VOLUME
-        # =================================================================
-        tab1 = QtWidgets.QWidget()
-        l1 = QtWidgets.QVBoxLayout(tab1)
-        
-        fig1, (ax1, ax2, ax3, ax4) = plt.subplots(nrows=1, ncols=4, figsize=(14, 7), 
-                                                gridspec_kw={'width_ratios': [0.2, 0.2, 0.2, 3]})
-        
-        # Dados de espessura (zero-based)
+        # --- Métricas comuns para as abas ---
         r_thick_arr = real_depth - real_depth[0]
         r_total = r_thick_arr[-1] if len(r_thick_arr) > 0 else 0
         b_thick_arr = base_depth - base_depth[0] if len(base_depth) > 0 else np.array([])
@@ -6555,20 +6551,22 @@ class MainWindow(QtWidgets.QMainWindow):
         s_total = s_thick_arr[-1] if len(s_thick_arr) > 0 else 0
         g_max = max(r_total, b_total, s_total)
 
-        # Helper para desenhar logs simples
         def draw_log(ax, d_arr, f_arr, title):
             patches = []
             colors = []
-            if len(d_arr) < 2: return
-            
+            if len(d_arr) < 2:
+                return
+
             curr = f_arr[0]
             top = d_arr[0]
-            
+
             def add_text(h_blk, t_pos, code):
                 if h_blk > (g_max * 0.02):
-                    ax.text(0.5, t_pos + h_blk/2, str(code), 
-                            ha='center', va='center', fontsize=7, fontweight='bold',
-                            color='white' if sum(get_color(code)[:3]) < 1.5 else 'black')
+                    ax.text(
+                        0.5, t_pos + h_blk / 2, str(code),
+                        ha='center', va='center', fontsize=7, fontweight='bold',
+                        color='white' if sum(get_color(code)[:3]) < 1.5 else 'black'
+                    )
 
             for i in range(1, len(f_arr)):
                 if f_arr[i] != curr:
@@ -6579,7 +6577,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     add_text(h, top, curr)
                     curr = f_arr[i]
                     top = base
-            
+
             base = d_arr[-1]
             h = base - top
             if h > 0:
@@ -6592,19 +6590,15 @@ class MainWindow(QtWidgets.QMainWindow):
             ax.add_collection(col)
             ax.set_xlim(0, 1)
             ax.set_ylim(g_max, 0)
-            ax.set_title(title, fontsize=9)
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(title, fontsize=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
 
-        draw_log(ax1, b_thick_arr, base_fac, f"Base\n{b_total:.1f}m")
-        ax1.set_ylabel("Espessura (m)")
-        ax1.set_yticks(np.linspace(0, g_max, 10))
-        draw_log(ax2, s_thick_arr, sim_fac, f"Simul\n{s_total:.1f}m")
-        draw_log(ax3, r_thick_arr, real_fac, f"Real\n{r_total:.1f}m")
-
-        # Gráfico Volume
         def calc_net(d, f):
-            if len(d) < 2: return {}
-            dz = np.diff(d, prepend=d[0]); dz[0]=0
+            if len(d) < 2:
+                return {}
+            dz = np.diff(d, prepend=d[0])
+            dz[0] = 0
             c = {}
             for code in all_facies:
                 mask = (f == code)
@@ -6614,82 +6608,13 @@ class MainWindow(QtWidgets.QMainWindow):
         net_base = calc_net(base_depth, base_fac)
         net_sim = calc_net(sim_depth, sim_fac)
         net_real = calc_net(real_depth, real_fac)
-        
-        y_pos = np.arange(len(all_facies))
-        h = 0.25
-        vals_b = [net_base.get(f,0) for f in all_facies]
-        vals_s = [net_sim.get(f,0) for f in all_facies]
-        vals_r = [net_real.get(f,0) for f in all_facies]
-        
-        ax4.barh(y_pos + h, vals_b, h, label='Base', color='#999999')
-        ax4.barh(y_pos,     vals_s, h, label='Simulado', color='#007acc')
-        ax4.barh(y_pos - h, vals_r, h, label='Real', color='#444444')
-        ax4.set_yticks(y_pos)
-        ax4.set_yticklabels([str(f) for f in all_facies])
-        ax4.set_title("Balanço Volumétrico")
-        ax4.legend()
-        ax4.grid(axis='x', linestyle='--', alpha=0.5)
-        
-        for i, (vr, vs) in enumerate(zip(vals_r, vals_s)):
-            if vr > 0:
-                diff_perc = ((vs - vr) / vr) * 100
-                txt = f"{diff_perc:+.1f}%"
-                color = 'green' if abs(diff_perc) < 20 else 'red'
-            else:
-                txt = "Novo" if vs > 0 else ""
-                color = 'blue'
-            max_val = max(vr, vals_b[i], vs)
-            if max_val > 0:
-                ax4.text(max_val, y_pos[i], f" {txt}", va='center', color=color, fontsize=8, fontweight='bold')
-        
-        plt.tight_layout()
-        canvas1 = FigureCanvas(fig1)
-        l1.addWidget(canvas1)
-        tabs.addTab(tab1, "Logs & Volume")
 
-        # =================================================================
-        # ABA 2: MATRIZ & FAMÍLIAS
-        # =================================================================
-        tab2 = QtWidgets.QWidget()
-        l2 = QtWidgets.QVBoxLayout(tab2)
-        fig2, (ax2a, ax2b) = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
-
-        n_bins = 200
-        r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
-        s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
-        
-        n_classes = len(all_facies)
-        conf_matrix = np.zeros((n_classes, n_classes), dtype=int)
-        f_to_i = {f: i for i, f in enumerate(all_facies)}
-        
-        for rv, sv in zip(r_norm, s_norm):
-            i = f_to_i.get(rv)
-            j = f_to_i.get(sv)
-            if i is not None and j is not None:
-                conf_matrix[i, j] += 1
-
-        ax2a.imshow(conf_matrix, interpolation='nearest', cmap='Blues')
-        ax2a.set_xticks(np.arange(n_classes)); ax2a.set_yticks(np.arange(n_classes))
-        ax2a.set_xticklabels([str(f) for f in all_facies], rotation=45)
-        ax2a.set_yticklabels([str(f) for f in all_facies])
-        ax2a.set_xlabel("Simulado"); ax2a.set_ylabel("Real")
-        ax2a.set_title("Matriz de Trocas")
-
-        for i in range(n_classes):
-            for j in range(n_classes):
-                val = conf_matrix[i, j]
-                color = "white" if val > conf_matrix.max()/2 else "black"
-                if val > 0:
-                    ax2a.text(j, i, str(val), ha="center", va="center", color=color)
-                if i == j:
-                    rect = Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor='gold', linewidth=3)
-                    ax2a.add_patch(rect)
-
-        # Famílias
         def get_family(f_code):
             s = str(f_code)
-            if s.startswith('1'): return "Siliciclásticos"
-            if s.startswith('2'): return "Carbonatos"
+            if s.startswith("1"):
+                return "Siliciclásticos"
+            if s.startswith("2"):
+                return "Carbonatos"
             return "Outros"
 
         fam_stats = {"Real": {}, "Sim": {}, "Base": {}}
@@ -6703,16 +6628,899 @@ class MainWindow(QtWidgets.QMainWindow):
             fam_stats["Sim"][fam] = fam_stats["Sim"].get(fam, 0) + net_sim.get(f, 0)
             fam_stats["Base"][fam] = fam_stats["Base"].get(fam, 0) + net_base.get(f, 0)
 
-        families = sorted(list(fam_stats["Real"].keys()))
-        x_fam = np.arange(len(families))
-        bars_b = [(fam_stats["Base"][fam] / tot_b)*100 for fam in families]
-        bars_s = [(fam_stats["Sim"][fam] / tot_s)*100 for fam in families]
-        bars_r = [(fam_stats["Real"][fam] / tot_r)*100 for fam in families]
+        families = sorted(list(set(
+            list(fam_stats["Real"].keys()) +
+            list(fam_stats["Sim"].keys()) +
+            list(fam_stats["Base"].keys())
+        )))
 
+        bars_b = [(fam_stats["Base"].get(fam, 0) / tot_b) * 100 for fam in families]
+        bars_s = [(fam_stats["Sim"].get(fam, 0) / tot_s) * 100 for fam in families]
+        bars_r = [(fam_stats["Real"].get(fam, 0) / tot_r) * 100 for fam in families]
+
+        # =================================================================
+        # ABA 1: LOGS
+        # =================================================================
+        tab1 = QtWidgets.QWidget()
+        tab1_layout = QtWidgets.QHBoxLayout(tab1)
+        tab1_layout.setContentsMargins(6, 6, 6, 6)
+        tab1_layout.setSpacing(10)
+
+        # -------------------------------------------------
+        # LADO ESQUERDO: LOGS
+        # -------------------------------------------------
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        # figura mais estreita: assim não sobra aquele branco gigante
+        fig1 = plt.figure(figsize=(4.2, 8.6))
+
+        # [left, bottom, width, height]
+        # height maior para os poços irem mais para baixo
+        ax1 = fig1.add_axes([0.20, 0.05, 0.17, 0.90])  # Base
+        ax2 = fig1.add_axes([0.42, 0.05, 0.17, 0.90], sharey=ax1)  # Simul
+        ax3 = fig1.add_axes([0.64, 0.05, 0.17, 0.90], sharey=ax1)  # Real
+
+        # Dados de espessura (zero-based)
+        r_thick_arr = real_depth - real_depth[0]
+        r_total = r_thick_arr[-1] if len(r_thick_arr) > 0 else 0
+        b_thick_arr = base_depth - base_depth[0] if len(base_depth) > 0 else np.array([])
+        b_total = b_thick_arr[-1] if len(b_thick_arr) > 0 else 0
+        s_thick_arr = sim_depth - sim_depth[0] if len(sim_depth) > 0 else np.array([])
+        s_total = s_thick_arr[-1] if len(s_thick_arr) > 0 else 0
+        g_max = max(r_total, b_total, s_total)
+
+        def draw_log(ax, d_arr, f_arr, title):
+            patches = []
+            colors = []
+            if len(d_arr) < 2:
+                return
+
+            curr = f_arr[0]
+            top = d_arr[0]
+
+            def add_text(h_blk, t_pos, code):
+                if h_blk > (g_max * 0.02):
+                    ax.text(
+                        0.5, t_pos + h_blk / 2, str(code),
+                        ha='center', va='center', fontsize=7, fontweight='bold',
+                        color='white' if sum(get_color(code)[:3]) < 1.5 else 'black'
+                    )
+
+            for i in range(1, len(f_arr)):
+                if f_arr[i] != curr:
+                    base = d_arr[i]
+                    h = base - top
+                    patches.append(Rectangle((0, top), 1, h))
+                    colors.append(get_color(curr))
+                    add_text(h, top, curr)
+                    curr = f_arr[i]
+                    top = base
+
+            base = d_arr[-1]
+            h = base - top
+            if h > 0:
+                patches.append(Rectangle((0, top), 1, h))
+                colors.append(get_color(curr))
+                add_text(h, top, curr)
+
+            col = PatchCollection(patches, match_original=True)
+            col.set_facecolors(colors)
+            ax.add_collection(col)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(g_max, 0)
+            ax.set_title(title, fontsize=9)
+            ax.set_xticks([])
+
+        draw_log(ax1, b_thick_arr, base_fac, f"Base\n{b_total:.1f}m")
+        ax1.set_ylabel("Espessura (m)")
+        ax1.set_yticks(np.linspace(0, g_max, 10))
+
+        draw_log(ax2, s_thick_arr, sim_fac, f"Simul\n{s_total:.1f}m")
+        draw_log(ax3, r_thick_arr, real_fac, f"Real\n{r_total:.1f}m")
+
+        ax2.tick_params(axis='y', left=False, labelleft=False)
+        ax3.tick_params(axis='y', left=False, labelleft=False)
+
+        canvas1 = FigureCanvas(fig1)
+        left_layout.addWidget(canvas1)
+
+        # -------------------------------------------------
+        # LADO DIREITO: TABELAS QT COPIÁVEIS
+        # -------------------------------------------------
+        right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QHBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 24, 0, 0)  # ajusta alinhamento vertical
+        right_layout.setSpacing(8)
+        right_layout.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+
+        def extract_intervals(d_arr, f_arr, total_thickness):
+            """
+            Agrupa intervalos contínuos de mesma fácies.
+            Retorna: (facies, thickness, pct_col)
+            """
+            intervals = []
+            if len(d_arr) < 2 or len(f_arr) == 0:
+                return intervals
+
+            curr = int(f_arr[0])
+            top = float(d_arr[0])
+
+            for i in range(1, len(f_arr)):
+                fac = int(f_arr[i])
+                if fac != curr:
+                    base = float(d_arr[i])
+                    thick = max(base - top, 0.0)
+                    if thick > 1e-9:
+                        intervals.append((curr, thick))
+                    curr = fac
+                    top = base
+
+            base = float(d_arr[-1])
+            thick = max(base - top, 0.0)
+            if thick > 1e-9:
+                intervals.append((curr, thick))
+
+            # merge final caso tenham sobrado fácies iguais adjacentes
+            merged = []
+            for fac, thick in intervals:
+                if merged and merged[-1][0] == fac:
+                    merged[-1] = (fac, merged[-1][1] + thick)
+                else:
+                    merged.append((fac, thick))
+
+            # adiciona %
+            out = []
+            for fac, thick in merged:
+                pct = (thick / total_thickness * 100.0) if total_thickness > 0 else 0.0
+                out.append((fac, thick, pct))
+
+            return out
+        
+        def _prepare_valid_intervals(intervals, min_interval_pct=0.1):
+            """
+            Mantém só intervalos interpretáveis:
+            - facies != 0
+            - %Col >= min_interval_pct
+            """
+            valid = []
+            for i, (fac, thick, pct) in enumerate(intervals):
+                fac = int(fac)
+                pct = float(pct)
+                if fac == 0:
+                    continue
+                if pct < min_interval_pct:
+                    continue
+                valid.append({
+                    "orig_idx": i,
+                    "fac": fac,
+                    "thick": float(thick),
+                    "pct": pct,
+                })
+            return valid
+
+
+        def _build_pct_prefix(valid_list):
+            pref = [0.0]
+            for item in valid_list:
+                pref.append(pref[-1] + item["pct"])
+            return pref
+
+
+        def _range_pct(pref, start, length):
+            return pref[start + length] - pref[start]
+
+
+        def _pattern_to_str(pattern):
+            return "-".join(str(x) for x in pattern)
+
+
+        def _calc_simrel(pct_sim, pct_real):
+            mx = max(pct_sim, pct_real)
+            if mx <= 0:
+                return 0.0
+            return min(pct_sim, pct_real) / mx
+
+
+        def _calc_force(pct_sim, pct_real, length):
+            """
+            Força visual da sequência:
+            - tamanho compartilhado
+            - similaridade relativa
+            - pequeno bônus por comprimento
+            """
+            pct_comp = min(pct_sim, pct_real)
+            simrel = _calc_simrel(pct_sim, pct_real)
+            return pct_comp * simrel * (1.0 + 0.15 * max(0, length - 1))
+
+
+        def _mean_row(orig_rows):
+            return sum(orig_rows) / len(orig_rows) if orig_rows else -1.0
+
+
+        def _generate_candidates(
+            sim_valid,
+            real_valid,
+            level_name,
+            pct_min,
+            simrel_min,
+        ):
+            """
+            Gera todas as sequências candidatas contíguas e idênticas.
+            """
+            sim_codes = [x["fac"] for x in sim_valid]
+            real_codes = [x["fac"] for x in real_valid]
+
+            sim_pref = _build_pct_prefix(sim_valid)
+            real_pref = _build_pct_prefix(real_valid)
+
+            n_sim = len(sim_codes)
+            n_real = len(real_codes)
+
+            candidates = []
+
+            for i in range(n_sim):
+                for j in range(n_real):
+                    L = 0
+                    while (
+                        i + L < n_sim
+                        and j + L < n_real
+                        and sim_codes[i + L] == real_codes[j + L]
+                    ):
+                        L += 1
+
+                        pct_sim = _range_pct(sim_pref, i, L)
+                        pct_real = _range_pct(real_pref, j, L)
+                        pct_comp = min(pct_sim, pct_real)
+                        simrel = _calc_simrel(pct_sim, pct_real)
+
+                        if pct_comp < pct_min:
+                            continue
+                        if simrel < simrel_min:
+                            continue
+
+                        pattern = tuple(sim_codes[i:i + L])
+                        sim_orig_rows = [sim_valid[k]["orig_idx"] for k in range(i, i + L)]
+                        real_orig_rows = [real_valid[k]["orig_idx"] for k in range(j, j + L)]
+
+                        candidates.append({
+                            "level": level_name,
+                            "pattern": pattern,
+                            "pattern_str": _pattern_to_str(pattern),
+                            "length": L,
+
+                            "sim_start": i,
+                            "sim_end": i + L - 1,
+                            "real_start": j,
+                            "real_end": j + L - 1,
+
+                            "sim_orig_rows": sim_orig_rows,
+                            "real_orig_rows": real_orig_rows,
+
+                            "pct_sim": pct_sim,
+                            "pct_real": pct_real,
+                            "pct_comp": pct_comp,
+                            "sim_rel": simrel,
+                            "force": _calc_force(pct_sim, pct_real, L),
+
+                            # bottom-up na interpretação:
+                            # maior índice médio = mais basal
+                            "mean_basal": (_mean_row(sim_orig_rows) + _mean_row(real_orig_rows)) / 2.0,
+                        })
+
+            return candidates
+
+
+        def _select_best_ordered_candidates(candidates):
+            """
+            Seleção global monotônica:
+            escolhe o melhor conjunto NÃO sobreposto e NÃO cruzado.
+
+            Critério principal = maior soma de score global.
+            """
+            if not candidates:
+                return []
+
+            # score principal
+            for c in candidates:
+                c["score"] = c["force"]
+
+            # ordenação para DP
+            ordered = sorted(
+                candidates,
+                key=lambda c: (
+                    c["sim_end"],
+                    c["real_end"],
+                    c["sim_start"],
+                    c["real_start"],
+                )
+            )
+
+            n = len(ordered)
+            dp = [0.0] * n
+            parent = [-1] * n
+
+            for j in range(n):
+                best_prev_val = 0.0
+                best_prev_idx = -1
+
+                for i in range(j):
+                    compatible = (
+                        ordered[i]["sim_end"] < ordered[j]["sim_start"]
+                        and ordered[i]["real_end"] < ordered[j]["real_start"]
+                    )
+                    if compatible and dp[i] > best_prev_val:
+                        best_prev_val = dp[i]
+                        best_prev_idx = i
+
+                dp[j] = ordered[j]["score"] + best_prev_val
+                parent[j] = best_prev_idx
+
+            # melhor final
+            best_idx = max(range(n), key=lambda k: dp[k])
+
+            selected = []
+            cur = best_idx
+            while cur != -1:
+                selected.append(ordered[cur])
+                cur = parent[cur]
+
+            selected.reverse()
+            return selected
+
+
+        def _split_windows_from_primary(primary_selected, n_sim, n_real):
+            """
+            Cria janelas entre sequências principais.
+            Cada janela é um retângulo monotônico:
+            [sim_lo..sim_hi] x [real_lo..real_hi]
+            """
+            if not primary_selected:
+                return [(0, n_sim - 1, 0, n_real - 1)]
+
+            prim = sorted(primary_selected, key=lambda c: c["sim_start"])
+
+            windows = []
+            prev_sim_end = -1
+            prev_real_end = -1
+
+            for p in prim:
+                sim_lo = prev_sim_end + 1
+                sim_hi = p["sim_start"] - 1
+
+                real_lo = prev_real_end + 1
+                real_hi = p["real_start"] - 1
+
+                if sim_lo <= sim_hi and real_lo <= real_hi:
+                    windows.append((sim_lo, sim_hi, real_lo, real_hi))
+
+                prev_sim_end = p["sim_end"]
+                prev_real_end = p["real_end"]
+
+            sim_lo = prev_sim_end + 1
+            sim_hi = n_sim - 1
+
+            real_lo = prev_real_end + 1
+            real_hi = n_real - 1
+
+            if sim_lo <= sim_hi and real_lo <= real_hi:
+                windows.append((sim_lo, sim_hi, real_lo, real_hi))
+
+            return windows
+        
+        def find_shared_sequences(
+            sim_intervals,
+            real_intervals,
+            primary_pct_min=8.0,
+            primary_simrel_min=0.50,
+            secondary_pct_min=5.0,
+            secondary_simrel_min=0.35,
+            min_interval_pct=0.1,
+        ):
+            """
+            Sequências compartilhadas:
+            1) principais: matching global ordenado
+            2) secundárias: matching ordenado nas janelas entre as principais
+            """
+
+            sim_valid = _prepare_valid_intervals(sim_intervals, min_interval_pct=min_interval_pct)
+            real_valid = _prepare_valid_intervals(real_intervals, min_interval_pct=min_interval_pct)
+
+            sim_labels = [""] * len(sim_intervals)
+            real_labels = [""] * len(real_intervals)
+
+            seq_colors = {}
+            shared_seq_meta = []
+
+            if not sim_valid or not real_valid:
+                return sim_labels, real_labels, seq_colors, shared_seq_meta
+
+            # -------------------------------------------------
+            # 1) Sequências principais: matching global
+            # -------------------------------------------------
+            primary_candidates = _generate_candidates(
+                sim_valid,
+                real_valid,
+                level_name="primary",
+                pct_min=primary_pct_min,
+                simrel_min=primary_simrel_min,
+            )
+
+            primary_selected = _select_best_ordered_candidates(primary_candidates)
+
+            # -------------------------------------------------
+            # 2) Sequências secundárias: matching por janelas
+            # -------------------------------------------------
+            secondary_candidates = _generate_candidates(
+                sim_valid,
+                real_valid,
+                level_name="secondary",
+                pct_min=secondary_pct_min,
+                simrel_min=secondary_simrel_min,
+            )
+
+            windows = _split_windows_from_primary(
+                primary_selected,
+                n_sim=len(sim_valid),
+                n_real=len(real_valid),
+            )
+
+            secondary_selected = []
+            for sim_lo, sim_hi, real_lo, real_hi in windows:
+                cands_in_window = [
+                    c for c in secondary_candidates
+                    if (
+                        sim_lo <= c["sim_start"] <= c["sim_end"] <= sim_hi
+                        and real_lo <= c["real_start"] <= c["real_end"] <= real_hi
+                    )
+                ]
+                selected_here = _select_best_ordered_candidates(cands_in_window)
+                secondary_selected.extend(selected_here)
+
+            # -------------------------------------------------
+            # 3) Junta tudo
+            # - Seq. principais primeiro
+            # - depois secundárias
+            # - dentro de cada grupo, ordena bottom-up para nomear
+            # -------------------------------------------------
+            primary_selected = sorted(primary_selected, key=lambda c: c["mean_basal"], reverse=True)
+            secondary_selected = sorted(secondary_selected, key=lambda c: c["mean_basal"], reverse=True)
+
+            accepted = primary_selected + secondary_selected
+
+            for seq_idx, cand in enumerate(accepted, start=1):
+                seq_name = f"S{seq_idx}"
+                hue = (seq_idx * 47) % 360
+                seq_colors[seq_name] = QColor.fromHsv(hue, 70, 255)
+
+                for row in cand["sim_orig_rows"]:
+                    sim_labels[row] = seq_name
+
+                for row in cand["real_orig_rows"]:
+                    real_labels[row] = seq_name
+
+                shared_seq_meta.append({
+                    "seq": seq_name,
+                    "level": cand["level"],
+
+                    "pattern": cand["pattern"],
+                    "pattern_str": cand["pattern_str"],
+                    "n_intervals": cand["length"],
+
+                    "sim_orig_rows": cand["sim_orig_rows"],
+                    "real_orig_rows": cand["real_orig_rows"],
+
+                    "sim_rows": ",".join(str(x + 1) for x in cand["sim_orig_rows"]),
+                    "real_rows": ",".join(str(x + 1) for x in cand["real_orig_rows"]),
+
+                    "pct_sim": cand["pct_sim"],
+                    "pct_real": cand["pct_real"],
+                    "pct_comp": cand["pct_comp"],
+                    "sim_rel": cand["sim_rel"],
+                    "force": cand["force"],
+
+                    "mean_basal": cand["mean_basal"],
+                })
+
+            return sim_labels, real_labels, seq_colors, shared_seq_meta
+        
+        def build_shared_blocks(
+            sim_intervals,
+            real_intervals,
+            sim_seq_labels,
+            real_seq_labels,
+            shared_seq_meta,
+            gap_pct_max=3.0,
+            min_interval_pct=0.1,
+        ):
+            """
+            Agrupa Seq. em Blocos quando:
+            - aparecem na mesma ordem bottom-up em Simul e Real
+            - o gap entre elas é pequeno nos dois lados
+            - facies 0 no gap é ignorada
+            """
+
+            block_colors = {}
+            block_meta = []
+
+            sim_block_labels = [""] * len(sim_intervals)
+            real_block_labels = [""] * len(real_intervals)
+
+            seq_info = {}
+            for meta in shared_seq_meta:
+                seq = meta["seq"]
+                seq_info[seq] = {
+                    "sim_rows": sorted(meta["sim_orig_rows"]),
+                    "real_rows": sorted(meta["real_orig_rows"]),
+                    "pattern_str": meta["pattern_str"],
+                    "n_intervals": meta["n_intervals"],
+                    "pct_sim": meta["pct_sim"],
+                    "pct_real": meta["pct_real"],
+                    "level": meta["level"],
+                }
+
+            if not seq_info:
+                return sim_block_labels, real_block_labels, block_colors, block_meta
+
+            # ordem bottom-up: linhas mais baixas primeiro
+            sim_order = sorted(seq_info.keys(), key=lambda s: max(seq_info[s]["sim_rows"]), reverse=True)
+            real_order = sorted(seq_info.keys(), key=lambda s: max(seq_info[s]["real_rows"]), reverse=True)
+
+            real_rank = {seq: i for i, seq in enumerate(real_order)}
+
+            def gap_pct(intervals, upper_rows, lower_rows):
+                """
+                upper_rows = sequência acima
+                lower_rows = sequência abaixo
+                gap = tudo que está entre elas, ignorando facies 0
+                """
+                if not upper_rows or not lower_rows:
+                    return 999.0
+
+                start = max(upper_rows) + 1
+                end = min(lower_rows) - 1
+
+                if end < start:
+                    return 0.0
+
+                acc = 0.0
+                for k in range(start, end + 1):
+                    fac = int(intervals[k][0])
+                    pct = float(intervals[k][2])
+                    if fac == 0:
+                        continue
+                    if pct < min_interval_pct:
+                        continue
+                    acc += pct
+                return acc
+
+            groups = []
+            current_group = [sim_order[0]]
+
+            for idx in range(1, len(sim_order)):
+                prev_seq = current_group[-1]   # mais basal
+                next_seq = sim_order[idx]      # mais acima
+
+                # precisa manter a mesma ordem em Real
+                if real_rank.get(next_seq, -999) != real_rank.get(prev_seq, -999) + 1:
+                    groups.append(current_group)
+                    current_group = [next_seq]
+                    continue
+
+                prev_sim_rows = seq_info[prev_seq]["sim_rows"]
+                next_sim_rows = seq_info[next_seq]["sim_rows"]
+
+                prev_real_rows = seq_info[prev_seq]["real_rows"]
+                next_real_rows = seq_info[next_seq]["real_rows"]
+
+                gap_sim = gap_pct(sim_intervals, upper_rows=next_sim_rows, lower_rows=prev_sim_rows)
+                gap_real = gap_pct(real_intervals, upper_rows=next_real_rows, lower_rows=prev_real_rows)
+
+                if gap_sim <= gap_pct_max and gap_real <= gap_pct_max:
+                    current_group.append(next_seq)
+                else:
+                    groups.append(current_group)
+                    current_group = [next_seq]
+
+            groups.append(current_group)
+
+            block_idx = 1
+            for group in groups:
+                if len(group) < 2:
+                    continue
+
+                block_name = f"B{block_idx}"
+                hue = (block_idx * 61) % 360
+                block_colors[block_name] = QColor.fromHsv(hue, 45, 255)
+
+                sim_total_pct = 0.0
+                real_total_pct = 0.0
+
+                for seq in group:
+                    sim_total_pct += seq_info[seq]["pct_sim"]
+                    real_total_pct += seq_info[seq]["pct_real"]
+
+                    for row in seq_info[seq]["sim_rows"]:
+                        sim_block_labels[row] = block_name
+
+                    for row in seq_info[seq]["real_rows"]:
+                        real_block_labels[row] = block_name
+
+                block_meta.append({
+                    "block": block_name,
+                    "seqs": group[:],
+                    "pct_sim": sim_total_pct,
+                    "pct_real": real_total_pct,
+                })
+
+                block_idx += 1
+
+            return sim_block_labels, real_block_labels, block_colors, block_meta
+
+        def make_table_copyable(table):
+            shortcut = QtWidgets.QShortcut(QtGui.QKeySequence.Copy, table)
+
+            def copy_selection():
+                ranges = table.selectedRanges()
+                if not ranges:
+                    return
+
+                r = ranges[0]
+                lines = []
+                for row in range(r.topRow(), r.bottomRow() + 1):
+                    vals = []
+                    for col in range(r.leftColumn(), r.rightColumn() + 1):
+                        item = table.item(row, col)
+                        vals.append("" if item is None else item.text())
+                    lines.append("\t".join(vals))
+
+                QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+            shortcut.activated.connect(copy_selection)
+
+        def build_interval_table(
+            title,
+            intervals,
+            seq_labels=None,
+            seq_colors=None,
+            block_labels=None,
+            block_colors=None,
+        ):
+            panel = QtWidgets.QWidget()
+            panel_layout = QtWidgets.QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_layout.setSpacing(4)
+
+            lbl = QtWidgets.QLabel(title)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setStyleSheet("font-weight: 600;")
+            panel_layout.addWidget(lbl)
+
+            has_seq = seq_labels is not None
+            has_block = block_labels is not None
+
+            headers = []
+            if has_block:
+                headers.append("Bl.")
+            if has_seq:
+                headers.append("Seq.")
+            headers += ["Fácies", "Esp. (m)", "% Col."]
+
+            table = QtWidgets.QTableWidget()
+            table.setColumnCount(len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setRowCount(len(intervals))
+            table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+            table.verticalHeader().setVisible(False)
+            table.setAlternatingRowColors(False)
+            table.setSortingEnabled(False)
+            table.setWordWrap(False)
+            table.setShowGrid(True)
+            table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+
+            for row, (fac, thick, pct) in enumerate(intervals):
+                col = 0
+
+                if has_block:
+                    block_txt = block_labels[row] if row < len(block_labels) else ""
+                    block_item = QtWidgets.QTableWidgetItem(block_txt)
+                    block_item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                    if block_txt and block_colors is not None and block_txt in block_colors:
+                        block_item.setBackground(QBrush(block_colors[block_txt]))
+                        block_item.setForeground(QColor("black"))
+
+                    table.setItem(row, col, block_item)
+                    col += 1
+
+                if has_seq:
+                    seq_txt = seq_labels[row] if row < len(seq_labels) else ""
+                    seq_item = QtWidgets.QTableWidgetItem(seq_txt)
+                    seq_item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                    if seq_txt and seq_colors is not None and seq_txt in seq_colors:
+                        seq_item.setBackground(QBrush(seq_colors[seq_txt]))
+                        seq_item.setForeground(QColor("black"))
+
+                    table.setItem(row, col, seq_item)
+                    col += 1
+
+                fac_item = QtWidgets.QTableWidgetItem(str(fac))
+                fac_item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                rgba = get_color(fac)
+                bg = QColor(
+                    int(rgba[0] * 255),
+                    int(rgba[1] * 255),
+                    int(rgba[2] * 255)
+                )
+                fac_item.setBackground(QBrush(bg))
+                fac_item.setForeground(QColor("white" if sum(rgba[:3]) < 1.5 else "black"))
+
+                thick_item = QtWidgets.QTableWidgetItem(f"{thick:.2f}")
+                thick_item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                pct_item = QtWidgets.QTableWidgetItem(f"{pct:.1f}%")
+                pct_item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                table.setItem(row, col + 0, fac_item)
+                table.setItem(row, col + 1, thick_item)
+                table.setItem(row, col + 2, pct_item)
+
+            header = table.horizontalHeader()
+            for c in range(table.columnCount()):
+                header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
+
+            table.resizeColumnsToContents()
+            table.resizeRowsToContents()
+
+            table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+            table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+            scroll_w = table.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
+
+            total_w = (
+                table.frameWidth() * 2
+                + table.verticalHeader().width()
+                + sum(table.columnWidth(c) for c in range(table.columnCount()))
+                + scroll_w
+                + 6
+            )
+
+            MAX_TABLE_HEIGHT = 750
+
+            header_h = table.horizontalHeader().height()
+            rows_h = sum(table.rowHeight(r) for r in range(table.rowCount()))
+            total_h = table.frameWidth() * 2 + header_h + rows_h + 4
+
+            table.setFixedWidth(total_w)
+            table.setMaximumHeight(MAX_TABLE_HEIGHT)
+            table.setMinimumHeight(min(total_h, MAX_TABLE_HEIGHT))
+
+            make_table_copyable(table)
+
+            panel_layout.addWidget(table, alignment=QtCore.Qt.AlignTop)
+            return panel
+
+        base_intervals = extract_intervals(b_thick_arr, base_fac, b_total)
+        sim_intervals  = extract_intervals(s_thick_arr, sim_fac, s_total)
+        real_intervals = extract_intervals(r_thick_arr, real_fac, r_total)
+
+        sim_seq_labels, real_seq_labels, seq_colors, shared_seq_meta = find_shared_sequences(
+            sim_intervals,
+            real_intervals,
+            primary_pct_min=8.0,
+            primary_simrel_min=0.50,
+            secondary_pct_min=3.0,
+            secondary_simrel_min=0.2,
+            min_interval_pct=0.05,
+        )
+
+        sim_block_labels, real_block_labels, block_colors, block_meta = build_shared_blocks(
+            sim_intervals,
+            real_intervals,
+            sim_seq_labels,
+            real_seq_labels,
+            shared_seq_meta,
+            gap_pct_max=3.0,
+            min_interval_pct=0.1,
+        )
+
+        right_layout.addWidget(
+            build_interval_table("Base", base_intervals),
+            0, QtCore.Qt.AlignTop
+        )
+
+        right_layout.addWidget(
+            build_interval_table(
+                "Simul",
+                sim_intervals,
+                seq_labels=sim_seq_labels,
+                seq_colors=seq_colors,
+                block_labels=sim_block_labels,
+                block_colors=block_colors,
+            ),
+            0, QtCore.Qt.AlignTop
+        )
+
+        right_layout.addWidget(
+            build_interval_table(
+                "Real",
+                real_intervals,
+                seq_labels=real_seq_labels,
+                seq_colors=seq_colors,
+                block_labels=real_block_labels,
+                block_colors=block_colors,
+            ),
+            0, QtCore.Qt.AlignTop
+        )
+
+        right_layout.addStretch(1)
+
+        # -------------------------------------------------
+        # Junta tudo
+        # -------------------------------------------------
+        tab1_layout.setSpacing(8)
+
+        tab1_layout.addWidget(left_panel, 0, QtCore.Qt.AlignTop)
+        tab1_layout.addWidget(right_panel, 0, QtCore.Qt.AlignTop)
+        tab1_layout.addStretch(1)
+
+        tabs.addTab(tab1, "Logs")
+
+        # =================================================================
+        # ABA 2: BALANÇO
+        # =================================================================
+        tab2 = QtWidgets.QWidget()
+        l2 = QtWidgets.QVBoxLayout(tab2)
+
+        fig2, (ax2a, ax2b) = plt.subplots(
+            nrows=1, ncols=2, figsize=(13, 6),
+            gridspec_kw={'width_ratios': [2.2, 1.2]}
+        )
+
+        # --- Balanço volumétrico ---
+        y_pos = np.arange(len(all_facies))
+        h = 0.25
+        vals_b = [net_base.get(f, 0) for f in all_facies]
+        vals_s = [net_sim.get(f, 0) for f in all_facies]
+        vals_r = [net_real.get(f, 0) for f in all_facies]
+
+        ax2a.barh(y_pos + h, vals_b, h, label='Base', color='#999999')
+        ax2a.barh(y_pos,     vals_s, h, label='Simulado', color='#007acc')
+        ax2a.barh(y_pos - h, vals_r, h, label='Real', color='#444444')
+        ax2a.set_yticks(y_pos)
+        ax2a.set_yticklabels([str(f) for f in all_facies])
+        ax2a.set_title("Balanço Volumétrico")
+        ax2a.legend()
+        ax2a.grid(axis='x', linestyle='--', alpha=0.5)
+
+        for i, (vr, vs) in enumerate(zip(vals_r, vals_s)):
+            if vr > 0:
+                diff_perc = ((vs - vr) / vr) * 100
+                txt = f"{diff_perc:+.1f}%"
+                color = 'green' if abs(diff_perc) < 20 else 'red'
+            else:
+                txt = "Novo" if vs > 0 else ""
+                color = 'blue'
+
+            max_val = max(vr, vals_b[i], vs)
+            if max_val > 0:
+                ax2a.text(
+                    max_val, y_pos[i], f" {txt}",
+                    va='center', color=color, fontsize=8, fontweight='bold'
+                )
+
+        # --- Balanço por família ---
+        x_fam = np.arange(len(families))
         ax2b.bar(x_fam - 0.2, bars_b, 0.2, label='Base', color='#999999')
         ax2b.bar(x_fam,       bars_s, 0.2, label='Simulado', color='#007acc')
         ax2b.bar(x_fam + 0.2, bars_r, 0.2, label='Real', color='#444444')
-        ax2b.set_xticks(x_fam); ax2b.set_xticklabels(families)
+        ax2b.set_xticks(x_fam)
+        ax2b.set_xticklabels(families)
         ax2b.set_ylabel("Proporção (%)")
         ax2b.set_title("Balanço por Família (%)")
         ax2b.legend()
@@ -6721,176 +7529,195 @@ class MainWindow(QtWidgets.QMainWindow):
         plt.tight_layout()
         canvas2 = FigureCanvas(fig2)
         l2.addWidget(canvas2)
-        tabs.addTab(tab2, "Matriz & Famílias")
+        tabs.addTab(tab2, "Balanço")
 
         # =================================================================
-        # ABA 3: TABELA DETALHADA
+        # ABA 3: MATRIZ DE TROCAS
         # =================================================================
         tab3 = QtWidgets.QWidget()
         l3 = QtWidgets.QVBoxLayout(tab3)
-        
+
+        fig3, ax3a = plt.subplots(figsize=(8, 6))
+
+        n_bins = 200
+        r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
+        s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
+
+        n_classes = len(all_facies)
+        conf_matrix = np.zeros((n_classes, n_classes), dtype=int)
+        f_to_i = {f: i for i, f in enumerate(all_facies)}
+
+        for rv, sv in zip(r_norm, s_norm):
+            i = f_to_i.get(rv)
+            j = f_to_i.get(sv)
+            if i is not None and j is not None:
+                conf_matrix[i, j] += 1
+
+        ax3a.imshow(conf_matrix, interpolation='nearest', cmap='Blues')
+        ax3a.set_xticks(np.arange(n_classes))
+        ax3a.set_yticks(np.arange(n_classes))
+        ax3a.set_xticklabels([str(f) for f in all_facies], rotation=45)
+        ax3a.set_yticklabels([str(f) for f in all_facies])
+        ax3a.set_xlabel("Simulado")
+        ax3a.set_ylabel("Real")
+        ax3a.set_title("Matriz de Trocas")
+
+        for i in range(n_classes):
+            for j in range(n_classes):
+                val = conf_matrix[i, j]
+                color = "white" if val > conf_matrix.max() / 2 else "black"
+                if val > 0:
+                    ax3a.text(j, i, str(val), ha="center", va="center", color=color)
+                if i == j:
+                    rect = Rectangle(
+                        (j - 0.5, i - 0.5), 1, 1,
+                        fill=False, edgecolor='gold', linewidth=3
+                    )
+                    ax3a.add_patch(rect)
+
+        plt.tight_layout()
+        canvas3 = FigureCanvas(fig3)
+        l3.addWidget(canvas3)
+        tabs.addTab(tab3, "Matriz de Trocas")
+
+        # =================================================================
+        # ABA 4: TABELA DE MÉTRICAS (mantida por enquanto)
+        # =================================================================
+        tab4 = QtWidgets.QWidget()
+        l4 = QtWidgets.QVBoxLayout(tab4)
+
         table = QtWidgets.QTableWidget()
         cols = ["Fácies", "Real (m)", "Base (m)", "Sim (m)", "Erro Sim/Real (%)"]
         table.setColumnCount(len(cols))
         table.setHorizontalHeaderLabels(cols)
         table.setRowCount(len(all_facies))
-        
+
         for row, fac in enumerate(all_facies):
-            vr = net_real.get(fac, 0); vb = net_base.get(fac, 0); vs = net_sim.get(fac, 0)
-            if vr > 0: err_perc = ((vs - vr) / vr) * 100
-            else: err_perc = 100.0 if vs > 0 else 0.0
-            
-            item_fac = QtWidgets.QTableWidgetItem(str(fac)); item_fac.setTextAlignment(QtCore.Qt.AlignCenter)
-            rgba = get_color(fac); bg = QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255))
-            item_fac.setBackground(QBrush(bg)); 
-            if sum(rgba[:3]) < 1.5: item_fac.setForeground(QColor("white"))
-            
+            vr = net_real.get(fac, 0)
+            vb = net_base.get(fac, 0)
+            vs = net_sim.get(fac, 0)
+
+            if vr > 0:
+                err_perc = ((vs - vr) / vr) * 100
+            else:
+                err_perc = 100.0 if vs > 0 else 0.0
+
+            item_fac = QtWidgets.QTableWidgetItem(str(fac))
+            item_fac.setTextAlignment(QtCore.Qt.AlignCenter)
+
+            rgba = get_color(fac)
+            bg = QColor(int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255))
+            item_fac.setBackground(QBrush(bg))
+            if sum(rgba[:3]) < 1.5:
+                item_fac.setForeground(QColor("white"))
+
             table.setItem(row, 0, item_fac)
             table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{vr:.2f}"))
             table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{vb:.2f}"))
             table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{vs:.2f}"))
+
             item_err = QtWidgets.QTableWidgetItem(f"{err_perc:+.1f}%")
-            if abs(err_perc) > 20: item_err.setForeground(QColor("red"))
-            elif abs(err_perc) < 5: item_err.setForeground(QColor("green"))
+            if abs(err_perc) > 20:
+                item_err.setForeground(QColor("red"))
+            elif abs(err_perc) < 5:
+                item_err.setForeground(QColor("green"))
+
             table.setItem(row, 4, item_err)
 
         table.resizeColumnsToContents()
-        l3.addWidget(table)
-        tabs.addTab(tab3, "Tabela de Métricas")
+        l4.addWidget(table)
+        tabs.addTab(tab4, "Tabela de Métricas")
 
-        # =================================================================
-        # ABA 4: CORRELAÇÃO & RANKING (Lado a Lado)
-        # =================================================================
-        tab4 = QtWidgets.QWidget()
-        layout4 = QtWidgets.QHBoxLayout(tab4)
-        
-        layout4.addStretch(1)
+        # # =================================================================
+        # # ABA 5: BEST MATCH
+        # # =================================================================
+        # tab5 = QtWidgets.QWidget()
+        # l5 = QtWidgets.QHBoxLayout(tab5)
 
-        # --- ESQUERDA: Correlação ---
-        fig4a, ax4a = plt.subplots(figsize=(5, 8))
-        fig4a.subplots_adjust(left=0.15, right=0.95, top=0.90, bottom=0.05)
+        # if best_depth is not None and len(best_depth) > 0:
+        #     best_thick_arr = best_depth - best_depth[0]
+        #     best_total = best_thick_arr[-1]
+        # else:
+        #     best_depth, best_fac = sim_depth, sim_fac
+        #     best_thick_arr, best_total = s_thick_arr, s_total
 
-        b_norm = resample_to_normalized_depth(base_depth, base_fac, n_bins)
-        s_norm = resample_to_normalized_depth(sim_depth, sim_fac, n_bins)
-        r_norm = resample_to_normalized_depth(real_depth, real_fac, n_bins)
+        # fig5, axs5 = plt.subplots(1, 4, figsize=(6, 8), sharey=True)
+        # fig5.subplots_adjust(left=0.12, right=0.95, top=0.88, bottom=0.05, wspace=0.3)
 
-        self._plot_strat_correlation_real_depth(
-            ax4a,
-            n_bins=n_bins,
-            base_fac_bins=b_norm,
-            sim_fac_bins=s_norm,
-            real_fac_bins=r_norm,
-            b_total=b_total,
-            s_total=s_total,
-            r_total=r_total,
-            get_color=get_color,
-            min_bins=1,
-            link_alpha=0.18
-        )
-        
-        
-        canvas4a = FigureCanvas(fig4a)
-        
-        # --- [1] AJUSTE A LARGURA DA CORRELAÇÃO AQUI (px) ---
-        canvas4a.setMinimumWidth(450)
-        canvas4a.setMaximumWidth(550) 
-        
-        layout4.addWidget(canvas4a)
+        # def group_layers(depth, facies, is_grid_format=True):
+        #     if len(depth) == 0:
+        #         return []
 
-        # --- DIREITA: Ranking Detail Tracks ---
-        if best_depth is not None and len(best_depth) > 0:
-            best_thick_arr = best_depth - best_depth[0]
-            best_total = best_thick_arr[-1]
-        else:
-            best_depth, best_fac = sim_depth, sim_fac
-            best_thick_arr, best_total = s_thick_arr, s_total
+        #     raw_blocks = []
+        #     if is_grid_format:
+        #         for k in range(0, len(depth) - 1, 2):
+        #             raw_blocks.append((depth[k], depth[k + 1], int(facies[k])))
+        #     else:
+        #         curr = int(facies[0])
+        #         top = depth[0]
+        #         for k in range(1, len(facies)):
+        #             if int(facies[k]) != curr:
+        #                 raw_blocks.append((top, depth[k], curr))
+        #                 top = depth[k]
+        #                 curr = int(facies[k])
+        #         raw_blocks.append((top, depth[-1], curr))
 
-        fig4b, axs4b = plt.subplots(1, 4, figsize=(5, 8), sharey=True)
-        fig4b.subplots_adjust(left=0.12, right=0.95, top=0.88, bottom=0.05, wspace=0.3)
+        #     if not raw_blocks:
+        #         return []
 
-        # [NOVA] Função para agrupar camadas adjacentes iguais (remove linhas)
-        def group_layers(depth, facies, is_grid_format=True):
-            if len(depth) == 0: return []
-            
-            # 1. Converte formato Grid (Pares Top/Base) para Blocos Brutos
-            raw_blocks = []
-            if is_grid_format:
-                for k in range(0, len(depth)-1, 2):
-                    raw_blocks.append((depth[k], depth[k+1], int(facies[k])))
-            else:
-                # Formato Log contínuo
-                curr = int(facies[0])
-                top = depth[0]
-                for k in range(1, len(facies)):
-                    if int(facies[k]) != curr:
-                        raw_blocks.append((top, depth[k], curr))
-                        top = depth[k]
-                        curr = int(facies[k])
-                raw_blocks.append((top, depth[-1], curr))
+        #     merged = []
+        #     curr_top, curr_base, curr_fac = raw_blocks[0]
 
-            # 2. Funde blocos adjacentes iguais
-            if not raw_blocks: return []
-            
-            merged = []
-            curr_top, curr_base, curr_fac = raw_blocks[0]
-            
-            for i in range(1, len(raw_blocks)):
-                next_top, next_base, next_fac = raw_blocks[i]
-                
-                # Se for a mesma fácies e estiver "colado" (tolera gap mínimo de arredondamento)
-                if next_fac == curr_fac and abs(next_top - curr_base) < 0.05:
-                    curr_base = next_base # Estende a base
-                else:
-                    merged.append((curr_top, curr_base, curr_fac))
-                    curr_top, curr_base, curr_fac = next_top, next_base, next_fac
-            
-            merged.append((curr_top, curr_base, curr_fac))
-            return merged
+        #     for i in range(1, len(raw_blocks)):
+        #         next_top, next_base, next_fac = raw_blocks[i]
+        #         if next_fac == curr_fac and abs(next_top - curr_base) < 0.05:
+        #             curr_base = next_base
+        #         else:
+        #             merged.append((curr_top, curr_base, curr_fac))
+        #             curr_top, curr_base, curr_fac = next_top, next_base, next_fac
 
-        def plot_track(ax, d, f, title, is_grid=True):
-            ax.set_title(title, fontsize=8, pad=8)
-            ax.set_xticks([])
-            ax.set_facecolor('white')
-            
-            d_rel = d - d[0] if len(d)>0 else []
-            
-            # [USANDO] A função que agrupa
-            layers = group_layers(d_rel, f, is_grid)
-            
-            max_y = max(b_total, s_total, best_total, r_total)
-            ax.set_ylim(max_y, 0)
-            
-            for top, base, fac in layers:
-                h = base - top
-                if h <= 0: continue
-                # [MODIFICADO] edgecolor='none' remove a linha preta entre blocos
-                rect = Rectangle((0, top), 1, h, facecolor=get_color(fac), edgecolor='none')
-                ax.add_patch(rect)
-                
-                if h > max_y * 0.03:
-                    lum = sum(get_color(fac)[:3])
-                    txt_c = 'white' if lum < 1.5 else 'black'
-                    ax.text(0.5, top + h/2, str(fac), ha='center', va='center', fontsize=6, color=txt_c, fontweight='bold')
+        #     merged.append((curr_top, curr_base, curr_fac))
+        #     return merged
 
-        plot_track(axs4b[0], base_depth, base_fac, f"BASE\n{b_total:.1f}m", True)
-        plot_track(axs4b[1], sim_depth, sim_fac, f"SIM (Orig)\n{s_total:.1f}m", True)
-        plot_track(axs4b[2], best_depth, best_fac, f"SIM ({window_size_str})\n{best_total:.1f}m", True)
-        plot_track(axs4b[3], real_depth, real_fac, f"REAL\n{r_total:.1f}m", False)
+        # def plot_track(ax, d, f, title, is_grid=True):
+        #     ax.set_title(title, fontsize=8, pad=8)
+        #     ax.set_xticks([])
+        #     ax.set_facecolor('white')
 
-        for ax in axs4b[1:]: ax.set_yticks([])
-        axs4b[0].set_ylabel("Espessura Relativa (m)", fontsize=9)
+        #     d_rel = d - d[0] if len(d) > 0 else []
+        #     layers = group_layers(d_rel, f, is_grid)
 
-        canvas4b = FigureCanvas(fig4b)
-        
-        # --- [2] AJUSTE A LARGURA DO BEST MATCH AQUI (px) ---
-        canvas4b.setMinimumWidth(450)
-        canvas4b.setMaximumWidth(550)
-        
-        layout4.addWidget(canvas4b)
-        
-        layout4.addStretch(1)
+        #     max_y = max(b_total, s_total, best_total, r_total)
+        #     ax.set_ylim(max_y, 0)
 
-        tabs.addTab(tab4, "Correlação & Best Match")
+        #     for top, base, fac in layers:
+        #         h = base - top
+        #         if h <= 0:
+        #             continue
+        #         rect = Rectangle((0, top), 1, h, facecolor=get_color(fac), edgecolor='none')
+        #         ax.add_patch(rect)
+
+        #         if h > max_y * 0.03:
+        #             lum = sum(get_color(fac)[:3])
+        #             txt_c = 'white' if lum < 1.5 else 'black'
+        #             ax.text(
+        #                 0.5, top + h / 2, str(fac),
+        #                 ha='center', va='center', fontsize=6,
+        #                 color=txt_c, fontweight='bold'
+        #             )
+
+        # plot_track(axs5[0], base_depth, base_fac, f"BASE\n{b_total:.1f}m", True)
+        # plot_track(axs5[1], sim_depth, sim_fac, f"SIM (Orig)\n{s_total:.1f}m", True)
+        # plot_track(axs5[2], best_depth, best_fac, f"SIM ({window_size_str})\n{best_total:.1f}m", True)
+        # plot_track(axs5[3], real_depth, real_fac, f"REAL\n{r_total:.1f}m", False)
+
+        # for ax in axs5[1:]:
+        #     ax.set_yticks([])
+        # axs5[0].set_ylabel("Espessura Relativa (m)", fontsize=9)
+
+        # canvas5 = FigureCanvas(fig5)
+        # l5.addWidget(canvas5)
+        # tabs.addTab(tab5, "Best Match")
 
         return dialog
     
