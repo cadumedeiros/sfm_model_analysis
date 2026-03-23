@@ -74,6 +74,17 @@ class Well:
         in_ascii = False
         null_value = -9999.99
 
+        def _norm(name):
+            return re.sub(r'[^A-Z0-9]+', '_', str(name).strip().upper()).strip('_')
+
+        def _find_col(df, candidates):
+            norm_to_real = {_norm(c): c for c in df.columns}
+            for cand in candidates:
+                real = norm_to_real.get(_norm(cand))
+                if real is not None:
+                    return real
+            return None
+
         try:
             with open(path, 'r', encoding='latin-1') as f:
                 for line in f:
@@ -83,32 +94,31 @@ class Well:
 
                     up = ls.upper()
 
-                    # captura NULL do header
+                    # NULL do header
                     if up.startswith("NULL"):
                         nums = re.findall(r"[-+]?\d*\.?\d+", ls)
                         if nums:
                             null_value = float(nums[-1])
 
-                    # início da seção de curvas
+                    # seção ~Curve
                     if up.startswith("~CURVE"):
                         in_curve = True
                         in_ascii = False
                         continue
 
-                    # início da seção ASCII
+                    # seção ~Ascii
                     if up.startswith("~ASCII") or up.startswith("~A"):
                         in_ascii = True
                         in_curve = False
                         continue
 
-                    # saiu da seção atual
+                    # saiu da seção
                     if ls.startswith("~") and not (up.startswith("~CURVE") or up.startswith("~ASCII") or up.startswith("~A")):
                         in_curve = False
                         in_ascii = False
                         continue
 
                     if in_curve and not ls.startswith("#"):
-                        # pega o nome antes do ponto, ex: DEPT .m
                         m = re.match(r"([^\.\s]+)", ls)
                         if m:
                             curve_names.append(m.group(1).strip())
@@ -116,7 +126,7 @@ class Well:
                     if in_ascii and not ls.startswith("#"):
                         try:
                             data_rows.append([float(x) for x in ls.split()])
-                        except:
+                        except Exception:
                             pass
 
             if not data_rows:
@@ -124,34 +134,72 @@ class Well:
 
             ncols = len(data_rows[0])
 
-            # fallback se por algum motivo não conseguiu ler ~CURVE
             if len(curve_names) != ncols:
                 curve_names = [f"COL_{i}" for i in range(ncols)]
 
             df = pd.DataFrame(data_rows, columns=curve_names)
             df.replace(null_value, np.nan, inplace=True)
 
-            # padronizações úteis
-            rename_map = {}
+            # garante numérico
             for c in df.columns:
-                cu = c.strip().upper()
-                if cu == "DEPT":
-                    rename_map[c] = "DEPT"
-                elif cu == "FAC":
-                    rename_map[c] = "fac"
-                elif cu == "BAT":
-                    rename_map[c] = "bat"
-                elif cu == "LITO_UPSCALED":
-                    rename_map[c] = "lito_upscaled"
-                elif cu == "FAC_DION":
-                    rename_map[c] = "fac_dion"
+                df[c] = pd.to_numeric(df[c], errors="coerce")
 
-            df.rename(columns=rename_map, inplace=True)
+            # aliases úteis para o app, SEM perder o nome original do LAS
+            aliases = {
+                "DEPT": ["DEPT", "DEPTH", "MD"],
+                "fac": ["FAC", "FACIES"],
+                "lito_upscaled": ["LITO_UPSCALED"],
+                "fac_dion": ["FAC_DION", "FACIES_DION"],
+                "lito": ["LITO", "LITOLOGIA"],
+                "bat": ["BAT", "BATIMETRIA"],
+                "ntg": ["NTG"],
+            }
+
+            for alias, candidates in aliases.items():
+                if alias in df.columns:
+                    continue
+                src = _find_col(df, candidates)
+                if src is not None:
+                    df[alias] = pd.to_numeric(df[src], errors="coerce")
+
             return df
 
         except Exception as e:
             print(f"Erro ao ler LAS {path}: {e}")
             return None
+        
+    def get_facies_column(self):
+        if self.data is None or self.data.empty:
+            return None
+
+        preferred = (
+            "fac",
+            "FACIES",
+            "FAC",
+            "lito_upscaled",
+            "LITO_UPSCALED",
+            "fac_dion",
+            "FAC_DION",
+            "lito",
+            "LITO",
+        )
+
+        for col in preferred:
+            if col in self.data.columns:
+                return col
+
+        return None
+
+
+    def get_log_columns(self, include_spatial=False):
+        if self.data is None or self.data.empty:
+            return []
+
+        skip = set()
+        if not include_spatial:
+            skip.update(["X", "Y", "Z"])
+
+        return [c for c in self.data.columns if c not in skip]
 
     def _merge_spatial_and_logs(self):
         traj = self.trajectory.sort_values("MD")
@@ -185,19 +233,38 @@ class Well:
 
 
     def get_vtk_polydata(self, z_exag=1.0):
-        if self.data is None: return None
-        # Coordenadas cruas + Exagero Z
+        if self.data is None or self.data.empty:
+            return None
+
         points = self.data[["X", "Y", "Z"]].values.copy()
         points[:, 2] *= z_exag
-        
+
         poly = pv.lines_from_points(points)
-        # Tenta pegar lito_upscaled, senao fac
-        col = "lito_upscaled" if "lito_upscaled" in self.data.columns else "fac"
-        if col in self.data.columns:
-            poly.point_data["Facies_Real"] = self.data[col].fillna(0).values
-        
-        poly.point_data["MD"] = self.data["DEPT"].values
-        return poly.tube(radius=30) # Tubo grosso pra ver a cor
+
+        fac_col = self.get_facies_column()
+        if fac_col is not None:
+            poly.point_data["Facies_Real"] = (
+                pd.to_numeric(self.data[fac_col], errors="coerce")
+                .fillna(0)
+                .to_numpy(dtype=float)
+            )
+
+        if "DEPT" in self.data.columns:
+            poly.point_data["MD"] = (
+                pd.to_numeric(self.data["DEPT"], errors="coerce")
+                .to_numpy(dtype=float)
+            )
+
+        # adiciona todas as curvas do LAS como point_data
+        for col in self.get_log_columns(include_spatial=False):
+            if col in ("DEPT", fac_col):
+                continue
+
+            arr = pd.to_numeric(self.data[col], errors="coerce")
+            if arr.notna().any():
+                poly.point_data[str(col)] = arr.to_numpy(dtype=float)
+
+        return poly.tube(radius=50)
 
     def get_markers_mesh(self, markers_list, z_exag=1.0):
         if self.data is None or not markers_list: return None, None

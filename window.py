@@ -550,7 +550,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wells = {}
         
         self.facies_colors = load_facies_colors() # Sua função
-        self.markers_db = load_markers("assets/wellMarkers.txt")
+        self.markers_db = load_markers("assets/wellMarkers_daniel.txt")
         
         # Criação do Colormap
         self.pv_cmap = None
@@ -10567,7 +10567,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # tabela de propriedades (depois do resumo)
             excluded = set([
                 'i_index','j_index','k_index','vtkOriginalCellIds','vtkOriginalPointIds','vtkGhostType',
-                'StratigraphicThickness','cell_thickness','Thickness','thickness_local'
+                'cell_thickness','thickness_local'
             ])
 
             ordered = []
@@ -10849,13 +10849,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if g is None:
             return None
 
-        for key in ("StratigraphicThickness", "stratigraphic_thickness"):
+        for key in ("StratigraphicThickness", "Thickness", "stratigraphic_thickness", "thickness"):
             if key in g.cell_data:
                 arr = np.asarray(g.cell_data[key], dtype=float)
                 if arr.size == g.n_cells:
                     return arr
 
-        for key in ("cell_thickness", "CellThickness", "thickness"):
+        for key in ("cell_thickness", "CellThickness"):
             if key in g.cell_data:
                 arr = np.asarray(g.cell_data[key], dtype=float)
                 if arr.size == g.n_cells:

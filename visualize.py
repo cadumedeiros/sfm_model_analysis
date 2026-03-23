@@ -151,13 +151,13 @@ def _get_cell_thickness_for_grid(target_grid):
     if g is None:
         return None
 
-    for key in ("StratigraphicThickness", "stratigraphic_thickness"):
+    for key in ("StratigraphicThickness", "Thickness", "stratigraphic_thickness", "thickness"):
         if key in g.cell_data:
             arr = np.asarray(g.cell_data[key], dtype=float)
             if arr.size == g.n_cells:
                 return arr
 
-    for key in ("cell_thickness", "CellThickness", "thickness"):
+    for key in ("cell_thickness", "CellThickness"):
         if key in g.cell_data:
             arr = np.asarray(g.cell_data[key], dtype=float)
             if arr.size == g.n_cells:
@@ -1254,7 +1254,7 @@ def run(
                 # thickness sum + nome do campo thickness
                 th_name = None
                 try:
-                    for nm in ("StratigraphicThickness", "cell_thickness", "Thickness", "thickness_local"):
+                    for nm in ("StratigraphicThickness", "Thickness", "cell_thickness", "thickness_local"):
                         if nm in col_use.cell_data:
                             th_name = nm
                             break

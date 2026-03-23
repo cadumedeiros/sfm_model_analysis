@@ -24,7 +24,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/Mixed_BaseModel_20out25-HyperTuningBaseModel_SIM_BaseModel_.grdecl"
+DEFAULT_GRDECL_PATH = "grids/EN_ALL-UpScaled_BaseOriginal.grdecl"
 
 
 FLIP_K_DEFAULT = True
@@ -295,6 +295,25 @@ def load_grid_from_grdecl(
             if verbose: print(f"[INFO] Propriedade carregada: {key}")
         except Exception as e:
             if verbose: print(f"[WARN] Erro ao ler propriedade '{key}': {e}")
+
+    # 5. Normaliza aliases de espessura
+    try:
+        th_alias = None
+        for key in ("StratigraphicThickness", "Thickness", "thickness", "stratigraphic_thickness"):
+            if key in g.cell_data:
+                arr = np.asarray(g.cell_data[key], dtype=float)
+                if arr.size == g.n_cells:
+                    th_alias = arr
+                    break
+
+        if th_alias is not None:
+            g.cell_data["StratigraphicThickness"] = th_alias
+            g.cell_data["cell_thickness"] = th_alias
+            if verbose:
+                print("[INFO] Espessura principal normalizada para StratigraphicThickness/cell_thickness")
+    except Exception as e:
+        if verbose:
+            print(f"[WARN] Falha ao normalizar espessura: {e}")
 
     return g, fac_1d
 
