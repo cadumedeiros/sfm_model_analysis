@@ -298,7 +298,7 @@ def _calc_vertical_metrics(target_grid, facies_array, reservoir_set):
 # =============================================================================
 def run(
     mode="facies", 
-    z_exag=15.0, 
+    z_exag=1.0, 
     show_scalar_bar=False, 
     external_plotter=None, 
     external_state=None,
@@ -322,22 +322,29 @@ def run(
     state["mode"] = mode
     state["z_exag"] = z_exag
     state["show_scalar_bar"] = show_scalar_bar
+    
     state["current_grid_source"] = use_grid
     state["current_facies"] = use_facies
-    state.setdefault("last_mode", None) 
+    state.setdefault("last_mode", None)
 
     # Grid Base para visualização (Geometry Only)
     grid_base = use_grid.copy()
-    
+
     # Inicializa com as fácies corretas
     grid_base.cell_data["Facies"] = use_facies
 
-    # Aplica exagero Z
-    # grid_base.points[:, 2] *= z_exag
+    # Bounds brutos (sem z_exag)
+    state["grid_bounds_raw"] = use_grid.bounds
+    state.setdefault("slice_bounds_raw", use_grid.bounds)
 
-    state.setdefault("base_bounds", grid_base.bounds)   # bounds no z_exag = 1
+    # Política da caixa:
+    # True  -> acompanha os cortes
+    # False -> fica fixa no grid inteiro
+    state.setdefault("bounds_follow_slices", True)
+
     state.setdefault("bounds_actor", None)
     state.setdefault("last_bounds_z", None)
+    state.setdefault("last_display_bounds", None)
 
     state.setdefault("bg_actor", None)
     state.setdefault("main_actor", None)
@@ -542,6 +549,39 @@ def run(
                 for k in keys:
                     plotter.remove_scalar_bar(k)
         except Exception: pass
+    
+    def _get_raw_bounds_for_axes():
+        """
+        Retorna bounds brutos (sem z_exag) da fonte escolhida.
+        """
+        if state.get("bounds_follow_slices", True):
+            raw = state.get("slice_bounds_raw")
+            if raw is not None:
+                return raw
+
+        raw = state.get("grid_bounds_raw")
+        if raw is not None:
+            return raw
+
+        g = state.get("current_grid_source")
+        if g is not None:
+            return g.bounds
+
+        return None
+
+
+    def _get_display_bounds_for_axes():
+        """
+        Retorna bounds já no sistema exibido:
+        x,y crus; z multiplicado por z_exag.
+        """
+        raw = _get_raw_bounds_for_axes()
+        if raw is None:
+            return None
+
+        z_scale = float(state.get("z_exag", 1.0))
+        xmin, xmax, ymin, ymax, zmin, zmax = raw
+        return (xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
 
     def show_mesh(mesh):
         mode = state["mode"]
@@ -557,9 +597,9 @@ def run(
         mesh = apply_slices_filter(mesh)
 
         try:
-            state["base_bounds"] = mesh.bounds
+            state["slice_bounds_raw"] = mesh.bounds
         except Exception:
-            pass
+            state["slice_bounds_raw"] = state.get("grid_bounds_raw")
 
         _clean_all_bars(plotter)
         mesh_main = None
@@ -748,44 +788,47 @@ def run(
                 fmt="%.0f",
             )
         
-        base_bounds = state.get("base_bounds")
-        last_bb = state.get("last_base_bounds")
+        display_bounds = _get_display_bounds_for_axes()
+        last_disp = state.get("last_display_bounds")
         last_z = state.get("last_bounds_z")
 
         need_update = False
 
-        if base_bounds is not None:
-            # compara base_bounds com o último aplicado (tolerância pequena)
-            if last_bb is None:
+        if display_bounds is not None:
+            if last_disp is None:
                 need_update = True
             else:
                 try:
                     tol = 1e-6
-                    for a, b in zip(base_bounds, last_bb):
+                    for a, b in zip(display_bounds, last_disp):
                         if abs(float(a) - float(b)) > tol:
                             need_update = True
                             break
                 except Exception:
                     need_update = True
 
-        # se z_scale mudou, também precisa atualizar
         if last_z != z_scale:
             need_update = True
 
-        if need_update and (state.get("bounds_actor") is not None) and base_bounds is not None:
-            xmin, xmax, ymin, ymax, zmin, zmax = base_bounds
-            state["bounds_actor"].SetBounds(xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
-
+        if need_update and state.get("bounds_actor") is not None and display_bounds is not None:
+            state["bounds_actor"].SetBounds(display_bounds)
             state["last_bounds_z"] = z_scale
-            state["last_base_bounds"] = tuple(base_bounds)
+            state["last_display_bounds"] = tuple(display_bounds)
 
     def _refresh():
         new_source = state.get("current_grid_source")
         nonlocal grid_base
         if new_source is not None:
             grid_base = new_source
+            state["grid_bounds_raw"] = new_source.bounds
+
+            # se a caixa estiver fixa no grid inteiro, já reseta o slice bounds
+            if not state.get("bounds_follow_slices", True):
+                state["slice_bounds_raw"] = new_source.bounds
+
             rf = state.get("reservoir_facies", set())
             update_reservoir_fields(rf)
+
         show_mesh(grid_base)
 
     def set_slice(axis, mode, value):

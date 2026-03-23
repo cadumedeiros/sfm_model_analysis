@@ -24,7 +24,7 @@ from wells import Well
 
 # --- WIDGET CUSTOMIZADO PARA OS SLIDERS (Grid Explorer) ---
 class GridSlicerWidget(QtWidgets.QGroupBox):
-    def __init__(self, nx, ny, nz, callback, initial_z=15.0):
+    def __init__(self, nx, ny, nz, callback, initial_z=1.0):
         super().__init__("Geometria (Cortes & Escala)")
         self.callback = callback 
         self.is_updating = False
@@ -502,7 +502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
 
-    def __init__(self, mode="facies", z_exag=15.0, show_scalar_bar=True, reservoir_facies=None):
+    def __init__(self, mode="facies", z_exag=1.0, show_scalar_bar=True, reservoir_facies=None):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
 
@@ -9549,8 +9549,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _lock_axes_bounds_to_grid(self, state=None):
         """
-        Trava a caixa de eixos (vtkCubeAxesActor) para os bounds do GRID JÁ ESCALADO (z_exag),
-        evitando pegar bounds de poços e evitando ficar “como z_exag=1”.
+        Atualiza a caixa de bounds usando somente bounds brutos do estado
+        + o z_exag atual.
+
+        Nunca usa GetBounds() do ator, para evitar inconsistência entre:
+        - grid inteiro
+        - mesh cortado
+        - ator já escalado
         """
         try:
             st = state or self.state
@@ -9558,34 +9563,34 @@ class MainWindow(QtWidgets.QMainWindow):
             if ba is None:
                 return
 
-            # Preferência: bounds do ator principal já escalado
-            main_actor = st.get("main_actor", None) or st.get("bg_actor", None)
-            bounds = None
+            z_scale = float(st.get("z_exag", 1.0))
 
-            if main_actor is not None and hasattr(main_actor, "GetBounds"):
-                b = main_actor.GetBounds()
-                # b é tuple (xmin,xmax,ymin,ymax,zmin,zmax)
-                if b and len(b) == 6:
-                    bounds = b
+            if st.get("bounds_follow_slices", True):
+                raw = st.get("slice_bounds_raw")
+            else:
+                raw = st.get("grid_bounds_raw")
 
-            # Fallback: bounds do plotter (mas isso pode incluir poços se UseBounds não estiver certo)
-            if bounds is None:
-                try:
-                    bounds = self.plotter.bounds
-                except Exception:
-                    bounds = None
+            if raw is None:
+                g = st.get("current_grid_source", None)
+                if g is not None:
+                    raw = g.bounds
 
-            if bounds is not None:
-                ba.SetBounds(bounds)
+            if raw is None:
+                return
+
+            xmin, xmax, ymin, ymax, zmin, zmax = raw
+            display_bounds = (xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
+
+            ba.SetBounds(display_bounds)
+            st["_last_axes_bounds"] = tuple(display_bounds)
 
         except Exception:
             pass
 
     def _maybe_update_axes_bounds(self, state=None, rel_tol=0.01, abs_tol=0.5):
         """
-        Atualiza bounds do CubeAxes só se mudou o suficiente.
-        - rel_tol: tolerância relativa (1% default)
-        - abs_tol: tolerância absoluta (em unidades do seu modelo; 0.5 default)
+        Atualiza bounds do CubeAxes só se mudou o suficiente,
+        usando bounds brutos do estado + z_exag.
         """
         try:
             st = state or self.state
@@ -9593,13 +9598,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if ba is None:
                 return
 
-            main_actor = st.get("main_actor", None) or st.get("bg_actor", None)
-            if main_actor is None or not hasattr(main_actor, "GetBounds"):
+            z_scale = float(st.get("z_exag", 1.0))
+
+            if st.get("bounds_follow_slices", True):
+                raw = st.get("slice_bounds_raw")
+            else:
+                raw = st.get("grid_bounds_raw")
+
+            if raw is None:
+                g = st.get("current_grid_source", None)
+                if g is not None:
+                    raw = g.bounds
+
+            if raw is None:
                 return
 
-            newb = main_actor.GetBounds()
-            if not newb or len(newb) != 6:
-                return
+            xmin, xmax, ymin, ymax, zmin, zmax = raw
+            newb = (xmin, xmax, ymin, ymax, zmin * z_scale, zmax * z_scale)
 
             oldb = st.get("_last_axes_bounds", None)
             if oldb is None:
@@ -9607,13 +9622,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 st["_last_axes_bounds"] = tuple(newb)
                 return
 
-            # decide se mudou "o suficiente"
             changed = False
             for i in range(6):
                 a = float(oldb[i])
                 b = float(newb[i])
-                span = max(abs(a), abs(b), 1.0)
-                if abs(a - b) > max(abs_tol, rel_tol * span):
+                diff = abs(a - b)
+                scale = max(abs(a), abs(b), 1.0)
+
+                if diff > abs_tol and (diff / scale) > rel_tol:
                     changed = True
                     break
 
