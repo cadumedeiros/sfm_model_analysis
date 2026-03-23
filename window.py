@@ -550,7 +550,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wells = {}
         
         self.facies_colors = load_facies_colors() # Sua função
-        self.markers_db = load_markers("assets/wellMarkers_daniel.txt")
+        self.markers_db = load_markers("assets/wellMarkers_mixed.txt")
         
         # Criação do Colormap
         self.pv_cmap = None
@@ -1904,15 +1904,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         col_real = None
-        if "fac" in well.data.columns:
-            col_real = "fac"
-        elif "lito_upscaled" in well.data.columns:
-            col_real = "lito_upscaled"
+        for cand in ("fac", "FACIES", "FAC", "lito_upscaled", "LITO_UPSCALED", "fac_dion", "FAC_DION", "lito", "LITO"):
+            if cand in well.data.columns:
+                col_real = cand
+                break
 
-        full_real = well.data[col_real].to_numpy(dtype=float) if col_real is not None else np.zeros_like(full_depth, dtype=float)
+        full_real = (
+            well.data[col_real].to_numpy(dtype=float)
+            if col_real is not None
+            else np.zeros_like(full_depth, dtype=float)
+        )
 
         real_depth0 = full_depth
         real_facies0 = full_real
+        well_logs_report = well.data.copy()
 
         if markers:
             mds = sorted([m.get("md") for m in markers if m.get("md") is not None])
@@ -1924,6 +1929,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if np.any(mask_r):
                         real_depth0 = full_depth[mask_r]
                         real_facies0 = full_real[mask_r]
+                        well_logs_report = well.data.loc[mask_r].copy()
 
         # --- BASE e SIM por coluna (i,j) ---
         xy = self._pick_reference_xy_for_well_report(well, markers)
@@ -1951,7 +1957,7 @@ class MainWindow(QtWidgets.QMainWindow):
         base_depth, base_facies, _ = self._column_profile_from_grid(
             base_grid, xref, yref, facies_override=base_facies_raw
         )
-# --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
+        # --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
         try:
             txt = self.cmb_debug_win.currentText()
             w_size = int(txt.split("x")[0])
@@ -1997,8 +2003,10 @@ class MainWindow(QtWidgets.QMainWindow):
             real_depth=real_depth, real_fac=real_facies,
             base_depth=base_depth, base_fac=base_facies,
             sim_depth=sim_depth, sim_fac=sim_facies,
-            best_depth=best_depth, best_fac=best_facies, # Dados do melhor
-            window_size_str=f"{w_size}x{w_size}"         # Info visual
+            best_depth=best_depth, best_fac=best_facies,
+            window_size_str=f"{w_size}x{w_size}",
+            well_logs_df=well_logs_report,
+            real_log_col=col_real,
         )
 
         report_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
@@ -6502,11 +6510,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _open_matplotlib_report(
-            self, well_name, sim_model_name, 
-            real_depth, real_fac, base_depth, 
-            base_fac, sim_depth, sim_fac, 
-            best_depth=None, best_fac=None, 
-            window_size_str="1x1"):
+            self, well_name, sim_model_name,
+            real_depth, real_fac, base_depth,
+            base_fac, sim_depth, sim_fac,
+            best_depth=None, best_fac=None,
+            window_size_str="1x1",
+            well_logs_df=None,
+            real_log_col=None):
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.patches import Rectangle
@@ -7718,6 +7728,251 @@ class MainWindow(QtWidgets.QMainWindow):
         # canvas5 = FigureCanvas(fig5)
         # l5.addWidget(canvas5)
         # tabs.addTab(tab5, "Best Match")
+
+        # =================================================================
+        # ABA 5: CURVAS LAS (lado a lado + escala horizontal/vertical)
+        # =================================================================
+        if well_logs_df is not None and not well_logs_df.empty and "DEPT" in well_logs_df.columns:
+            import pandas as pd
+            import matplotlib.pyplot as plt
+
+            tab5 = QtWidgets.QWidget()
+            l5 = QtWidgets.QVBoxLayout(tab5)
+            l5.setContentsMargins(6, 6, 6, 6)
+            l5.setSpacing(6)
+
+            # -------------------------------------------------
+            # CONTROLES
+            # -------------------------------------------------
+            controls = QtWidgets.QHBoxLayout()
+            controls.setContentsMargins(0, 0, 0, 0)
+
+            lbl_x = QtWidgets.QLabel("Escala horizontal:")
+            spin_x = QtWidgets.QDoubleSpinBox()
+            spin_x.setRange(0.5, 5.0)
+            spin_x.setSingleStep(0.25)
+            spin_x.setDecimals(2)
+            spin_x.setValue(1.0)
+
+            lbl_y = QtWidgets.QLabel("Escala vertical:")
+            spin_y = QtWidgets.QDoubleSpinBox()
+            spin_y.setRange(0.5, 6.0)
+            spin_y.setSingleStep(0.25)
+            spin_y.setDecimals(2)
+            spin_y.setValue(1.0)
+
+            btn_reset = QtWidgets.QPushButton("Reset")
+            btn_fit = QtWidgets.QPushButton("Ajustar")
+
+            controls.addWidget(lbl_x)
+            controls.addWidget(spin_x)
+            controls.addSpacing(16)
+            controls.addWidget(lbl_y)
+            controls.addWidget(spin_y)
+            controls.addSpacing(16)
+            controls.addWidget(btn_reset)
+            controls.addWidget(btn_fit)
+            controls.addStretch()
+
+            l5.addLayout(controls)
+
+            # -------------------------------------------------
+            # ÁREA COM SCROLL
+            # -------------------------------------------------
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(False)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+
+            container = QtWidgets.QWidget()
+            container_layout = QtWidgets.QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(0)
+
+            l5.addWidget(scroll)
+
+            render_state = {
+                "canvas": None,
+                "fig": None,
+            }
+
+            def _iter_las_curve_columns(df):
+                skip = {
+                    "DEPT", "X", "Y", "Z",
+                    "MD", "TVD", "DX", "DY", "AZIM", "INCL", "DLS"
+                }
+
+                cols = []
+                for c in df.columns:
+                    if c in skip:
+                        continue
+
+                    s = pd.to_numeric(df[c], errors="coerce")
+                    if s.notna().sum() < 2:
+                        continue
+
+                    cols.append(c)
+
+                return cols
+
+            def _is_discrete_curve(arr):
+                arr = np.asarray(arr, dtype=float)
+                arr = arr[np.isfinite(arr)]
+                if arr.size == 0:
+                    return False
+
+                unique_vals = np.unique(arr)
+                is_integer_like = np.all(np.abs(arr - np.round(arr)) < 1e-6)
+
+                return is_integer_like and unique_vals.size <= 25
+
+            def _curve_stats_text(arr):
+                arr = np.asarray(arr, dtype=float)
+                arr = arr[np.isfinite(arr)]
+                if arr.size == 0:
+                    return "Sem dados válidos"
+                return f"min={arr.min():.3g}   max={arr.max():.3g}"
+
+            def render_las_tracks():
+                # limpa canvas anterior
+                if render_state["canvas"] is not None:
+                    container_layout.removeWidget(render_state["canvas"])
+                    render_state["canvas"].setParent(None)
+                    render_state["canvas"].deleteLater()
+                    render_state["canvas"] = None
+
+                if render_state["fig"] is not None:
+                    plt.close(render_state["fig"])
+                    render_state["fig"] = None
+
+                curve_cols = _iter_las_curve_columns(well_logs_df)
+
+                if not curve_cols:
+                    lbl = QtWidgets.QLabel("Nenhuma curva LAS numérica válida encontrada.")
+                    lbl.setAlignment(QtCore.Qt.AlignCenter)
+                    container_layout.addWidget(lbl)
+                    container.resize(900, 300)
+                    scroll.setWidget(container)
+                    return
+
+                n_tracks = len(curve_cols)
+
+                # escalas controladas pelo usuário
+                sx = float(spin_x.value())
+                sy = float(spin_y.value())
+
+                # tamanho base
+                base_track_w = 2.2
+                base_fig_h = 8.8
+
+                track_w = base_track_w * sx
+                fig_w = max(8.0, n_tracks * track_w)
+                fig_h = base_fig_h * sy
+
+                fig, axs = plt.subplots(
+                    1, n_tracks,
+                    figsize=(fig_w, fig_h),
+                    sharey=True
+                )
+
+                if n_tracks == 1:
+                    axs = [axs]
+
+                depth_all = pd.to_numeric(
+                    well_logs_df["DEPT"], errors="coerce"
+                ).to_numpy(dtype=float)
+
+                y_min = np.nanmin(depth_all) if np.isfinite(depth_all).any() else 0.0
+                y_max = np.nanmax(depth_all) if np.isfinite(depth_all).any() else 1.0
+
+                for i, col in enumerate(curve_cols):
+                    ax = axs[i]
+
+                    d = pd.to_numeric(
+                        well_logs_df["DEPT"], errors="coerce"
+                    ).to_numpy(dtype=float)
+
+                    v = pd.to_numeric(
+                        well_logs_df[col], errors="coerce"
+                    ).to_numpy(dtype=float)
+
+                    mask = np.isfinite(d) & np.isfinite(v)
+
+                    if np.count_nonzero(mask) >= 2:
+                        d = d[mask]
+                        v = v[mask]
+
+                        if _is_discrete_curve(v):
+                            ax.step(v, d, where="post", linewidth=1.2)
+                            ax.plot(v, d, "|", markersize=6)
+                            uniq = np.unique(v)
+                            if uniq.size <= 12:
+                                ax.set_xticks(uniq)
+                        else:
+                            ax.plot(v, d, linewidth=1.2)
+
+                        ax.grid(True, linestyle="--", alpha=0.35)
+                        ax.margins(x=0.08)
+                    else:
+                        ax.text(
+                            0.5, 0.5, "Sem dados válidos",
+                            ha="center", va="center",
+                            transform=ax.transAxes
+                        )
+
+                    ax.set_ylim(y_max, y_min)  # profundidade crescente para baixo
+                    ax.set_xlabel(col, fontsize=9)
+
+                    title = col
+                    if col == real_log_col:
+                        title += "\n(Real)"
+                    else:
+                        title += f"\n{_curve_stats_text(v)}"
+                    ax.set_title(title, fontsize=9)
+
+                    if i == 0:
+                        ax.set_ylabel("MD (m)")
+                    else:
+                        ax.tick_params(axis="y", left=False, labelleft=False)
+
+                fig.tight_layout(w_pad=1.2)
+
+                canvas = FigureCanvas(fig)
+
+                # tamanho visual do widget no Qt
+                canvas_w = int(240 * n_tracks * sx)
+                canvas_h = int(820 * sy)
+
+                canvas.setMinimumSize(canvas_w, canvas_h)
+
+                container_layout.addWidget(canvas)
+                container.resize(canvas_w + 20, canvas_h + 20)
+                scroll.setWidget(container)
+
+                render_state["canvas"] = canvas
+                render_state["fig"] = fig
+
+            def reset_las_scales():
+                spin_x.setValue(1.0)
+                spin_y.setValue(1.0)
+
+            def fit_las_scales():
+                curve_cols = _iter_las_curve_columns(well_logs_df)
+                n_tracks = max(1, len(curve_cols))
+
+                # tenta deixar razoável dentro da janela
+                sx = min(1.25, max(0.65, 6.0 / n_tracks))
+                spin_x.setValue(sx)
+                spin_y.setValue(1.0)
+
+            spin_x.valueChanged.connect(lambda *_: render_las_tracks())
+            spin_y.valueChanged.connect(lambda *_: render_las_tracks())
+            btn_reset.clicked.connect(reset_las_scales)
+            btn_fit.clicked.connect(fit_las_scales)
+
+            render_las_tracks()
+
+            tabs.addTab(tab5, "Curvas LAS")
 
         return dialog
     
@@ -10056,17 +10311,51 @@ class MainWindow(QtWidgets.QMainWindow):
     # 3D Selection Mode + Inspector (Cell / Column)
     # ============================================================
 
-    def _install_3d_pick_filter(self):
-        """Instala um eventFilter Qt no widget do 3D para disparar picking quando pick_mode está ativo.
-
-        Isso é um fallback/solução robusta para casos em que o VTK AddObserver não recebe o evento
-        em QtInteractor embedado.
+    def _adjust_main_z_exag(self, wheel_delta):
         """
+        Ajusta o exagero vertical do 3D principal usando o mesmo controle
+        do Inspector (self.slicer_widget.spin_z).
+        """
+        try:
+            slicer = getattr(self, "slicer_widget", None)
+            if slicer is None:
+                return False
+
+            spin = getattr(slicer, "spin_z", None)
+            if spin is None:
+                return False
+
+            # 1 notch de wheel = 120
+            if wheel_delta == 0:
+                return False
+
+            steps = int(wheel_delta / 120)
+            if steps == 0:
+                steps = 1 if wheel_delta > 0 else -1
+
+            step_size = float(spin.singleStep()) if spin.singleStep() else 1.0
+            current = float(spin.value())
+
+            new_value = current + steps * step_size
+            new_value = max(float(spin.minimum()), min(float(spin.maximum()), new_value))
+
+            if abs(new_value - current) < 1e-9:
+                return False
+
+            # Isso já aciona todo o pipeline normal do seu app
+            spin.setValue(new_value)
+            return True
+
+        except Exception:
+            return False
+
+    def _install_3d_pick_filter(self):
         if getattr(self, "_pick_filter_installed", False):
             return
         self._pick_filter_installed = True
         self._pick_press_pos = None
         self._pick_dragging = False
+        self._mid_button_down_3d = False
 
         targets = []
         try:
@@ -10085,6 +10374,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 t.installEventFilter(self)
             except Exception:
                 pass
+            
     def _qt_trigger_pick(self, widget, pos):
             """Converte coordenadas Qt (origem topo-esq) -> VTK/RenderWindow (origem base-esq) e dispara o pick.
 
@@ -10213,6 +10503,29 @@ class MainWindow(QtWidgets.QMainWindow):
             is_target = False
 
         if is_target:
+            et = event.type()
+
+            # =========================================================
+            # BOTÃO DO MEIO + WHEEL = EXAGERO VERTICAL DO 3D PRINCIPAL
+            # Funciona mesmo fora do modo cell/column
+            # =========================================================
+            if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.MiddleButton:
+                self._mid_button_down_3d = True
+                return False  # deixa o VTK continuar recebendo o evento, se quiser
+
+            elif et == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.MiddleButton:
+                self._mid_button_down_3d = False
+                return False
+
+            elif et == QtCore.QEvent.Wheel and getattr(self, "_mid_button_down_3d", False):
+                try:
+                    delta = event.angleDelta().y()
+                except Exception:
+                    delta = 0
+
+                if self._adjust_main_z_exag(delta):
+                    return True
+
             try:
                 mode = self.state.get("pick_mode", None)
             except Exception:

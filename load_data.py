@@ -24,7 +24,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/EN_ALL-UpScaled_BaseOriginal.grdecl"
+DEFAULT_GRDECL_PATH = "grids/Mixed_BaseModel_20out25-HyperTuningBaseModel_SIM_BaseModel_.grdecl"
 
 
 FLIP_K_DEFAULT = True
