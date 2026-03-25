@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from typing import Tuple
+import os
 
 import numpy as np
 import pyvista as pv
@@ -24,7 +25,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/Mixed_BaseModel_20out25-HyperTuningBaseModel_SIM_BaseModel_.grdecl"
+DEFAULT_GRDECL_PATH = "grids/EN_ALL-UpScaled_BaseOriginal.grdecl"
 
 
 FLIP_K_DEFAULT = True
@@ -315,6 +316,11 @@ def load_grid_from_grdecl(
         if verbose:
             print(f"[WARN] Falha ao normalizar espessura: {e}")
 
+    try:
+        g.field_data["__cell_dims__"] = np.array([int(nx_), int(ny_), int(nz_)], dtype=int)
+    except Exception:
+        pass
+
     return g, fac_1d
 
 
@@ -331,13 +337,54 @@ def load_facies_from_grdecl(
     return fac_1d, nx_, ny_, nz_
 
 
+
+
+# =========================
+# Runtime / startup helpers
+# =========================
+
+def make_placeholder_grid(nx_: int = 1, ny_: int = 1, nz_: int = 1):
+    """Cria um grid mínimo para permitir o app iniciar sem modelo base."""
+    img = pv.ImageData(dimensions=(int(nx_) + 1, int(ny_) + 1, int(nz_) + 1))
+    img.spacing = (1.0, 1.0, 1.0)
+    g = img.cast_to_unstructured_grid()
+    fac = np.zeros(g.n_cells, dtype=int)
+    g.cell_data["Facies"] = fac
+    g.cell_data["StratigraphicThickness"] = np.zeros(g.n_cells, dtype=float)
+    g.cell_data["cell_thickness"] = np.zeros(g.n_cells, dtype=float)
+    g.field_data["__cell_dims__"] = np.array([int(nx_), int(ny_), int(nz_)], dtype=int)
+    return g, fac, int(nx_), int(ny_), int(nz_)
+
+
+def set_runtime_globals(g, f, nx_, ny_, nz_):
+    """Atualiza os globais legacy usados pelo restante do projeto."""
+    global grid, facies, nx, ny, nz
+    grid = g
+    facies = f
+    nx, ny, nz = int(nx_), int(ny_), int(nz_)
+
+
+def get_runtime_dims():
+    return int(nx), int(ny), int(nz)
+
 # =========================
 # Backward-compatible globals
 # =========================
 
 def _init_default_globals():
-    g, f = load_grid_from_grdecl(DEFAULT_GRDECL_PATH, flip_k=FLIP_K_DEFAULT, verbose=VERBOSE_DEFAULT)
-    nx_, ny_, nz_ = read_specgrid(DEFAULT_GRDECL_PATH)
-    return g, f, nx_, ny_, nz_
+    start_empty = os.environ.get("SFM_START_EMPTY", "0") == "1"
+
+    if start_empty:
+        return make_placeholder_grid(1, 1, 1)
+
+    if not os.path.exists(DEFAULT_GRDECL_PATH):
+        return make_placeholder_grid(1, 1, 1)
+
+    try:
+        g, f = load_grid_from_grdecl(DEFAULT_GRDECL_PATH, flip_k=FLIP_K_DEFAULT, verbose=VERBOSE_DEFAULT)
+        nx_, ny_, nz_ = read_specgrid(DEFAULT_GRDECL_PATH)
+        return g, f, nx_, ny_, nz_
+    except Exception:
+        return make_placeholder_grid(1, 1, 1)
 
 grid, facies, nx, ny, nz = _init_default_globals()

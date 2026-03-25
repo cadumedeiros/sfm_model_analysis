@@ -13,6 +13,7 @@ from matplotlib.colors import ListedColormap
 from visualize import run, get_2d_clim
 from load_data import facies, nx, ny, nz
 from config import load_facies_colors, load_facies_reference, load_markers
+from session import AppSession, ModelEntry, ModelStore
 
 from analysis import (
     facies_distribution_array,
@@ -104,6 +105,27 @@ class GridSlicerWidget(QtWidgets.QGroupBox):
             if mode == "min": widgets['spin_min'].setValue(val); widgets['slider_min'].setValue(val)
             else: widgets['spin_max'].setValue(val); widgets['slider_max'].setValue(val)
         self.is_updating = False
+
+    def reconfigure(self, nx, ny, nz, current_z=None):
+        """Atualiza ranges dos slicers quando o grid base muda."""
+        self.is_updating = True
+        try:
+            for axis, limit in (("i", int(nx)), ("j", int(ny)), ("k", int(nz))):
+                limit = max(1, int(limit))
+                widgets = getattr(self, f"{axis}_widgets")
+                widgets['spin_min'].setRange(0, limit - 1)
+                widgets['slider_min'].setRange(0, limit - 1)
+                widgets['spin_max'].setRange(0, limit - 1)
+                widgets['slider_max'].setRange(0, limit - 1)
+                widgets['spin_min'].setValue(0)
+                widgets['slider_min'].setValue(0)
+                widgets['spin_max'].setValue(limit - 1)
+                widgets['slider_max'].setValue(limit - 1)
+            if current_z is not None:
+                self.spin_z.setValue(float(current_z))
+                self.slider_z.setValue(int(float(current_z)))
+        finally:
+            self.is_updating = False
 
 # --- HELPER FUNCTIONS ---
 def make_facies_table():
@@ -460,175 +482,284 @@ class ProportionPropsDialog(QtWidgets.QDialog):
 
 class MainWindow(QtWidgets.QMainWindow):
 
-    # ------------------------------------------------------------------
-    # Compat: open_compare_dialog (some builds call this from the menu)
-    # ------------------------------------------------------------------
-    def open_compare_dialog(self):
-        """Abrir diálogo para carregar modelos adicionais (comparação)."""
-        # Prefer an existing dedicated dialog if present
-        fn = getattr(self, "open_compare_models_dialog", None)
-        if callable(fn):
-            return fn()
+    # ==========================================================
+    # Compatibilidade: o resto do código antigo ainda usa
+    # self.models / self.wells / self.markers_db etc.
+    # O dado real agora mora em self.session.
+    # ==========================================================
+    @property
+    def models(self):
+        return self.session.models
 
-        # Fallback: file picker + load_compare_model if available
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
-        )
-        if not paths:
-            return
+    @models.setter
+    def models(self, value):
+        store = ModelStore()
+        store.update(value or {})
+        self.session.models = store
 
-        study_name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Novo Estudo",
-            "Nome do Estudo / Grupo de Calibração:",
-            text="Importação Recente",
-        )
-        if not ok or not study_name.strip():
-            study_name = "Importação Recente"
+    @property
+    def wells(self):
+        return self.session.wells
 
-        loader = getattr(self, "load_compare_model", None)
-        if not callable(loader):
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Função indisponível",
-                "load_compare_model não está disponível nesta versão do window.py.",
-            )
-            return
+    @wells.setter
+    def wells(self, value):
+        self.session.wells = dict(value or {})
 
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+    @property
+    def facies_reference(self):
+        return self.session.facies_reference
+
+    @facies_reference.setter
+    def facies_reference(self, value):
+        self.session.facies_reference = list(value or [])
+
+    @property
+    def facies_colors_dict(self):
+        return self.session.facies_colors_dict
+
+    @facies_colors_dict.setter
+    def facies_colors_dict(self, value):
+        self.session.facies_colors_dict = dict(value or {})
+
+    @property
+    def facies_colors(self):
+        return self.session.facies_colors
+
+    @facies_colors.setter
+    def facies_colors(self, value):
+        self.session.facies_colors = dict(value or {})
+
+    @property
+    def markers_db(self):
+        return self.session.markers_db
+
+    @markers_db.setter
+    def markers_db(self, value):
+        self.session.markers_db = dict(value or {})
+
+    @property
+    def cached_metrics(self):
+        return self.session.cached_metrics
+
+    @cached_metrics.setter
+    def cached_metrics(self, value):
+        self.session.cached_metrics = dict(value or {})
+
+    @property
+    def compare_states(self):
+        return self.session.compare_states
+
+    @compare_states.setter
+    def compare_states(self, value):
+        self.session.compare_states = dict(value or {})
+
+    @property
+    def facies_grouping_map(self):
+        return self.session.facies_grouping_map
+
+    @facies_grouping_map.setter
+    def facies_grouping_map(self, value):
+        self.session.facies_grouping_map = dict(value or {})
+
+    @property
+    def use_facies_grouping(self):
+        return self.session.use_facies_grouping
+
+    @use_facies_grouping.setter
+    def use_facies_grouping(self, value):
+        self.session.use_facies_grouping = bool(value)
+
+    @property
+    def _fg_src(self):
+        return self.session._fg_src
+
+    @_fg_src.setter
+    def _fg_src(self, value):
+        self.session._fg_src = value
+
+    @property
+    def _fg_dst(self):
+        return self.session._fg_dst
+
+    @_fg_dst.setter
+    def _fg_dst(self, value):
+        self.session._fg_dst = value
+
+    @property
+    def state_reservoir_raw(self):
+        return self.session.state_reservoir_raw
+
+    @state_reservoir_raw.setter
+    def state_reservoir_raw(self, value):
+        self.session.state_reservoir_raw = set(value or set())
+
+    @property
+    def state_reservoir_grouped(self):
+        return self.session.state_reservoir_grouped
+
+    @state_reservoir_grouped.setter
+    def state_reservoir_grouped(self, value):
+        self.session.state_reservoir_grouped = set(value or set())
+
+    @property
+    def base_model_key(self):
+        return self.session.base_model_key
+
+    @base_model_key.setter
+    def base_model_key(self, value):
+        self.session.base_model_key = value
+
+    @property
+    def active_model_key(self):
+        return self.session.active_model_key
+
+    @active_model_key.setter
+    def active_model_key(self, value):
+        self.session.active_model_key = value
+
+    # ==========================================================
+    # Helpers novos: acesso explícito aos modelos da sessão
+    # ==========================================================
+    def get_model_entry(self, model_key):
+        if model_key is None:
+            return None
+        return self.session.get_model(str(model_key))
+
+    def require_model_entry(self, model_key):
+        entry = self.get_model_entry(model_key)
+        if entry is None:
+            raise KeyError(f"Modelo não encontrado: {model_key}")
+        return entry
+
+    def has_model(self, model_key):
+        return self.get_model_entry(model_key) is not None
+
+    def has_base_model(self):
+        return self.has_model(self.base_model_key or "base")
+
+    def get_model_name(self, model_key, fallback=None):
+        entry = self.get_model_entry(model_key)
+        if entry is None:
+            return fallback if fallback is not None else str(model_key)
+        return entry.name or (fallback if fallback is not None else str(model_key))
+
+    def iter_model_keys(self, *, include_compare_placeholder=True):
+        for mk in self.models.keys():
+            if not include_compare_placeholder and str(mk) == "compare":
+                continue
+            entry = self.get_model_entry(mk)
+            if entry is None:
+                continue
+            if not include_compare_placeholder and entry.facies is None and entry.grid is None:
+                continue
+            yield mk
+
+    def iter_model_entries(self, *, include_compare_placeholder=True):
+        for mk in self.iter_model_keys(include_compare_placeholder=include_compare_placeholder):
+            entry = self.get_model_entry(mk)
+            if entry is not None:
+                yield mk, entry
+
+    def _get_model_dims(self, entry):
+        if entry is None:
+            return None
+        grid_source = entry.grid
+        if grid_source is not None:
+            dims = self._infer_grid_cell_dims(grid_source)
+            if dims is not None:
+                return dims
+        fac = entry.facies
+        if fac is None:
+            return None
         try:
-            for path in paths:
-                loader(path, study_name=study_name)
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+            from load_data import nx as lnx, ny as lny, nz as lnz
+            if int(lnx) * int(lny) * int(lnz) == int(np.asarray(fac).size):
+                return int(lnx), int(lny), int(lnz)
+        except Exception:
+            pass
+        return None
 
-    def __init__(self, mode="facies", z_exag=1.0, show_scalar_bar=True, reservoir_facies=None):
+    def _current_base_dims(self):
+        entry = self.get_model_entry(self.base_model_key or "base")
+        return self._get_model_dims(entry)
+
+    # ------------------------------------------------------------------
+    # Fluxos de projeto / sessão
+    # ------------------------------------------------------------------
+    def __init__(self, mode="facies", z_exag=1.0, show_scalar_bar=True, reservoir_facies=None, start_empty=True, initial_base_path=None):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
 
         if reservoir_facies is None:
             reservoir_facies = {0}
 
-        self.current_mode = mode
-
-        self.open_reports = []
-        
-        # --- 1. DADOS E ESTADO INICIAL ---
         if isinstance(reservoir_facies, (int, np.integer)):
             initial_reservoir = {int(reservoir_facies)}
         else:
             initial_reservoir = {int(f) for f in reservoir_facies}
 
-        self.models = {
-            "base": {"name": "Modelo Base", "facies": facies, "reservoir_facies": set(initial_reservoir)},
-            "compare": {"name": None, "facies": None, "reservoir_facies": set()},
-        }
+        self.current_mode = mode
+        self.open_reports = []
+        self.session = AppSession()
+        self._startup_empty = bool(start_empty)
+        self._base_visual_initialized = False
 
-        # --- Agrupamento de fácies (configuração) ---
-        # Baseado no color_reference_facies.txt (lista global de fácies e cores),
-        # e não no conteúdo de um modelo específico.
-        try:
-            self.facies_reference = load_facies_reference()
-        except Exception:
-            self.facies_reference = []
-        self.facies_colors_dict = load_facies_colors()
-        self.facies_grouping_map = {int(f): int(f) for f, _ in (self.facies_reference or [])}
-        self.use_facies_grouping = False
-        self._fg_src = np.array(sorted(self.facies_grouping_map.keys()), dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
-        self._fg_dst = np.array([self.facies_grouping_map[k] for k in self._fg_src], dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
-
-        # Mantém seleções de reservatório em raw e agrupado, para alternar sem perder intenção.
-        self.state_reservoir_raw = set(initial_reservoir)
-        self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
-        
-        # Cache de métricas (inclui dataframe da tabela detalhada)
-        self.cached_metrics = {
-            "base": {"metrics": None, "perc": None, "df": None},
-            "compare": {"metrics": None, "perc": None, "df": None}
-        }
-
+        # -------- sessão / estado de projeto --------
+        self.models = {}
         self.wells = {}
-        
-        self.facies_colors = load_facies_colors() # Sua função
-        self.markers_db = load_markers("assets/wellMarkers_mixed.txt")
-        
-        # Criação do Colormap
+        self.facies_reference = []
+        self.facies_colors_dict = {}
+        self.facies_colors = {}
+        self.markers_db = {}
+        self.facies_grouping_map = {}
+        self.use_facies_grouping = False
+        self._fg_src = np.array([], dtype=np.int32)
+        self._fg_dst = np.array([], dtype=np.int32)
+        self.state_reservoir_raw = set(initial_reservoir)
+        self.state_reservoir_grouped = set(initial_reservoir)
+        self.cached_metrics = {}
+        self.compare_states = {"base": {}, "compare": {}}
+        self.base_model_key = None
+        self.active_model_key = None
+        self.session.color_reference_path = None
+        self.session.markers_path = None
+
+        # -------- visual --------
         self.pv_cmap = None
         self.clim = None
-        if self.facies_colors:
-            # Ordena IDs: 11, 12, 13...
-            ids = sorted(self.facies_colors.keys())
-            colors = [self.facies_colors[i] for i in ids]
-            
-            # Colormap DISCRETO
-            self.pv_cmap = ListedColormap(colors)
-            # Limites exatos para forçar o PyVista a não interpolar errado
-            # Ex: se vai de 11 a 22, clim=[11, 22]
-            self.clim = [ids[0], ids[-1]]
-
-        self.state = {"reservoir_facies": set(initial_reservoir), "mode": mode, "reservoir_facies_raw": set(initial_reservoir), "reservoir_facies_grouped": set(initial_reservoir)}
-        self.compare_states = {"base": {}, "compare": {}}
-        # Inicializa conjuntos raw/agrupado (por enquanto identidade)
-        self.state["reservoir_facies_raw"] = set(self.state_reservoir_raw)
-        self.state_reservoir_grouped = {int(self.facies_grouping_map.get(int(x), int(x))) for x in self.state_reservoir_raw}
-        self.state["reservoir_facies_grouped"] = set(self.state_reservoir_grouped)
-        self.state["reservoir_facies"] = set(self.state_reservoir_raw)
-        self.state["current_facies_raw"] = np.asarray(facies).ravel().astype(np.int32)
-
-        self.state["lock_axes_bounds"] = True
-
-        self.base_facies_stats, self.base_total_cells = facies_distribution_array(facies)
+        self.base_facies_stats = {}
+        self.base_total_cells = 0
         self.compare_path = None
         self.compare_facies = None
         self.compare_metrics = None
-        
-        # --- 2. CONSTRUÇÃO DA INTERFACE ---
+
+        self.state = {
+            "reservoir_facies": set(initial_reservoir),
+            "mode": mode,
+            "reservoir_facies_raw": set(initial_reservoir),
+            "reservoir_facies_grouped": set(initial_reservoir),
+            "current_facies_raw": np.asarray(facies).ravel().astype(np.int32),
+        }
+        self.state["lock_axes_bounds"] = True
+
+        # UI sempre abre; em start_empty o visualizador fica "em branco" até carregar o base
         self.setup_ui(nx, ny, nz)
-        
-        # --- 3. INICIALIZAÇÃO PYVISTA (3D) ---
-        _, self.state = run(
-            mode=mode,
-            z_exag=z_exag,
-            show_scalar_bar=show_scalar_bar,
-            external_plotter=self.plotter,
-            external_state=self.state,
-        )
-        
-        self.state["on_slice_changed"] = self.on_plotter_slice_changed
+        self.init_tree_context_menu()
+        self.rebuild_project_tree_from_session()
 
-        # --- 3D Selection (Cell/Column) ---
-        # visualize.run instala um picker VTK que dispara state["on_cell_picked"]
-        # quando pick_mode está ativo.
-        self.state["on_cell_picked"] = self._on_3d_pick
-        # callback simples para feedback na status bar (opcional)
-        try:
-            self.state['status_callback'] = lambda msg, ms=4000: self.statusBar().showMessage(str(msg), int(ms))
-        except Exception:
-            pass
-        self.state.setdefault("pick_mode", None)
-
-        # instala filtro Qt para capturar clique (robusto em QtInteractor embedado)
-        try:
-            self._install_3d_pick_filter()
-        except Exception:
-            pass
-        
-        self._map2d_hover_targets = {}
-        self._last_2d_hover_msg = ""
-        
-        # --- 4. CONFIGURAÇÃO FINAL ---
-        self.update_2d_map()
-        self.populate_facies_legend()
-        # self.fill_unified_facies_table()
-        
-        # Calcula métricas iniciais para o modelo base
-        self.change_reservoir_facies(initial_reservoir)
-
-        # Seleciona o primeiro item da árvore (Base) para inicializar a UI lateral
-        top_item = self.project_tree.topLevelItem(0)
-        if top_item: 
-            top_item.setExpanded(True)
-            self.project_tree.setCurrentItem(top_item)
+        if self._startup_empty:
+            self._initialize_empty_visualization(z_exag=z_exag, show_scalar_bar=show_scalar_bar)
+        else:
+            try:
+                self.load_color_reference_from_path(None)
+            except Exception:
+                pass
+            try:
+                self.load_markers_from_path(os.path.join(os.path.dirname(__file__), "assets", "wellMarkers_daniel.txt"))
+            except Exception:
+                pass
+            if initial_base_path:
+                self.load_base_model_from_path(initial_base_path, make_active=True)
 
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -637,7 +768,458 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    
+    # ------------------------------------------------------------------
+    # Inicialização / sincronização de módulos legacy
+    # ------------------------------------------------------------------
+    def _show_plotter_placeholder(self, plotter, message):
+        if plotter is None:
+            return
+        try:
+            plotter.clear()
+        except Exception:
+            pass
+        try:
+            plotter.set_background("white")
+        except Exception:
+            pass
+        try:
+            plotter.add_text(str(message), position="upper_left", font_size=12, color="black")
+        except Exception:
+            pass
+        try:
+            plotter.render()
+        except Exception:
+            pass
+
+    def _initialize_empty_visualization(self, z_exag=1.0, show_scalar_bar=False):
+        self.state["z_exag"] = float(z_exag)
+        self.state["show_scalar_bar"] = bool(show_scalar_bar)
+        self.state["current_grid_source"] = None
+        self.state["current_facies"] = None
+        self.state["active_model_key"] = None
+
+        self._show_plotter_placeholder(self.plotter, "Nenhum modelo base carregado.\nUse Arquivo → Carregar Modelo Base...")
+        self._show_plotter_placeholder(self.plotter_2d, "Carregue um modelo base para habilitar os mapas 2D.")
+        try:
+            self.central_metrics_text.setPlainText("Nenhum modelo base carregado.")
+        except Exception:
+            pass
+        try:
+            self.sidebar_metrics_text.setPlainText("Nenhum modelo base carregado.")
+        except Exception:
+            pass
+        try:
+            self.facies_table.clear()
+            self.facies_table.setRowCount(0)
+            self.facies_table.setColumnCount(0)
+        except Exception:
+            pass
+
+    def _sync_runtime_modules_from_base(self, grid_source, facies_array, dims):
+        import load_data, visualize, analysis, local_windows
+
+        nx_, ny_, nz_ = (int(dims[0]), int(dims[1]), int(dims[2]))
+        load_data.set_runtime_globals(grid_source, facies_array, nx_, ny_, nz_)
+
+        for mod in (visualize, analysis, local_windows):
+            try:
+                mod.grid = grid_source
+            except Exception:
+                pass
+            try:
+                mod.global_grid = grid_source
+            except Exception:
+                pass
+            try:
+                mod.facies = facies_array
+            except Exception:
+                pass
+            try:
+                mod.nx, mod.ny, mod.nz = nx_, ny_, nz_
+            except Exception:
+                pass
+
+        try:
+            visualize.FACIES_COLORS = dict(self.facies_colors_dict or {})
+        except Exception:
+            pass
+
+    def _apply_facies_color_reference(self):
+        self.facies_colors = dict(self.facies_colors_dict or {})
+        self.pv_cmap = None
+        self.clim = None
+        if self.facies_colors:
+            try:
+                ids = sorted(self.facies_colors.keys())
+                colors = [self.facies_colors[i] for i in ids]
+                self.pv_cmap = ListedColormap(colors)
+                self.clim = [ids[0], ids[-1]] if ids else None
+            except Exception:
+                self.pv_cmap = None
+                self.clim = None
+
+        try:
+            import visualize
+            visualize.FACIES_COLORS = dict(self.facies_colors_dict or {})
+        except Exception:
+            pass
+
+    def _reconfigure_all_slicers(self, dims):
+        if not dims:
+            return
+        nx_, ny_, nz_ = [int(v) for v in dims]
+        current_z = float(self.state.get("z_exag", 1.0) or 1.0)
+        for attr in ("slicer_widget", "comp_slicer", "uncert_slicer"):
+            widget = getattr(self, attr, None)
+            if widget is not None and hasattr(widget, "reconfigure"):
+                try:
+                    widget.reconfigure(nx_, ny_, nz_, current_z=current_z)
+                except Exception:
+                    pass
+
+    def _on_base_model_loaded(self, entry, *, make_active=True):
+        if entry is None or entry.facies is None:
+            return
+        dims = self._get_model_dims(entry)
+        if dims is None:
+            QtWidgets.QMessageBox.warning(self, "Modelo Base", "Não foi possível inferir as dimensões do grid base.")
+            return
+
+        self._sync_runtime_modules_from_base(entry.grid, entry.facies, dims)
+        self._reconfigure_all_slicers(dims)
+
+        self.base_model_key = "base"
+        if make_active or not self.active_model_key:
+            self.active_model_key = "base"
+        self.state["active_model_key"] = self.active_model_key
+
+        self.state["current_grid_source"] = entry.grid
+        self.state["current_facies"] = entry.facies
+        self.state["current_facies_raw"] = np.asarray(entry.facies).ravel().astype(np.int32)
+
+        try:
+            self.base_facies_stats, self.base_total_cells = facies_distribution_array(entry.facies, target_grid=entry.grid)
+        except Exception:
+            self.base_facies_stats, self.base_total_cells = {}, 0
+
+        self.rebuild_project_tree_from_session()
+
+        _, self.state = run(
+            mode=self.state.get("mode", self.current_mode),
+            z_exag=float(self.state.get("z_exag", 1.0) or 1.0),
+            show_scalar_bar=bool(self.state.get("show_scalar_bar", False)),
+            external_plotter=self.plotter,
+            external_state=self.state,
+            target_grid=entry.grid,
+            target_facies=entry.facies,
+        )
+        self._base_visual_initialized = True
+        self.state["on_slice_changed"] = self.on_plotter_slice_changed
+        self.state["on_cell_picked"] = self._on_3d_pick
+        try:
+            self.state['status_callback'] = lambda msg, ms=4000: self.statusBar().showMessage(str(msg), int(ms))
+        except Exception:
+            pass
+        self.state.setdefault("pick_mode", None)
+        try:
+            self._install_3d_pick_filter()
+        except Exception:
+            pass
+
+        try:
+            self.update_2d_map()
+        except Exception:
+            self._show_plotter_placeholder(self.plotter_2d, "Falha ao atualizar mapa 2D.")
+
+        try:
+            self.populate_facies_legend()
+        except Exception:
+            pass
+
+        try:
+            self.change_reservoir_facies(self.state_reservoir_raw or self.state.get("reservoir_facies", set()))
+        except Exception:
+            pass
+
+        try:
+            top_item = self.project_tree.topLevelItem(0)
+            if top_item:
+                top_item.setExpanded(True)
+                self.project_tree.setCurrentItem(top_item)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Recursos carregáveis pela UI
+    # ------------------------------------------------------------------
+    def load_base_model_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar Modelo Base", "grids", "GRDECL (*.grdecl)")
+        if path:
+            self.load_base_model_from_path(path, make_active=True)
+
+    def load_base_model_from_path(self, grdecl_path, *, make_active=True):
+        from load_data import load_grid_from_grdecl
+
+        try:
+            grid_base, fac_base = load_grid_from_grdecl(grdecl_path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Modelo Base", f"Erro ao carregar modelo base:\n{e}")
+            return False
+
+        model_name = os.path.basename(grdecl_path)
+        rf = set(int(x) for x in (self.state_reservoir_raw or self.state.get("reservoir_facies", {0})))
+        self.models["base"] = {
+            "name": model_name,
+            "facies": fac_base,
+            "grid": grid_base,
+            "reservoir_facies": set(rf),
+            "path": grdecl_path,
+            "study": None,
+        }
+        self.base_model_key = "base"
+        self.session.models["base"].path = grdecl_path
+
+        self.cached_metrics["base"] = {"metrics": None, "perc": None, "df": None}
+        self._on_base_model_loaded(self.get_model_entry("base"), make_active=make_active)
+        return True
+
+    def clear_base_model(self):
+        if self.has_model("base"):
+            self.session.remove_model("base")
+        self.base_model_key = None
+        self.active_model_key = None
+        self.state["active_model_key"] = None
+        self.cached_metrics.pop("base", None)
+        self.compare_states["base"] = {}
+        self.state["current_grid_source"] = None
+        self.state["current_facies"] = None
+        self.state["current_facies_raw"] = np.zeros(1, dtype=np.int32)
+        self.rebuild_project_tree_from_session()
+        self._initialize_empty_visualization(z_exag=float(self.state.get("z_exag", 1.0) or 1.0), show_scalar_bar=bool(self.state.get("show_scalar_bar", False)))
+
+    def set_model_as_base(self, model_key):
+        if not model_key or str(model_key) == "base":
+            return
+        entry = self.get_model_entry(model_key)
+        if entry is None:
+            return
+
+        self.models["base"] = {
+            "name": entry.name or str(model_key),
+            "facies": entry.facies,
+            "grid": entry.grid,
+            "reservoir_facies": set(entry.reservoir_facies or set()),
+            "path": entry.path,
+            "study": None,
+            **dict(entry.extra or {}),
+        }
+        self.base_model_key = "base"
+        self._on_base_model_loaded(self.get_model_entry("base"), make_active=True)
+
+    def select_loaded_model_as_base_dialog(self):
+        choices = []
+        for mk, entry in self.iter_model_entries(include_compare_placeholder=False):
+            if mk == "base":
+                continue
+            if entry is None or entry.facies is None or entry.grid is None:
+                continue
+            choices.append((mk, entry.name or str(mk)))
+
+        if not choices:
+            QtWidgets.QMessageBox.information(self, "Tornar Base", "Nenhum modelo carregado disponível para virar base.")
+            return
+
+        labels = [label for _, label in choices]
+        selected, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Tornar Modelo Base",
+            "Escolha o modelo que será promovido a base:",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not selected:
+            return
+
+        model_key = None
+        for mk, label in choices:
+            if label == selected:
+                model_key = mk
+                break
+
+        if model_key is not None:
+            self.set_model_as_base(model_key)
+
+    def load_color_reference_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar Color Reference", "assets", "Text Files (*.txt);;All Files (*)")
+        if path:
+            self.load_color_reference_from_path(path)
+
+    def load_color_reference_from_path(self, path=None):
+        try:
+            self.session.color_reference_path = path
+            self.facies_reference = load_facies_reference(path)
+            self.facies_colors_dict = load_facies_colors(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Color Reference", f"Erro ao carregar color reference:\n{e}")
+            return False
+
+        self.facies_grouping_map = {int(f): int(f) for f, _ in (self.facies_reference or []) if isinstance(f, (int, np.integer))}
+        self.use_facies_grouping = False
+        self._fg_src = np.array(sorted(self.facies_grouping_map.keys()), dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
+        self._fg_dst = np.array([self.facies_grouping_map[k] for k in self._fg_src], dtype=np.int32) if self.facies_grouping_map else np.array([], dtype=np.int32)
+        self._apply_facies_color_reference()
+        try:
+            self.populate_facies_legend()
+        except Exception:
+            pass
+        return True
+
+    def clear_color_reference(self):
+        self.session.color_reference_path = None
+        self.facies_reference = []
+        self.facies_colors_dict = {}
+        self.facies_grouping_map = {}
+        self.use_facies_grouping = False
+        self._fg_src = np.array([], dtype=np.int32)
+        self._fg_dst = np.array([], dtype=np.int32)
+        self._apply_facies_color_reference()
+        try:
+            self.populate_facies_legend()
+        except Exception:
+            pass
+
+    def load_markers_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar Well Markers", "assets", "Text Files (*.txt);;All Files (*)")
+        if path:
+            self.load_markers_from_path(path)
+
+    def load_markers_from_path(self, path):
+        try:
+            self.session.markers_path = path
+            self.markers_db = load_markers(path) if path else {}
+            return True
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Well Markers", f"Erro ao carregar markers:\n{e}")
+            return False
+
+    def clear_markers(self):
+        self.session.markers_path = None
+        self.markers_db = {}
+
+    # ------------------------------------------------------------------
+    # Organização / remoção de itens da sessão
+    # ------------------------------------------------------------------
+    def rebuild_project_tree_from_session(self):
+        if not hasattr(self, "project_tree"):
+            return
+
+        self.project_tree.clear()
+
+        if self.has_model("base"):
+            self.add_model_to_tree("base", self.get_model_name("base", fallback="Modelo Base"))
+
+        self.wells_root_item = QtWidgets.QTreeWidgetItem(self.project_tree, ["Poços"])
+        self.wells_root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        self.wells_root_item.setData(0, QtCore.Qt.UserRole, "wells_root")
+        self.wells_root_item.setExpanded(True)
+        self.wells_root_item.setFlags(self.wells_root_item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+        self.wells_root_item.setCheckState(0, QtCore.Qt.Checked)
+
+        for mk, entry in self.iter_model_entries(include_compare_placeholder=False):
+            if mk == "base":
+                continue
+            if entry.facies is None and entry.grid is None:
+                continue
+            self.add_model_to_tree(mk, entry.name or str(mk), study_name=entry.study)
+
+        for well_name in sorted(self.wells.keys()):
+            w_item = QtWidgets.QTreeWidgetItem(self.wells_root_item, [str(well_name)])
+            w_item.setData(0, QtCore.Qt.UserRole, "well_item")
+            w_item.setData(0, QtCore.Qt.UserRole + 1, well_name)
+            w_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight))
+            w_item.setFlags(w_item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            w_item.setCheckState(0, QtCore.Qt.Checked)
+
+    def remove_model_by_key(self, model_key):
+        key = str(model_key)
+        if key == "base":
+            self.clear_base_model()
+            return
+        self.session.remove_model(key)
+        self.cached_metrics.pop(key, None)
+        if self.active_model_key == key:
+            self.active_model_key = self.base_model_key
+            self.state["active_model_key"] = self.active_model_key
+        self.rebuild_project_tree_from_session()
+        try:
+            self.refresh_comparison_active_view()
+        except Exception:
+            pass
+
+    def remove_well_by_name(self, well_name):
+        self.wells.pop(str(well_name), None)
+        self.rebuild_project_tree_from_session()
+        try:
+            self.update_wells_3d()
+        except Exception:
+            pass
+
+    def remove_study_by_name(self, study_name):
+        to_remove = []
+        for mk, entry in self.iter_model_entries(include_compare_placeholder=False):
+            if mk == "base":
+                continue
+            if (entry.study or "Geral") == str(study_name):
+                to_remove.append(mk)
+        for mk in to_remove:
+            self.session.remove_model(mk)
+            self.cached_metrics.pop(mk, None)
+        self.rebuild_project_tree_from_session()
+        try:
+            self.refresh_comparison_active_view()
+        except Exception:
+            pass
+
+    def delete_selected_tree_items(self):
+        items = list(self.project_tree.selectedItems()) if hasattr(self, "project_tree") else []
+        if not items:
+            return
+
+        removed_wells = set()
+        removed_models = set()
+        removed_studies = set()
+        removed_base = False
+
+        for item in items:
+            role = item.data(0, QtCore.Qt.UserRole)
+            if role == "well_item":
+                removed_wells.add(item.data(0, QtCore.Qt.UserRole + 1))
+            elif role == "model_root":
+                mk = item.data(0, QtCore.Qt.UserRole + 1)
+                if mk == "base":
+                    removed_base = True
+                else:
+                    removed_models.add(mk)
+            elif role == "study_folder":
+                removed_studies.add(item.text(0))
+
+        for wn in removed_wells:
+            self.wells.pop(str(wn), None)
+        for mk in removed_models:
+            self.session.remove_model(str(mk))
+            self.cached_metrics.pop(str(mk), None)
+        for study_name in removed_studies:
+            self.remove_study_by_name(study_name)
+        if removed_base:
+            self.clear_base_model()
+        else:
+            self.rebuild_project_tree_from_session()
+            try:
+                self.update_wells_3d()
+            except Exception:
+                pass
+
     def open_selected_well_reports(self):
         from PyQt5 import QtCore
 
@@ -655,13 +1237,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     selected_model_key = mk
                     break
 
-        # 2) fallback: último modelo “ativo”
+        # 2) fallback: último modelo ativo da sessão
         if not selected_model_key:
-            selected_model_key = self.state.get("active_model_key", "base")
+            selected_model_key = self.active_model_key or self.state.get("active_model_key") or self.base_model_key or "base"
 
-        # ✅ sanitize: se por algum motivo vier lixo (ex: nome de poço), cai pro base
-        if selected_model_key not in self.models:
-            selected_model_key = "base"
+        # sanitize: se vier algo inválido, cai para o base lógico
+        if not self.has_model(selected_model_key):
+            selected_model_key = self.base_model_key or "base"
+
+        if not self.has_model(selected_model_key):
+            QtWidgets.QMessageBox.information(self, "Relatórios de Poço", "Carregue um modelo base antes de abrir relatórios.")
+            return
 
         # 3) pega poços selecionados
         well_names = []
@@ -680,17 +1266,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.showMaximized()
 
         menubar = self.menuBar()
+        menubar.setVisible(False)
 
         # --- Arquivo ---
         file_menu = menubar.addMenu("Arquivo")
 
+        action_load_base = QtWidgets.QAction("Carregar Modelo Base...", self)
+        action_load_base.triggered.connect(self.load_base_model_dialog)
+
         action_load = QtWidgets.QAction("Carregar Modelo Adicional...", self)
         action_load.triggered.connect(self.open_compare_dialog)
+
+        action_load_color_ref = QtWidgets.QAction("Carregar Color Reference...", self)
+        action_load_color_ref.triggered.connect(self.load_color_reference_dialog)
+
+        action_clear_color_ref = QtWidgets.QAction("Remover Color Reference", self)
+        action_clear_color_ref.triggered.connect(self.clear_color_reference)
+
+        action_load_markers = QtWidgets.QAction("Carregar Well Markers...", self)
+        action_load_markers.triggered.connect(self.load_markers_dialog)
+
+        action_clear_markers = QtWidgets.QAction("Remover Well Markers", self)
+        action_clear_markers.triggered.connect(self.clear_markers)
 
         action_load_well = QtWidgets.QAction("Carregar Poço (.las + .dev)...", self)
         action_load_well.triggered.connect(self.load_well_dialog)
 
+        file_menu.addAction(action_load_base)
         file_menu.addAction(action_load)
+        file_menu.addSeparator()
+        file_menu.addAction(action_load_color_ref)
+        file_menu.addAction(action_clear_color_ref)
+        file_menu.addAction(action_load_markers)
+        file_menu.addAction(action_clear_markers)
+        file_menu.addSeparator()
         file_menu.addAction(action_load_well)
         file_menu.addSeparator()
 
@@ -1103,23 +1712,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_uncert_model_list(self):
         """Atualiza a lista de modelos disponíveis na aba Incerteza."""
         self.lst_uncert_models.clear()
-        
+
         # Base
-        if "base" in self.models:
-            it = QtWidgets.QListWidgetItem("Modelo Base")
+        if self.has_model("base"):
+            it = QtWidgets.QListWidgetItem(self.get_model_name("base", fallback="Modelo Base"))
             it.setData(QtCore.Qt.UserRole, "base")
             it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Checked)
             self.lst_uncert_models.addItem(it)
-            
-        # Outros (Ignora 'base' e 'compare')
-        for k, v in self.models.items():
-            if k == "base": continue
-            if k == "compare": continue  # <--- CORREÇÃO: Ignora o placeholder de comparação
-            
-            # Garante que tem nome
-            name = v.get("name", str(k))
-            if not name: continue 
+
+        # Outros
+        for k, entry in self.iter_model_entries(include_compare_placeholder=False):
+            if k == "base":
+                continue
+
+            name = entry.name or str(k)
+            if not name:
+                continue
 
             it = QtWidgets.QListWidgetItem(name)
             it.setData(QtCore.Qt.UserRole, k)
@@ -1141,7 +1750,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 it = self.lst_uncert_models.item(i)
                 if it.checkState() == QtCore.Qt.Checked:
                     selected_keys.append(it.data(QtCore.Qt.UserRole))
-        
+
         if not selected_keys:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Selecione modelos na lista.")
             return
@@ -1149,46 +1758,39 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2. Pega Arrays
         arrays = []
         for k in selected_keys:
-            if k in self.models:
-                arr = self.models[k].get("facies")
-                if arr is not None: arrays.append(arr)
+            entry = self.get_model_entry(k)
+            if entry is not None and entry.facies is not None:
+                arrays.append(entry.facies)
 
-        if not arrays: return
+        if not arrays:
+            return
 
         # 3. Prepara Grid
-        base_model = self.models.get("base", {})
-        grid_template = base_model.get("grid") or global_grid
+        base_entry = self.get_model_entry("base")
+        grid_template = (base_entry.grid if base_entry is not None else None) or global_grid
         vis_grid = grid_template.copy(deep=True)
 
         # 4. Cálculos Matemáticos
         n_models = len(arrays)
-        
-        # Calcula mapa de entropia
         result_map = compute_facies_entropy_map(arrays, target_grid=vis_grid)
-        
-        # Estatísticas para o Diagnóstico
+
         max_real = float(np.max(result_map)) if len(result_map) > 0 else 0.0
         max_theo = float(np.log(n_models)) if n_models > 1 else 0.0
-        
-        # --- ATUALIZAÇÃO DOS TEXTOS NA TELA ---
+
         if hasattr(self, "lbl_uncert_n"):
             self.lbl_uncert_n.setText(f"Modelos (N): {n_models}")
             self.lbl_uncert_max_theo.setText(f"Máx. Teórico: {max_theo:.3f}")
             self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {max_real:.3f}")
-            
-            # Muda cor do texto se estiver crítico
+
             if max_theo > 0 and max_real > (0.85 * max_theo):
                 self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: red; font-size: 13px;")
             else:
                 self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: green; font-size: 13px;")
 
-        # 5. Configuração Visual
         scalar_name = "Uncertainty"
         vis_grid.cell_data[scalar_name] = result_map
-        
-        # Escala Absoluta ou Relativa?
+
         use_abs = self.chk_abs_scale.isChecked() if hasattr(self, "chk_abs_scale") else False
-        
         if use_abs:
             clim = (0.0, max_theo if max_theo > 0 else 0.1)
         else:
@@ -1196,43 +1798,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
         uncert_state = {
             "mode": "scalar",
+            "thickness_mode": self.state.get("thickness_mode", "Espessura total da coluna"),
+            "show_scalar_bar": True,
             "current_scalar_name": scalar_name,
-            "current_scalar_title": f"Entropia (N={n_models})",
-            "current_scalar_clim": clim,
-            "current_scalar_cmap": "jet",
-            "z_exag": float(self.state.get("z_exag", 15.0)),
-            "show_scalar_bar": True
+            "current_scalar_title": "Entropia",
+            "current_scalar_cmap": "viridis",
+            "clim": clim,
         }
 
-        # 6. Renderizar
-        self.uncert_plotter.clear()
-        
-        _, final_state = run(
+        if hasattr(self, "plotter_uncert") and self.plotter_uncert is not None:
+            try:
+                self.plotter_uncert.clear()
+            except Exception:
+                pass
+
+        run(
             mode="scalar",
-            z_exag=uncert_state["z_exag"],
+            z_exag=float(self.state.get("z_exag", 15.0)),
             show_scalar_bar=True,
-            external_plotter=self.uncert_plotter,
+            external_plotter=self.plotter_uncert,
             external_state=uncert_state,
             target_grid=vis_grid,
-            target_facies=None
+            target_facies=None,
         )
-        
-        # Salva estado para o Slicer funcionar
-        self.uncert_view_state = final_state
-        
-        # Limpa barras antigas (Correção QtInteractor)
-        if hasattr(self.uncert_plotter, 'scalar_bars'):
-             keys = list(self.uncert_plotter.scalar_bars.keys())
-             for k in keys:
-                 self.uncert_plotter.remove_scalar_bar(k)
-        
-        # Adiciona nova barra
-        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
-        if mapper:
-            mapper.SetScalarRange(clim)
-            self.uncert_plotter.add_scalar_bar(title=uncert_state["current_scalar_title"], mapper=mapper, fmt="%.2f", title_font_size=14, label_font_size=12)
-
-        self.uncert_plotter.reset_camera()
 
     def _copy_table_to_clipboard(self, table_widget):
         """Copia o conteúdo de uma QTableWidget para o clipboard (formato CSV/Excel)."""
@@ -1871,19 +2459,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if not well or well.data is None or well.data.empty:
             return
 
-        from load_data import grid as base_grid, facies as base_facies_global
-        if base_grid is None:
+        if not self.has_base_model():
             QtWidgets.QMessageBox.warning(self, "Aviso", "Grid BASE não carregado.")
             return
 
+        from load_data import grid as base_grid, facies as base_facies_global
+
         # --- resolve grid SIM (modelo selecionado) ---
+        sim_entry = self.get_model_entry(model_key)
+
         if model_key == "base":
             grid_sim_source = base_grid
-            sim_model_name = self.models.get("base", {}).get("name", "Base")
+            sim_model_name = self.get_model_name("base", fallback="Base")
         else:
-            model_data = self.models.get(model_key, {})
-            grid_sim_source = model_data.get("grid", None)
-            sim_model_name = model_data.get("name", str(model_key))
+            if sim_entry is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Aviso",
+                    f"Modelo '{model_key}' não encontrado."
+                )
+                return
+
+            grid_sim_source = sim_entry.grid
+            sim_model_name = sim_entry.name or str(model_key)
 
             if grid_sim_source is None:
                 QtWidgets.QMessageBox.warning(
@@ -1909,15 +2507,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 col_real = cand
                 break
 
-        full_real = (
-            well.data[col_real].to_numpy(dtype=float)
-            if col_real is not None
-            else np.zeros_like(full_depth, dtype=float)
-        )
+        full_real = well.data[col_real].to_numpy(dtype=float) if col_real is not None else np.zeros_like(full_depth, dtype=float)
 
         real_depth0 = full_depth
         real_facies0 = full_real
-        well_logs_report = well.data.copy()
 
         if markers:
             mds = sorted([m.get("md") for m in markers if m.get("md") is not None])
@@ -1929,15 +2522,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     if np.any(mask_r):
                         real_depth0 = full_depth[mask_r]
                         real_facies0 = full_real[mask_r]
-                        well_logs_report = well.data.loc[mask_r].copy()
 
-        # --- BASE e SIM por coluna (i,j) ---
         xy = self._pick_reference_xy_for_well_report(well, markers)
         if xy is None:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Não consegui obter (X,Y) do poço para comparação.")
             return
 
-        xref, yref = xy        # Base (sempre 1x1 no local) - usa facies RAW do BASE para não ser contaminado pela facies do modelo ativo
+        xref, yref = xy
+
         base_facies_raw = None
         try:
             if base_grid is not None and hasattr(base_grid, "cell_data"):
@@ -1957,20 +2549,19 @@ class MainWindow(QtWidgets.QMainWindow):
         base_depth, base_facies, _ = self._column_profile_from_grid(
             base_grid, xref, yref, facies_override=base_facies_raw
         )
-        # --- NOVO: Pega o tamanho da janela da Ribbon (View -> Inspeção) ---
+
         try:
             txt = self.cmb_debug_win.currentText()
             w_size = int(txt.split("x")[0])
-        except:
+        except Exception:
             w_size = 1
 
-        # 1. Simulado Original (1x1 no local exato - usado na Correlação Padrão)
         sim_depth, sim_facies, _, i_orig, j_orig, _ = self._best_profile_score_in_window(
             grid_sim_source,
             xref, yref,
             real_depth=real_depth0,
             real_fac=np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int),
-            window_size=1, # Força 1x1
+            window_size=1,
             n_bins=200,
             w_strat=0.7,
             w_thick=0.3,
@@ -1978,13 +2569,12 @@ class MainWindow(QtWidgets.QMainWindow):
             use_kappa=True,
         )
 
-        # 2. Simulado Melhor (Na Janela selecionada - usado no Ranking Detail)
         best_depth, best_facies, _, i_best, j_best, fit_best = self._best_profile_score_in_window(
             grid_sim_source,
             xref, yref,
             real_depth=real_depth0,
             real_fac=np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int),
-            window_size=w_size, # Usa a janela da UI
+            window_size=w_size,
             n_bins=200,
             w_strat=0.7,
             w_thick=0.3,
@@ -1992,11 +2582,9 @@ class MainWindow(QtWidgets.QMainWindow):
             use_kappa=True,
         )
 
-        # REAL: não deixar NaN virar lixo
         real_depth = real_depth0
         real_facies = np.where(np.isfinite(real_facies0), real_facies0, 0.0).astype(int)
 
-        # --- Cria dialog ---
         report_dialog = self._open_matplotlib_report(
             well_name=well_name,
             sim_model_name=sim_model_name,
@@ -2004,9 +2592,7 @@ class MainWindow(QtWidgets.QMainWindow):
             base_depth=base_depth, base_fac=base_facies,
             sim_depth=sim_depth, sim_fac=sim_facies,
             best_depth=best_depth, best_fac=best_facies,
-            window_size_str=f"{w_size}x{w_size}",
-            well_logs_df=well_logs_report,
-            real_log_col=col_real,
+            window_size_str=f"{w_size}x{w_size}"
         )
 
         report_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
@@ -2022,7 +2608,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         report_dialog.destroyed.connect(_cleanup)
 
-
     def setup_comparison_3d_view(self, container):
         """Prepara o container para receber o grid dinâmico."""
         layout = QtWidgets.QVBoxLayout(container)
@@ -2035,13 +2620,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setup_toolbar_controls(self):
         """
-        Cria o Ribbon simplificado com a nova estrutura solicitada.
+        Cria a Ribbon simplificada com ações principais visíveis na aba Home.
         """
-        # Remove toolbar antiga
         for tb in self.findChildren(QtWidgets.QToolBar):
             self.removeToolBar(tb)
 
-        # ---------- helpers ----------
         def make_tool_btn(text, icon, *, checkable=False):
             btn = QtWidgets.QToolButton()
             btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
@@ -2050,6 +2633,7 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setText(text)
             btn.setAutoRaise(True)
             btn.setCheckable(checkable)
+            btn.setMinimumWidth(82)
             btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             return btn
 
@@ -2078,7 +2662,6 @@ class MainWindow(QtWidgets.QMainWindow):
             lay.setSpacing(10)
             return w, lay
 
-        # ---------- widget principal ----------
         self.ribbon_tabs = QtWidgets.QTabWidget()
         self.ribbon_tabs.setDocumentMode(True)
         self.ribbon_tabs.setMovable(False)
@@ -2102,34 +2685,61 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Dados
         g_dados, g_dados_row = make_group("Dados")
-        btn_modelo = make_tool_btn("Modelo", self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
-        btn_modelo.clicked.connect(self.open_compare_dialog)
-        btn_pocos = make_tool_btn("Poços", self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-        btn_pocos.clicked.connect(self.load_well_dialog)
-        g_dados_row.addWidget(btn_modelo)
-        g_dados_row.addWidget(btn_pocos)
+        style = self.style()
+        btn_base = make_tool_btn("Modelo Base", style.standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
+        btn_base.clicked.connect(self.load_base_model_dialog)
+
+        btn_compare = make_tool_btn("Modelos Comp.", style.standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        btn_compare.clicked.connect(self.open_compare_dialog)
+
+        btn_make_base = make_tool_btn("Tornar Base", style.standardIcon(QtWidgets.QStyle.SP_ArrowUp))
+        btn_make_base.clicked.connect(self.select_loaded_model_as_base_dialog)
+
+        btn_clear_base = make_tool_btn("Remover Base", style.standardIcon(QtWidgets.QStyle.SP_TrashIcon))
+        btn_clear_base.clicked.connect(self.clear_base_model)
+
+        btn_colors = make_tool_btn("Cores", style.standardIcon(QtWidgets.QStyle.SP_DriveFDIcon))
+        btn_colors.clicked.connect(self.load_color_reference_dialog)
+
+        btn_markers = make_tool_btn("Marcadores", style.standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
+        btn_markers.clicked.connect(self.load_markers_dialog)
+
+        btn_clear_colors = make_tool_btn("Limpar Cores", style.standardIcon(QtWidgets.QStyle.SP_DialogResetButton))
+        btn_clear_colors.clicked.connect(self.clear_color_reference)
+
+        btn_clear_markers = make_tool_btn("Limpar Marc.", style.standardIcon(QtWidgets.QStyle.SP_DialogDiscardButton))
+        btn_clear_markers.clicked.connect(self.clear_markers)
+
+        btn_wells = make_tool_btn("Poços", style.standardIcon(QtWidgets.QStyle.SP_DirIcon))
+        btn_wells.clicked.connect(self.load_well_dialog)
+
+        for b in [btn_base, btn_compare, btn_make_base, btn_clear_base, btn_colors, btn_markers, btn_clear_colors, btn_clear_markers, btn_wells]:
+            g_dados_row.addWidget(b)
 
         # Perspectiva
         g_persp, g_persp_row = make_group("Perspectiva")
-        self.act_persp_viz.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
-        self.act_persp_comp.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        
+        self.act_persp_viz.setIcon(style.standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
+        self.act_persp_comp.setIcon(style.standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+
         btn_viz = QtWidgets.QToolButton(); btn_viz.setDefaultAction(self.act_persp_viz)
         btn_viz.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); btn_viz.setIconSize(QtCore.QSize(28, 28)); btn_viz.setAutoRaise(True)
-        
+
         btn_comp = QtWidgets.QToolButton(); btn_comp.setDefaultAction(self.act_persp_comp)
         btn_comp.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); btn_comp.setIconSize(QtCore.QSize(28, 28)); btn_comp.setAutoRaise(True)
-        
+
         g_persp_row.addWidget(btn_viz)
         g_persp_row.addWidget(btn_comp)
 
         # Ferramentas
         g_tools, g_tools_row = make_group("Ferramentas")
-        btn_snap = make_tool_btn("Snapshot", self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
+        btn_snap = make_tool_btn("Snapshot", style.standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         btn_snap.clicked.connect(self.take_snapshot)
         g_tools_row.addWidget(btn_snap)
 
-        home_lay.addWidget(g_dados); home_lay.addWidget(g_persp); home_lay.addWidget(g_tools); home_lay.addStretch(1)
+        home_lay.addWidget(g_dados)
+        home_lay.addWidget(g_persp)
+        home_lay.addWidget(g_tools)
+        home_lay.addStretch(1)
         self.ribbon_tabs.addTab(tab_home, "Home")
 
         # ==================== ABA VIEW ====================
@@ -2137,12 +2747,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Vista
         g_vista, g_vista_row = make_group("Vista")
-        
-        ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
-        ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
-        icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
-        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp)
-        icouncert = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxQuestion) # Ícone Incerteza
+
+        ico3d = style.standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+        ico2d = style.standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
+        icomet = style.standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
+        icorank = style.standardIcon(QtWidgets.QStyle.SP_ArrowUp)
+        icouncert = style.standardIcon(QtWidgets.QStyle.SP_MessageBoxQuestion)
 
         self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self); self.act_view_3d.setCheckable(True)
         self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self); self.act_view_2d.setCheckable(True)
@@ -2155,17 +2765,15 @@ class MainWindow(QtWidgets.QMainWindow):
         grp.addAction(self.act_view_2d)
         grp.addAction(self.act_view_metrics)
         grp.addAction(self.act_view_ranking)
-        grp.addAction(self.act_view_uncert) # Add ao grupo
+        grp.addAction(self.act_view_uncert)
         self.act_view_3d.setChecked(True)
 
-        # Conecta aos métodos
         self.act_view_3d.triggered.connect(self.show_main_3d_view)
         self.act_view_2d.triggered.connect(self.show_map2d_view)
         self.act_view_metrics.triggered.connect(self.show_metrics_view)
         self.act_view_ranking.triggered.connect(self.show_ranking_view)
-        self.act_view_uncert.triggered.connect(self.show_uncertainty_view) # Novo Slot
+        self.act_view_uncert.triggered.connect(self.show_uncertainty_view)
 
-        # Botões
         def mk_tbtn(act):
             b = QtWidgets.QToolButton(); b.setDefaultAction(act)
             b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
@@ -2175,8 +2783,6 @@ class MainWindow(QtWidgets.QMainWindow):
         g_vista_row.addWidget(mk_tbtn(self.act_view_3d))
         g_vista_row.addWidget(mk_tbtn(self.act_view_2d))
         g_vista_row.addWidget(mk_tbtn(self.act_view_metrics))
-        ## RANKING COMENTADO
-        # g_vista_row.addWidget(mk_tbtn(self.act_view_ranking))
         g_vista_row.addWidget(mk_tbtn(self.act_view_uncert))
 
         # Modo
@@ -2184,179 +2790,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mode = QtWidgets.QToolButton(self)
         self.btn_mode.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_mode.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        self.btn_mode.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
+        self.btn_mode.setIcon(style.standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
         self.btn_mode.setIconSize(QtCore.QSize(28, 28))
         self.btn_mode.setAutoRaise(True)
-        
-        menu_mode = QtWidgets.QMenu(self.btn_mode)
-        
-        # --- CORREÇÃO: Conecta o sinal no MENU, não no botão ---
-        menu_mode.aboutToShow.connect(self.populate_mode_menu)
 
-        # Lista inicial (idêntica ao seu código original para garantir que inicie correto)
-        modes = [
-            ("Fácies (Global)", "facies"), 
-            ("Seletor de Fácies", "reservoir"), 
-            ("Clusters (conectividade)", "clusters"), 
-            ("Maior Cluster", "largest"), 
-            ("Métricas Por Coluna", "thickness_local"),
-            ("Entropia (Incerteza)", "entropy")
-        ]
-        
-        for text, data in modes:
-            action = menu_mode.addAction(text)
-            action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
+        menu_mode = QtWidgets.QMenu(self.btn_mode)
+        menu_mode.aboutToShow.connect(self.populate_mode_menu)
         self.btn_mode.setMenu(menu_mode)
-        self._update_mode_btn("Fácies", "facies")
+        self.btn_mode.setText("Modo")
         g_modo_row.addWidget(self.btn_mode)
 
-        # Espessura
-        g_esp, g_esp_row = make_group("Métricas por Coluna")
-        self.btn_thick = QtWidgets.QToolButton(self)
-        self.btn_thick.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        self.btn_thick.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        self.btn_thick.setIconSize(QtCore.QSize(28, 28))
-        self.btn_thick.setAutoRaise(True)
-        
-        menu_thick = QtWidgets.QMenu(self.btn_thick)
-        thickness_opts = [
-            "Espessura total da coluna",
-            "Espessura",
-            "Proporção de fácies (coluna)",
-            "Proporção de fácies (envelope)",
-            "Maior pacote",
-            "Nº pacotes",
-            "ICV",
-            "Qv",
-            "Qv absoluto",
-        ]
-        for label in thickness_opts:
-            action = menu_thick.addAction(label)
-            action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
-        self.btn_thick.setMenu(menu_thick)
-        self._update_thick_btn("Espessura total da coluna")
-        g_esp_row.addWidget(self.btn_thick)
-
-        # --- NOVO GRUPO: ESTILO (CORES) ---
-        g_style, g_style_row = make_group("Estilo")
-        
-        # Label pequena
-        lbl_cmap = QtWidgets.QLabel("Paleta:")
-        
-        # ComboBox com as opções
-        self.cmb_colormap = QtWidgets.QComboBox()
-        self.cmb_colormap.setToolTip("Altera a escala de cores para propriedades contínuas (Espessura, Porosidade, etc).")
-        self.cmb_colormap.setIconSize(QtCore.QSize(80, 14))
-        self.cmb_colormap.setFixedWidth(92)
-        self._init_colormap_combo(
-            ["jet", "viridis", "magma", "cividis", "turbo", "plasma", "seismic", "coolwarm"],
-            default_name="jet"
-        )
-        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
-        
-        # Adiciona ao layout do grupo
-        v_box_style = QtWidgets.QVBoxLayout()
-        v_box_style.setSpacing(0)
-        v_box_style.setContentsMargins(0,0,0,0)
-        v_box_style.addWidget(lbl_cmap)
-        v_box_style.addWidget(self.cmb_colormap)
-        
-        g_style_row.addLayout(v_box_style)
-
-        # Inspeção de Poços
-        g_wells, g_wells_row = make_group("Inspeção")
-        
-        # Combo Janela
-        self.cmb_debug_win = QtWidgets.QComboBox()
-        self.cmb_debug_win.addItems(["1x1", "3x3", "5x5", "7x7", "9x9"])
-        self.cmb_debug_win.setCurrentIndex(1) # Default 3x3
-        self.cmb_debug_win.setToolTip("Tamanho da Janela de Busca")
-        self.cmb_debug_win.setFixedWidth(60)
-        
-        # Botão Toggle
-        self.btn_debug_all = make_tool_btn("Destacar\nTodos", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView), checkable=True)
-        self.btn_debug_all.clicked.connect(self.toggle_global_well_debug)
-        
-        # Conecta mudança do combo para atualizar em tempo real:
-        # 1. Se "Destacar Todos" estiver ligado (3D).
-        # 2. Se a visualização atual for "Ranking" (Recalcula tabela).
-        self.cmb_debug_win.currentIndexChanged.connect(self._on_global_window_size_changed)
-
-        # Layout vertical para o combo
-        v_box_combo = QtWidgets.QVBoxLayout()
-        v_box_combo.setSpacing(0)
-        v_box_combo.setContentsMargins(0, 0, 0, 0)
-        v_box_combo.addWidget(QtWidgets.QLabel("Janela:"))
-        v_box_combo.addWidget(self.cmb_debug_win)
-        
-        g_wells_row.addLayout(v_box_combo)
-        g_wells_row.addWidget(self.btn_debug_all)
-
-        # ==================== SELEÇÃO 3D (Célula / Coluna) ====================
-        # Ative um modo de seleção para clicar no grid 3D e inspecionar.
-        try:
-            sep_sel = QtWidgets.QFrame()
-            sep_sel.setFrameShape(QtWidgets.QFrame.VLine)
-            sep_sel.setFrameShadow(QtWidgets.QFrame.Sunken)
-            sep_sel.setFixedWidth(1)
-            g_wells_row.addWidget(sep_sel)
-        except Exception:
-            pass
-
-        self.btn_pick_cell = make_tool_btn(
-            "Selecionar\nCélula",
-            self.style().standardIcon(QtWidgets.QStyle.SP_DialogYesButton),
-            checkable=True,
-        )
-        self.btn_pick_cell.setToolTip("Ativa modo de seleção de CÉLULA no 3D (clique em uma célula).")
-
-        self.btn_pick_column = make_tool_btn(
-            "Selecionar\nColuna",
-            self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp),
-            checkable=True,
-        )
-        self.btn_pick_column.setToolTip("Ativa modo de seleção de COLUNA (I,J) no 3D (clique em uma célula da coluna).")
-
-        self.btn_pick_clear = make_tool_btn(
-            "Limpar\nSeleção",
-            self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton),
-            checkable=False,
-        )
-        self.btn_pick_clear.setToolTip("Remove o destaque e limpa o inspector.")
-
-        self.btn_pick_cell.clicked.connect(lambda checked: self.set_pick_mode("cell" if checked else None))
-        self.btn_pick_column.clicked.connect(lambda checked: self.set_pick_mode("column" if checked else None))
-        self.btn_pick_clear.clicked.connect(self.clear_pick_selection)
-
-        g_wells_row.addWidget(self.btn_pick_cell)
-        g_wells_row.addWidget(self.btn_pick_column)
-        g_wells_row.addWidget(self.btn_pick_clear)
-
-
-        # --- GRUPO RELATÓRIOS (Movido para View) ---
-        g_rep, g_rep_row = make_group("Relatórios")
-        
-        btn_rep_open = make_tool_btn("Abrir\nRelatório", self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
-        btn_rep_open.clicked.connect(self.open_reports_dialog)
-        
-        btn_rep_selected = make_tool_btn("Poços\nSelecionados", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
-        btn_rep_selected.clicked.connect(self.open_selected_well_reports)
-        
-        g_rep_row.addWidget(btn_rep_open)
-        g_rep_row.addWidget(btn_rep_selected)
-        
-        # Janelas
-        g_windows, g_windows_row = make_group("Janelas")
-        self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
-        self.btn_toggle_props = make_tool_btn("Inspector", self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon), checkable=True)
-        self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
-        g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
-
-        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp); view_lay.addWidget(g_style);
-        view_lay.addWidget(g_wells); view_lay.addWidget(g_rep); view_lay.addWidget(g_windows) # Inserido g_rep
+        view_lay.addWidget(g_vista)
+        view_lay.addWidget(g_modo)
         view_lay.addStretch(1)
-        
         self.ribbon_tabs.addTab(tab_view, "View")
 
 
@@ -3241,13 +3687,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         self.dock_map2d_summary.hide()
 
-        # Modelos (top-level) + Poços (top-level)
-        self.add_model_to_tree("base", "Modelo Base")
-
-        self.wells_root_item = QtWidgets.QTreeWidgetItem(self.project_tree, ["Poços"])
-        self.wells_root_item.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-        self.wells_root_item.setData(0, QtCore.Qt.UserRole, "wells_root")
-        self.wells_root_item.setExpanded(True)
+        # Árvore de projeto será reconstruída a partir da sessão.
+        self.wells_root_item = None
 
         # --- DOCK INSPECTOR - DIREITA ---
         self.dock_props = QtWidgets.QDockWidget("Inspector", self)
@@ -3455,10 +3896,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if role == "well_item":
             well_name = data
 
-            model_key = self.state.get("active_model_key", "base")
-            # ✅ sanitize
-            if model_key not in self.models:
-                model_key = "base"
+            model_key = self.active_model_key or self.state.get("active_model_key") or self.base_model_key or "base"
+            if not self.has_model(model_key):
+                model_key = self.base_model_key or "base"
+            if not self.has_model(model_key):
+                QtWidgets.QMessageBox.information(self, "Relatório do Poço", "Carregue um modelo base antes de abrir relatórios.")
+                return
 
             self.show_well_comparison_report(well_name, model_key)
             return
@@ -3471,39 +3914,47 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def switch_main_view_to_model(self, model_key):
         """
-        Troca o modelo ativo na vista principal SEM reconstruir o plotter (sem run()).
-        Mantém câmera/zoom e NÃO redesenha poços automaticamente.
+        Troca o modelo ativo na vista principal.
+        Se o visualizador base ainda não foi inicializado, ele faz a inicialização.
         """
         import numpy as np
-        from load_data import grid as base_grid, facies as base_facies
 
-        # --- pega grid/facies do modelo escolhido ---
-        if model_key in ("base", "Base", "Modelo Base"):
-            source_grid = base_grid
-            target_facies = base_facies
+        if not model_key:
+            if self.has_base_model():
+                model_key = "base"
+            else:
+                self._initialize_empty_visualization(z_exag=float(self.state.get("z_exag", 1.0) or 1.0), show_scalar_bar=bool(self.state.get("show_scalar_bar", False)))
+                return
+
+        entry = self.get_model_entry(model_key)
+        if entry is None:
+            if str(model_key) != "base":
+                print(f"[WARN] Modelo '{model_key}' não encontrado.")
+            return
+
+        if str(model_key) == "base":
+            source_grid = entry.grid
+            target_facies = entry.facies
             model_key_norm = "base"
         else:
-            model = self.models.get(model_key)
-            if not model:
-                print(f"[WARN] Modelo '{model_key}' não encontrado.")
-                return
-            source_grid = model.get("grid", None)
-            target_facies = model.get("facies", None)
-            model_key_norm = model_key
+            source_grid = entry.grid
+            target_facies = entry.facies
+            model_key_norm = str(model_key)
+            if source_grid is None or target_facies is None:
+                base_entry = self.get_model_entry("base")
+                if base_entry is not None:
+                    source_grid = source_grid or base_entry.grid
+                    target_facies = target_facies or base_entry.facies
 
-            if source_grid is None:
-                # fallback (evita crash)
-                source_grid = base_grid
-            if target_facies is None:
-                target_facies = base_facies
+        if source_grid is None or target_facies is None:
+            self._initialize_empty_visualization(z_exag=float(self.state.get("z_exag", 1.0) or 1.0), show_scalar_bar=bool(self.state.get("show_scalar_bar", False)))
+            return
 
-        # --- normaliza facies ---
         try:
             target_facies = np.asarray(target_facies).ravel().astype(np.int32)
         except Exception:
-            target_facies = np.asarray(base_facies).ravel().astype(np.int32)
+            return
 
-        # Guarda facies raw e aplica agrupamento (se ativo)
         target_facies_raw = target_facies
         if bool(getattr(self, 'use_facies_grouping', False)):
             try:
@@ -3513,10 +3964,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             target_facies = target_facies_raw
 
-        # --- preserva modo global ---
         desired_mode = self.state.get("mode", "facies")
-
-        # --- atualiza state ---
         self.active_model_key = model_key_norm
         self.state["active_model_key"] = model_key_norm
         self.state["current_grid_source"] = source_grid
@@ -3524,24 +3972,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["current_facies"] = target_facies
         self.state["mode"] = desired_mode
 
-        # garante Facies no grid atual (se possível)
         try:
-            try:
-                source_grid.cell_data["FaciesRaw"] = target_facies_raw
-            except Exception:
-                pass
+            source_grid.cell_data["FaciesRaw"] = target_facies_raw
+        except Exception:
+            pass
+        try:
             source_grid.cell_data["Facies"] = target_facies
         except Exception:
             pass
 
-        # --- atualiza campos derivados (reservatório/clusters/thickness) no grid atual ---
+        if str(model_key_norm) == "base":
+            dims = self._get_model_dims(entry)
+            if dims is not None:
+                self._sync_runtime_modules_from_base(source_grid, target_facies_raw, dims)
+                self._reconfigure_all_slicers(dims)
+
+        if not self._base_visual_initialized:
+            _, self.state = run(
+                mode=desired_mode,
+                z_exag=float(self.state.get("z_exag", 1.0) or 1.0),
+                show_scalar_bar=bool(self.state.get("show_scalar_bar", False)),
+                external_plotter=self.plotter,
+                external_state=self.state,
+                target_grid=source_grid,
+                target_facies=target_facies,
+            )
+            self._base_visual_initialized = True
+            self.state["on_slice_changed"] = self.on_plotter_slice_changed
+            self.state["on_cell_picked"] = self._on_3d_pick
+            try:
+                self.state['status_callback'] = lambda msg, ms=4000: self.statusBar().showMessage(str(msg), int(ms))
+            except Exception:
+                pass
+            self.state.setdefault("pick_mode", None)
+            try:
+                self._install_3d_pick_filter()
+            except Exception:
+                pass
+
         rf_raw = self.state.get("reservoir_facies", set()) or set()
         rf_set = set()
         for x in rf_raw:
             try:
                 rf_set.add(int(x))
             except Exception:
-                # caso raro de set aninhado
                 if isinstance(x, (set, list, tuple, np.ndarray)):
                     for y in x:
                         try:
@@ -3556,7 +4030,6 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 print("[switch_main_view_to_model] update_reservoir_fields falhou:", e)
 
-        # --- refresh sem resetar câmera (o refresh do visualize não deveria resetar) ---
         refresh = self.state.get("refresh")
         if callable(refresh):
             try:
@@ -3564,30 +4037,10 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 print("[switch_main_view_to_model] refresh falhou:", e)
 
-        # --- CORREÇÃO: Atualiza a legenda de Propriedades ---
-        # Isso garante que a tabela mostre as contagens do novo modelo imediatamente
-        if hasattr(self, "populate_facies_legend"):
-            self.populate_facies_legend()
-
-        # --- atualiza UI lateral (sem recriar plotter) ---
         try:
             self.update_sidebar_metrics_text(model_key_norm)
         except Exception:
             pass
-
-        # se estiver na aba métricas/2D, atualiza conteúdo sem trocar de vista
-        try:
-            if hasattr(self, "viz_container"):
-                idx = self.viz_container.currentIndex()
-                if idx == 1 and hasattr(self, "update_2d_map"):
-                    self.update_2d_map()
-                elif idx == 2 and hasattr(self, "update_metrics_view_content"):
-                    self.update_metrics_view_content(model_key_norm)
-        except Exception:
-            pass
-
-
-
     def on_tree_selection_changed(self):
         items = self.project_tree.selectedItems()
         if not items:
@@ -3599,6 +4052,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Seleção de modelo
         if role == "model_root":
             model_key = item.data(0, QtCore.Qt.UserRole + 1) or "base"
+            self.active_model_key = model_key
             self.state["active_model_key"] = model_key
 
             try:
@@ -3924,46 +4378,58 @@ class MainWindow(QtWidgets.QMainWindow):
     def load_compare_model(self, grdecl_path, study_name="Geral"):
         import os, time
         import numpy as np
-        from PyQt5 import QtWidgets
 
-        # Carrega geometria + facies do modelo
-        try:
-            from load_data import load_grid_from_grdecl, nx, ny, nz
-            grid_compare, fac_compare = load_grid_from_grdecl(grdecl_path)
-        except Exception as e:
-            print(f"Erro ao carregar {grdecl_path}: {e}")
+        if not self.has_base_model():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Modelo base ausente",
+                "Carregue um modelo base antes de importar modelos adicionais."
+            )
             return
 
-        # Compatibilidade
-        if fac_compare.size != nx * ny * nz:
-            print(f"Grid incompatível: {grdecl_path}")
+        try:
+            from load_data import load_grid_from_grdecl
+            grid_compare, fac_compare = load_grid_from_grdecl(grdecl_path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Modelo adicional", f"Erro ao carregar {os.path.basename(grdecl_path)}:\n{e}")
+            return
+
+        base_entry = self.get_model_entry("base")
+        base_dims = self._get_model_dims(base_entry)
+        compare_dims = self._infer_grid_cell_dims(grid_compare)
+        if base_dims and compare_dims and tuple(base_dims) != tuple(compare_dims):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Modelo incompatível",
+                f"Grid incompatível: {os.path.basename(grdecl_path)}\nBase: {base_dims} | Modelo: {compare_dims}"
+            )
             return
 
         model_id = f"compare_{int(time.time() * 1000)}_{os.path.basename(grdecl_path)}"
         model_name = os.path.basename(grdecl_path)
 
-        # ---------- Reservoir GLOBAL (flatten + interseção) ----------
         rf_raw = self.state.get("reservoir_facies", set()) or set()
         rf_global = set()
         for x in rf_raw:
             if isinstance(x, (set, list, tuple, np.ndarray)):
-                for y in x: rf_global.add(int(y))
-            else: rf_global.add(int(x))
+                for y in x:
+                    rf_global.add(int(y))
+            else:
+                rf_global.add(int(x))
 
         present = set(int(v) for v in np.unique(np.asarray(fac_compare).astype(int)))
         rf = rf_global & present
 
-        # Guarda modelo
         self.models[model_id] = {
             "name": model_name,
             "facies": fac_compare,
             "grid": grid_compare,
             "reservoir_facies": set(rf),
             "view_mode": self.state.get("mode", "facies"),
-            "study": study_name # Guarda metadado do study
+            "study": study_name,
+            "path": grdecl_path,
         }
 
-        # Estatísticas e métricas
         try:
             from analysis import facies_distribution_array, compute_global_metrics_for_array, reservoir_facies_distribution_array
             stats, _ = facies_distribution_array(fac_compare, target_grid=grid_compare)
@@ -3971,25 +4437,28 @@ class MainWindow(QtWidgets.QMainWindow):
             df_detail = self.generate_detailed_metrics_df(fac_compare, target_grid=grid_compare)
 
             self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
-
             self.compare_facies = fac_compare
             self.compare_facies_stats = stats
             self.comp_res_stats, _ = reservoir_facies_distribution_array(fac_compare, rf, target_grid=grid_compare)
         except Exception as e:
             print(f"Erro métricas {model_name}: {e}")
 
-        # Adiciona na árvore dentro do Study
-        self.add_model_to_tree(model_id, model_name, study_name=study_name)
+        self.rebuild_project_tree_from_session()
 
-        # Atualiza UI
-        if hasattr(self, "update_comparison_tables"): self.update_comparison_tables()
-        if hasattr(self, "refresh_comparison_active_view"): self.refresh_comparison_active_view()
+        if hasattr(self, "update_comparison_tables"):
+            self.update_comparison_tables()
+        if hasattr(self, "refresh_comparison_active_view"):
+            self.refresh_comparison_active_view()
 
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
 
     def update_2d_map(self):
         """Atualiza o plotter 2D principal usando o Grid Ativo."""
         if not hasattr(self, "plotter_2d"):
+            return
+
+        if not self.has_base_model() and self.state.get("current_grid_source") is None:
+            self._show_plotter_placeholder(self.plotter_2d, "Carregue um modelo base para habilitar os mapas 2D.")
             return
 
         active_grid = self.state.get("current_grid_source")
@@ -4399,114 +4868,100 @@ class MainWindow(QtWidgets.QMainWindow):
         import numpy as np
         from PyQt5 import QtGui, QtWidgets
 
-        if not hasattr(self, "multi_model_table"): return
+        if not hasattr(self, "multi_model_table"):
+            return
 
-        # 1. Normaliza entrada
         normalized_models = []
         for item in model_data_list:
             if isinstance(item, (tuple, list)):
                 key, name = str(item[0]), str(item[1])
             else:
                 key = str(item)
-                name = self.models.get(key, {}).get("name", key) if hasattr(self, "models") else key
+                name = self.get_model_name(key, fallback=key)
             normalized_models.append((key, name))
 
         t = self.multi_model_table
         t.blockSignals(True)
         try:
-            # 2. Coleta União de Fácies
             facies_union = set()
             facies_by_model = {}
 
             for m_key, _ in normalized_models:
                 _, f = self._get_model_payload(m_key)
-                if f is None: 
+                if f is None:
                     uniq = []
-                else: 
-                    try: uniq = np.unique(np.asarray(f).astype(int))
-                    except: uniq = []
-                
+                else:
+                    try:
+                        uniq = np.unique(np.asarray(f).astype(int))
+                    except Exception:
+                        uniq = []
+
                 s = set(int(x) for x in uniq)
                 facies_by_model[m_key] = s
                 facies_union |= s
 
             facies_list = sorted(list(facies_union))
 
-            # 3. Configura Tabela e Cabeçalhos Personalizados
             t.clear()
             t.setRowCount(len(facies_list))
             t.setColumnCount(1 + len(normalized_models))
-
-            # Cabeçalho Coluna 0
             t.setHorizontalHeaderItem(0, QtWidgets.QTableWidgetItem("Fácies"))
 
-            # Cabeçalhos dos Modelos (Encurtados)
             for c, (m_key, m_name) in enumerate(normalized_models, start=1):
-                # Lógica de encurtamento: Pega os últimos 20 caracteres
-                if len(m_name) > 20:
-                    display_name = "..." + m_name[-20:]
-                else:
-                    display_name = m_name
-                
+                display_name = "..." + m_name[-20:] if len(m_name) > 20 else m_name
                 item_header = QtWidgets.QTableWidgetItem(display_name)
-                item_header.setToolTip(m_name) # Mostra nome completo ao passar o mouse
+                item_header.setToolTip(m_name)
                 t.setHorizontalHeaderItem(c, item_header)
 
-            # --- AJUSTE DE LARGURA ---
             header = t.horizontalHeader()
-            
-            # Coluna Fácies: Ajusta ao conteúdo (pequena)
             header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-            
-            # Colunas Modelos: Interativa (ajustável) e largura fixa inicial
             for c in range(1, t.columnCount()):
                 header.setSectionResizeMode(c, QtWidgets.QHeaderView.Interactive)
-                t.setColumnWidth(c, 90) # Largura fina (90 pixels)
+                t.setColumnWidth(c, 90)
 
-            # Helper ícone
             def make_icon(fac_id):
-                if not hasattr(self, "facies_colors") or not self.facies_colors: return None, None
+                if not hasattr(self, "facies_colors") or not self.facies_colors:
+                    return None, None
                 rgba = self.facies_colors.get(int(fac_id))
-                if rgba is None: return None, None
+                if rgba is None:
+                    return None, None
                 c = QtGui.QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255))
-                pm = QtGui.QPixmap(14, 14); pm.fill(c)
+                pm = QtGui.QPixmap(14, 14)
+                pm.fill(c)
                 return QtGui.QIcon(pm), c
 
-            # 4. Preenche Linhas
             for r, fac in enumerate(facies_list):
-                # Coluna 0
                 it_fac = QtWidgets.QTableWidgetItem(str(fac))
                 it_fac.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
                 icon, color = make_icon(fac)
-                if icon: it_fac.setIcon(icon)
-                if color: 
-                    bg = QtGui.QColor(color); bg.setAlpha(40)
+                if icon:
+                    it_fac.setIcon(icon)
+                if color:
+                    bg = QtGui.QColor(color)
+                    bg.setAlpha(40)
                     it_fac.setBackground(QtGui.QBrush(bg))
                 t.setItem(r, 0, it_fac)
 
-                # Colunas Modelos
                 for c, (m_key, _) in enumerate(normalized_models, start=1):
                     present = fac in facies_by_model.get(m_key, set())
                     it_chk = QtWidgets.QTableWidgetItem("")
                     it_chk.setData(QtCore.Qt.UserRole, (m_key, int(fac)))
-                    
+
                     if not present:
                         it_chk.setFlags(QtCore.Qt.ItemIsSelectable)
                         it_chk.setBackground(QtGui.QBrush(QtGui.QColor(245, 245, 245)))
                     else:
                         it_chk.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsSelectable)
-                        rf = set()
-                        if hasattr(self, "models") and m_key in self.models:
-                            rf = self.models[m_key].get("reservoir_facies", set()) or set()
+                        entry = self.get_model_entry(m_key)
+                        rf = entry.reservoir_facies if entry is not None else set()
                         it_chk.setCheckState(QtCore.Qt.Checked if int(fac) in rf else QtCore.Qt.Unchecked)
-                    
+
                     t.setItem(r, c, it_chk)
-            
+
         except Exception as e:
             print(f"Erro tabela filtro: {e}")
         finally:
             t.blockSignals(False)
-
 
     def contextMenuEvent(self, event):
         menu = self.createPopupMenu()
@@ -4515,82 +4970,86 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _get_model_payload(self, model_key):
-        """Retorna (grid, facies) para Base ou modelo adicional."""
-        def pick(d, *keys):
-            if not isinstance(d, dict):
-                return None
-            for k in keys:
-                if k in d and d[k] is not None:
-                    return d[k]
-            return None
-
+        """Retorna (grid, facies) para um modelo da sessão."""
         key_str = str(model_key)
-        is_base = key_str.lower() == "base"
+        entry = self.get_model_entry(key_str)
 
-        if is_base:
-            # >>> No seu projeto o BASE grid vem de load_data.grid (global)
+        if key_str.lower() == "base":
             from load_data import grid as grid_base
-            fac = None
-            if hasattr(self, "models") and isinstance(self.models, dict) and "base" in self.models:
-                fac = pick(self.models["base"], "facies", "facies_data")
-            return grid_base, fac
+            if entry is None:
+                return grid_base, None
+            return entry.grid or grid_base, entry.facies
 
-        # Modelos adicionais (você guarda grid e facies no self.models[model_id])
-        if hasattr(self, "models") and isinstance(self.models, dict) and key_str in self.models:
-            m = self.models[key_str]
-            grid = pick(m, "grid", "ugrid", "pv_grid")
-            facies = pick(m, "facies", "facies_data")
-            return grid, facies
+        if entry is None:
+            return None, None
 
-        return None, None
-
-
-
+        return entry.grid, entry.facies
 
     def _get_reservoir_facies_for_base(self):
         """Reservoir facies do modelo base, se existir."""
-        if hasattr(self, "models") and isinstance(self.models, dict) and "base" in self.models:
-            return self.models["base"].get("reservoir_facies")
-        return None
-
-
+        entry = self.get_model_entry("base")
+        if entry is None:
+            return None
+        return entry.reservoir_facies
 
     def update_base_reservoir_compare(self, item):
-         if item.column() != 3: return
-         f = int(item.data(QtCore.Qt.UserRole))
-         if item.checkState() == QtCore.Qt.Checked: self.models["base"]["reservoir_facies"].add(f)
-         else: self.models["base"]["reservoir_facies"].discard(f)
-         self.update_compare_3d_mode()
-         self.update_compare_2d_maps()
+        if item.column() != 3:
+            return
+
+        entry = self.get_model_entry("base")
+        if entry is None:
+            return
+
+        f = int(item.data(QtCore.Qt.UserRole))
+        if item.checkState() == QtCore.Qt.Checked:
+            entry.reservoir_facies.add(f)
+        else:
+            entry.reservoir_facies.discard(f)
+
+        self.update_compare_3d_mode()
+        self.update_compare_2d_maps()
 
     def update_compare_reservoir_compare(self, item):
-         if item.column() != 3: return
-         f = int(item.data(QtCore.Qt.UserRole))
-         if item.checkState() == QtCore.Qt.Checked: self.models["compare"]["reservoir_facies"].add(f)
-         else: self.models["compare"]["reservoir_facies"].discard(f)
-         self.update_compare_3d_mode()
-         self.update_compare_2d_maps()
+        if item.column() != 3:
+            return
+
+        entry = self.get_model_entry("compare")
+        if entry is None:
+            return
+
+        f = int(item.data(QtCore.Qt.UserRole))
+        if item.checkState() == QtCore.Qt.Checked:
+            entry.reservoir_facies.add(f)
+        else:
+            entry.reservoir_facies.discard(f)
+
+        self.update_compare_3d_mode()
+        self.update_compare_2d_maps()
 
     def open_compare_dialog(self):
         """Carrega múltiplos modelos e os agrupa em um Study."""
-        # 1. Seleciona arquivos
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)")
-        if not paths: return
+        if not self.has_base_model():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Modelo base ausente",
+                "Carregue um modelo base antes de importar modelos adicionais para comparação."
+            )
+            return
 
-        # 2. Pergunta o nome do Estudo (Grupo)
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)")
+        if not paths:
+            return
+
         study_name, ok = QtWidgets.QInputDialog.getText(
-            self, "Novo Estudo", "Nome do Estudo / Grupo de Calibração:", 
-            text=f"Calibração {len(self.models)}"
+            self, "Novo Estudo", "Nome do Estudo / Grupo de Calibração:",
+            text=f"Calibração {max(1, len(list(self.iter_model_keys(include_compare_placeholder=False))))}"
         )
-        
         if not ok or not study_name.strip():
             study_name = "Importação Recente"
 
-        # 3. Carrega
-        # Mostra um cursor de espera ou barra de progresso simples seria ideal, mas vamos direto
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            for path in paths: 
+            for path in paths:
                 self.load_compare_model(path, study_name=study_name)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -4600,7 +5059,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return t
 
     def init_compare_3d(self):
-        if self.models["base"]["facies"] is None:
+        base_entry = self.get_model_entry("base")
+        compare_entry = self.get_model_entry("compare")
+
+        if base_entry is None or base_entry.facies is None:
             return
 
         from visualize import run
@@ -4610,42 +5072,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_plotter_base.clear()
         self.compare_states["base"] = {}
 
-        base_grid = self.models["base"].get("grid", grid_base)
+        base_grid = base_entry.grid or grid_base
         g0 = base_grid.copy(deep=True)
-        g0.cell_data["Facies"] = self.models["base"]["facies"]
+        g0.cell_data["Facies"] = base_entry.facies
 
         run(
             mode="facies",
             external_plotter=self.comp_plotter_base,
             external_state=self.compare_states["base"],
             target_grid=g0,
-            target_facies=self.models["base"]["facies"],
+            target_facies=base_entry.facies,
         )
 
         # COMPARE
         self.comp_plotter_comp.clear()
         self.compare_states["compare"] = {}
 
-        if self.models["compare"]["facies"] is not None:
-            compare_grid = self.models["compare"].get("grid", None)
-            if compare_grid is None:
-                # fallback (não deveria acontecer se você usar load_compare_model corrigido)
-                compare_grid = grid_base
+        if compare_entry is not None and compare_entry.facies is not None:
+            compare_grid = compare_entry.grid or grid_base
 
             g1 = compare_grid.copy(deep=True)
-            g1.cell_data["Facies"] = self.models["compare"]["facies"]
+            g1.cell_data["Facies"] = compare_entry.facies
 
             run(
                 mode="facies",
                 external_plotter=self.comp_plotter_comp,
                 external_state=self.compare_states["compare"],
                 target_grid=g1,
-                target_facies=self.models["compare"]["facies"],
+                target_facies=compare_entry.facies,
             )
 
         self.install_compare_sync_callbacks()
         self.sync_compare_cameras()
-
 
     def sync_compare_cameras(self):
         pb = self.comp_plotter_base
@@ -5590,7 +6048,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Ou mostramos a união das fácies que são reservatório nos modelos selecionados
         res_facies_union = set()
         for m_key, _ in checked_models:
-            res_facies_union.update(self.models[m_key]["reservoir_facies"])
+            entry = self.get_model_entry(m_key)
+            if entry is not None:
+                res_facies_union.update(entry.reservoir_facies)
             
         sorted_res = sorted(list(res_facies_union))
         
@@ -5605,7 +6065,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 col_base = 1 + (i * 2)
                 
                 # Verifica se essa fácies é reservatório NESTE modelo específico
-                is_res_here = fac in self.models[m_key]["reservoir_facies"]
+                entry = self.get_model_entry(m_key)
+                is_res_here = (entry is not None) and (fac in entry.reservoir_facies)
                 
                 if is_res_here:
                     stats = model_stats.get(m_key, {})
@@ -5644,8 +6105,9 @@ class MainWindow(QtWidgets.QMainWindow):
             m_name = str(raw_name)
 
             if m_name.startswith("('"):
-                if m_key in self.models:
-                    m_name = self.models[m_key].get("name", m_name)
+                entry = self.get_model_entry(m_key)
+                if entry is not None:
+                    m_name = entry.name or m_name
 
             final_list.append((m_key, m_name))
 
@@ -5742,9 +6204,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 local_state["model_key"] = model_key
                 local_state["plotter_ref"] = plotter
 
-                rf = set()
-                if hasattr(self, "models") and model_key in self.models:
-                    rf = self.models[model_key].get("reservoir_facies", set()) or set()
+                entry = self.get_model_entry(model_key)
+                rf = entry.reservoir_facies if entry is not None else set()
                 local_state["reservoir_facies"] = rf
 
                 if "update_reservoir_fields" in local_state:
@@ -5775,7 +6236,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 1. Coleta União de Fácies de todos os modelos selecionados
         all_facies = set()
         for key, _ in checked_models:
-            f_arr = self.models[key]["facies"]
+            entry = self.get_model_entry(key)
+            f_arr = entry.facies if entry is not None else None
             if f_arr is not None:
                 all_facies.update(np.unique(f_arr))
         sorted_facies = sorted(list(all_facies))
@@ -5804,7 +6266,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 col_idx = 2 + c
                 
                 # Verifica se a fácies existe neste modelo
-                model_facies_arr = self.models[key]["facies"]
+                entry = self.get_model_entry(key)
+                model_facies_arr = entry.facies if entry is not None else None
                 exists = False
                 if model_facies_arr is not None:
                     # Otimização: verificação rápida se existe
@@ -5816,7 +6279,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if exists:
                     item_chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
                     # Verifica se está no reservoir_facies desse modelo
-                    is_sel = fac in self.models[key]["reservoir_facies"]
+                    entry = self.get_model_entry(key)
+                    is_sel = (entry is not None) and (fac in entry.reservoir_facies)
                     item_chk.setCheckState(QtCore.Qt.Checked if is_sel else QtCore.Qt.Unchecked)
                     item_chk.setData(QtCore.Qt.UserRole, (key, fac)) # Guarda chave e fácies
                 else:
@@ -5832,80 +6296,69 @@ class MainWindow(QtWidgets.QMainWindow):
         """Atualiza o filtro de reservatório sincronizando o estado visual."""
         from analysis import compute_global_metrics_for_array
 
-        if getattr(self, "_block_multi_model_filter", False): return
+        if getattr(self, "_block_multi_model_filter", False):
+            return
 
         data = item.data(QtCore.Qt.UserRole)
-        if not data: return 
+        if not data:
+            return
 
         model_key, fac = data
         model_key = str(model_key)
         fac = int(fac)
 
-        if model_key not in self.models: return
-        model_data = self.models[model_key]
-        target_set = model_data.setdefault("reservoir_facies", set())
+        entry = self.get_model_entry(model_key)
+        if entry is None:
+            return
 
-        # Atualiza o Set de dados do Modelo
-        if item.checkState() == QtCore.Qt.Checked: target_set.add(fac)
-        else: target_set.discard(fac)
+        target_set = entry.reservoir_facies
 
-        # 1. Recalcula Métricas (Silent)
-        if model_data.get("facies") is not None:
-            m, p = compute_global_metrics_for_array(model_data["facies"], target_set)
+        if item.checkState() == QtCore.Qt.Checked:
+            target_set.add(fac)
+        else:
+            target_set.discard(fac)
+
+        if entry.facies is not None:
+            m, p = compute_global_metrics_for_array(entry.facies, target_set)
             cache = self.cached_metrics.setdefault(model_key, {"metrics": None, "perc": None, "df": None})
-            cache["metrics"] = m; cache["perc"] = p
+            cache["metrics"] = m
+            cache["perc"] = p
 
-        # 2. ATUALIZAÇÃO VISUAL
         if hasattr(self, "compare_states_multi") and model_key in self.compare_states_multi:
             st = self.compare_states_multi[model_key]
-            
-            # --- CORREÇÃO CRÍTICA: Atualiza a memória do state visual ---
-            # Se não fizermos isso, o st["refresh"]() vai usar o valor antigo e desfazer tudo.
             st["reservoir_facies"] = target_set
-            
-            
 
-            # Recalcula campos derivados (Reservoir/Clusters/Verticais) no state visual
             if "update_reservoir_fields" in st:
                 try:
                     st["update_reservoir_fields"](target_set)
                 except Exception as e:
                     print(f"[on_multi_model_filter_changed] update_reservoir_fields falhou: {e}")
 
-            # Se estiver em modo de espessura local, atualiza o scalar (para refletir novo reservatório)
             if st.get("mode") == "thickness_local" and "update_thickness" in st:
                 try:
                     st["update_thickness"]()
                 except Exception:
                     pass
 
-# Agora pode chamar o refresh seguro
             if "refresh" in st:
                 st["refresh"]()
-            
-            # Força renderização imediata
+
             if "plotter_ref" in st:
                 st["plotter_ref"].render()
 
-        # Se estiver na aba 2D da comparação, reconstrói os mapas para refletir o novo reservatório
         if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 2:
             try:
                 self.update_dynamic_comparison_2d(self.get_checked_models())
             except Exception as e:
                 print(f"[on_multi_model_filter_changed] update_dynamic_comparison_2d falhou: {e}")
 
-
-
-        # 3. Atualiza tabela de métricas se visível
         if hasattr(self, "compare_stack") and self.compare_stack.currentIndex() == 1:
-             if hasattr(self, "update_dynamic_comparison_metrics"):
-                 self.update_dynamic_comparison_metrics(self.get_checked_models())
+            if hasattr(self, "update_dynamic_comparison_metrics"):
+                self.update_dynamic_comparison_metrics(self.get_checked_models())
 
-        # 4. Atualiza sidebar
-        if self.state.get("active_model_key") == model_key:
+        if (self.active_model_key or self.state.get("active_model_key")) == model_key:
             self.update_sidebar_metrics_text(model_key)
 
-    
     def on_comp_view_changed(self, index):
         """Callback do combo do ribbon: troca aba da comparação."""
         if not hasattr(self, "compare_stack"):
@@ -5998,15 +6451,14 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def update_dynamic_comparison_metrics(self, checked_models):
         """Monta a tabela de métricas para N modelos marcados."""
-        # normaliza
         normalized = []
         for m in (checked_models or []):
             if isinstance(m, (tuple, list)):
                 key = m[0]
-                name = m[1] if len(m) > 1 else self.models.get(key, {}).get("name", str(key))
+                name = m[1] if len(m) > 1 else self.get_model_name(key, fallback=str(key))
             else:
                 key = m
-                name = self.models.get(key, {}).get("name", str(key))
+                name = self.get_model_name(key, fallback=str(key))
             if key in self.models:
                 normalized.append((key, name))
 
@@ -6021,7 +6473,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.reservoir_facies_compare_table.setRowCount(0)
             return
 
-        # GLOBAL
         headers = ["Métrica"] + [name for _, name in normalized]
         self.global_compare_table.clear()
         self.global_compare_table.setColumnCount(len(headers))
@@ -6047,14 +6498,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 if val is None:
                     txt = "-"
                 else:
-                    try: txt = fmt.format(val)
-                    except: txt = str(val)
+                    try:
+                        txt = fmt.format(val)
+                    except Exception:
+                        txt = str(val)
                 self.global_compare_table.setItem(r, c+1, QtWidgets.QTableWidgetItem(txt))
 
         self.global_compare_table.resizeColumnsToContents()
 
-
-    
     def update_dynamic_comparison_2d(self, checked_models):
         """Reconstrói a visualização de Mapas 2D."""
         import numpy as np
@@ -6510,13 +6961,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _open_matplotlib_report(
-            self, well_name, sim_model_name,
-            real_depth, real_fac, base_depth,
-            base_fac, sim_depth, sim_fac,
-            best_depth=None, best_fac=None,
-            window_size_str="1x1",
-            well_logs_df=None,
-            real_log_col=None):
+            self, well_name, sim_model_name, 
+            real_depth, real_fac, base_depth, 
+            base_fac, sim_depth, sim_fac, 
+            best_depth=None, best_fac=None, 
+            window_size_str="1x1"):
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.patches import Rectangle
@@ -7729,251 +8178,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # l5.addWidget(canvas5)
         # tabs.addTab(tab5, "Best Match")
 
-        # =================================================================
-        # ABA 5: CURVAS LAS (lado a lado + escala horizontal/vertical)
-        # =================================================================
-        if well_logs_df is not None and not well_logs_df.empty and "DEPT" in well_logs_df.columns:
-            import pandas as pd
-            import matplotlib.pyplot as plt
-
-            tab5 = QtWidgets.QWidget()
-            l5 = QtWidgets.QVBoxLayout(tab5)
-            l5.setContentsMargins(6, 6, 6, 6)
-            l5.setSpacing(6)
-
-            # -------------------------------------------------
-            # CONTROLES
-            # -------------------------------------------------
-            controls = QtWidgets.QHBoxLayout()
-            controls.setContentsMargins(0, 0, 0, 0)
-
-            lbl_x = QtWidgets.QLabel("Escala horizontal:")
-            spin_x = QtWidgets.QDoubleSpinBox()
-            spin_x.setRange(0.5, 5.0)
-            spin_x.setSingleStep(0.25)
-            spin_x.setDecimals(2)
-            spin_x.setValue(1.0)
-
-            lbl_y = QtWidgets.QLabel("Escala vertical:")
-            spin_y = QtWidgets.QDoubleSpinBox()
-            spin_y.setRange(0.5, 6.0)
-            spin_y.setSingleStep(0.25)
-            spin_y.setDecimals(2)
-            spin_y.setValue(1.0)
-
-            btn_reset = QtWidgets.QPushButton("Reset")
-            btn_fit = QtWidgets.QPushButton("Ajustar")
-
-            controls.addWidget(lbl_x)
-            controls.addWidget(spin_x)
-            controls.addSpacing(16)
-            controls.addWidget(lbl_y)
-            controls.addWidget(spin_y)
-            controls.addSpacing(16)
-            controls.addWidget(btn_reset)
-            controls.addWidget(btn_fit)
-            controls.addStretch()
-
-            l5.addLayout(controls)
-
-            # -------------------------------------------------
-            # ÁREA COM SCROLL
-            # -------------------------------------------------
-            scroll = QtWidgets.QScrollArea()
-            scroll.setWidgetResizable(False)
-            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-
-            container = QtWidgets.QWidget()
-            container_layout = QtWidgets.QVBoxLayout(container)
-            container_layout.setContentsMargins(0, 0, 0, 0)
-            container_layout.setSpacing(0)
-
-            l5.addWidget(scroll)
-
-            render_state = {
-                "canvas": None,
-                "fig": None,
-            }
-
-            def _iter_las_curve_columns(df):
-                skip = {
-                    "DEPT", "X", "Y", "Z",
-                    "MD", "TVD", "DX", "DY", "AZIM", "INCL", "DLS"
-                }
-
-                cols = []
-                for c in df.columns:
-                    if c in skip:
-                        continue
-
-                    s = pd.to_numeric(df[c], errors="coerce")
-                    if s.notna().sum() < 2:
-                        continue
-
-                    cols.append(c)
-
-                return cols
-
-            def _is_discrete_curve(arr):
-                arr = np.asarray(arr, dtype=float)
-                arr = arr[np.isfinite(arr)]
-                if arr.size == 0:
-                    return False
-
-                unique_vals = np.unique(arr)
-                is_integer_like = np.all(np.abs(arr - np.round(arr)) < 1e-6)
-
-                return is_integer_like and unique_vals.size <= 25
-
-            def _curve_stats_text(arr):
-                arr = np.asarray(arr, dtype=float)
-                arr = arr[np.isfinite(arr)]
-                if arr.size == 0:
-                    return "Sem dados válidos"
-                return f"min={arr.min():.3g}   max={arr.max():.3g}"
-
-            def render_las_tracks():
-                # limpa canvas anterior
-                if render_state["canvas"] is not None:
-                    container_layout.removeWidget(render_state["canvas"])
-                    render_state["canvas"].setParent(None)
-                    render_state["canvas"].deleteLater()
-                    render_state["canvas"] = None
-
-                if render_state["fig"] is not None:
-                    plt.close(render_state["fig"])
-                    render_state["fig"] = None
-
-                curve_cols = _iter_las_curve_columns(well_logs_df)
-
-                if not curve_cols:
-                    lbl = QtWidgets.QLabel("Nenhuma curva LAS numérica válida encontrada.")
-                    lbl.setAlignment(QtCore.Qt.AlignCenter)
-                    container_layout.addWidget(lbl)
-                    container.resize(900, 300)
-                    scroll.setWidget(container)
-                    return
-
-                n_tracks = len(curve_cols)
-
-                # escalas controladas pelo usuário
-                sx = float(spin_x.value())
-                sy = float(spin_y.value())
-
-                # tamanho base
-                base_track_w = 2.2
-                base_fig_h = 8.8
-
-                track_w = base_track_w * sx
-                fig_w = max(8.0, n_tracks * track_w)
-                fig_h = base_fig_h * sy
-
-                fig, axs = plt.subplots(
-                    1, n_tracks,
-                    figsize=(fig_w, fig_h),
-                    sharey=True
-                )
-
-                if n_tracks == 1:
-                    axs = [axs]
-
-                depth_all = pd.to_numeric(
-                    well_logs_df["DEPT"], errors="coerce"
-                ).to_numpy(dtype=float)
-
-                y_min = np.nanmin(depth_all) if np.isfinite(depth_all).any() else 0.0
-                y_max = np.nanmax(depth_all) if np.isfinite(depth_all).any() else 1.0
-
-                for i, col in enumerate(curve_cols):
-                    ax = axs[i]
-
-                    d = pd.to_numeric(
-                        well_logs_df["DEPT"], errors="coerce"
-                    ).to_numpy(dtype=float)
-
-                    v = pd.to_numeric(
-                        well_logs_df[col], errors="coerce"
-                    ).to_numpy(dtype=float)
-
-                    mask = np.isfinite(d) & np.isfinite(v)
-
-                    if np.count_nonzero(mask) >= 2:
-                        d = d[mask]
-                        v = v[mask]
-
-                        if _is_discrete_curve(v):
-                            ax.step(v, d, where="post", linewidth=1.2)
-                            ax.plot(v, d, "|", markersize=6)
-                            uniq = np.unique(v)
-                            if uniq.size <= 12:
-                                ax.set_xticks(uniq)
-                        else:
-                            ax.plot(v, d, linewidth=1.2)
-
-                        ax.grid(True, linestyle="--", alpha=0.35)
-                        ax.margins(x=0.08)
-                    else:
-                        ax.text(
-                            0.5, 0.5, "Sem dados válidos",
-                            ha="center", va="center",
-                            transform=ax.transAxes
-                        )
-
-                    ax.set_ylim(y_max, y_min)  # profundidade crescente para baixo
-                    ax.set_xlabel(col, fontsize=9)
-
-                    title = col
-                    if col == real_log_col:
-                        title += "\n(Real)"
-                    else:
-                        title += f"\n{_curve_stats_text(v)}"
-                    ax.set_title(title, fontsize=9)
-
-                    if i == 0:
-                        ax.set_ylabel("MD (m)")
-                    else:
-                        ax.tick_params(axis="y", left=False, labelleft=False)
-
-                fig.tight_layout(w_pad=1.2)
-
-                canvas = FigureCanvas(fig)
-
-                # tamanho visual do widget no Qt
-                canvas_w = int(240 * n_tracks * sx)
-                canvas_h = int(820 * sy)
-
-                canvas.setMinimumSize(canvas_w, canvas_h)
-
-                container_layout.addWidget(canvas)
-                container.resize(canvas_w + 20, canvas_h + 20)
-                scroll.setWidget(container)
-
-                render_state["canvas"] = canvas
-                render_state["fig"] = fig
-
-            def reset_las_scales():
-                spin_x.setValue(1.0)
-                spin_y.setValue(1.0)
-
-            def fit_las_scales():
-                curve_cols = _iter_las_curve_columns(well_logs_df)
-                n_tracks = max(1, len(curve_cols))
-
-                # tenta deixar razoável dentro da janela
-                sx = min(1.25, max(0.65, 6.0 / n_tracks))
-                spin_x.setValue(sx)
-                spin_y.setValue(1.0)
-
-            spin_x.valueChanged.connect(lambda *_: render_las_tracks())
-            spin_y.valueChanged.connect(lambda *_: render_las_tracks())
-            btn_reset.clicked.connect(reset_las_scales)
-            btn_fit.clicked.connect(fit_las_scales)
-
-            render_las_tracks()
-
-            tabs.addTab(tab5, "Curvas LAS")
-
         return dialog
     
     def _compute_strat_links(self, fac_a, fac_b):
@@ -8392,46 +8596,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout = QtWidgets.QVBoxLayout(dlg)
 
-        # Modelo
         layout.addWidget(QtWidgets.QLabel("Modelo (SIM):"))
         cmb = QtWidgets.QComboBox()
-        model_keys = [k for k in self.models.keys() if self.models[k].get("facies") is not None]
-        if "base" in self.models and "base" not in model_keys:
+
+        model_keys = [
+            k for k, entry in self.iter_model_entries(include_compare_placeholder=True)
+            if entry.facies is not None
+        ]
+
+        if self.has_model("base") and "base" not in model_keys:
             model_keys = ["base"] + model_keys
 
         for k in model_keys:
-            name = self.models.get(k, {}).get("name", k)
-            cmb.addItem(name, userData=k)
+            cmb.addItem(self.get_model_name(k, fallback=k), userData=k)
 
         layout.addWidget(cmb)
 
-        # Poços
         layout.addWidget(QtWidgets.QLabel("Poços:"))
-        lst = QtWidgets.QListWidget()
-        lst.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        for wname in sorted(self.wells.keys()):
-            it = QtWidgets.QListWidgetItem(wname)
-            it.setData(QtCore.Qt.UserRole, wname)
-            lst.addItem(it)
+        listw = QtWidgets.QListWidget()
+        listw.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
 
-        layout.addWidget(lst)
+        for wn in sorted(self.wells.keys()):
+            it = QtWidgets.QListWidgetItem(str(wn))
+            it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked)
+            listw.addItem(it)
 
-        # Botões
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Open | QtWidgets.QDialogButtonBox.Cancel)
-        layout.addWidget(btns)
+        layout.addWidget(listw, 1)
 
-        def _open():
+        btns = QtWidgets.QHBoxLayout()
+        btn_ok = QtWidgets.QPushButton("Abrir")
+        btn_cancel = QtWidgets.QPushButton("Cancelar")
+        btns.addStretch(1)
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _accept():
             model_key = cmb.currentData()
-            selected = [i.data(QtCore.Qt.UserRole) for i in lst.selectedItems()]
-            if not selected:
-                QtWidgets.QMessageBox.information(dlg, "Info", "Selecione ao menos 1 poço.")
-                return
-            for w in selected:
-                self.show_well_comparison_report(w, model_key)
+            well_names = []
+            for i in range(listw.count()):
+                it = listw.item(i)
+                if it.checkState() == QtCore.Qt.Checked:
+                    well_names.append(str(it.text()))
+
             dlg.accept()
 
-        btns.accepted.connect(_open)
-        btns.rejected.connect(dlg.reject)
+            for wn in well_names:
+                self.show_well_comparison_report(wn, model_key)
+
+        btn_ok.clicked.connect(_accept)
 
         dlg.exec_()
 
@@ -8452,7 +8668,6 @@ class MainWindow(QtWidgets.QMainWindow):
             for it in self.project_tree.selectedItems():
                 if it.data(0, QtCore.Qt.UserRole) == "well_item":
                     out.append(it.data(0, QtCore.Qt.UserRole + 1))
-            # se não tiver multiselect, usa o item clicado
             if not out and role == "well_item":
                 out = [item.data(0, QtCore.Qt.UserRole + 1)]
             return out
@@ -8462,34 +8677,54 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.show_well_comparison_report(w, model_key)
 
         if role == "well_item":
-            # Abrir no modelo ativo
             act_open_current = menu.addAction("Abrir relatório (modelo atual)")
-            act_open_current.triggered.connect(lambda: _open_reports(self.state.get("active_model_key", "base")))
+            act_open_current.triggered.connect(lambda: _open_reports(self.active_model_key or self.state.get("active_model_key") or self.base_model_key or "base"))
 
-            # Submenu: escolher modelo
             sub = menu.addMenu("Abrir relatório para…")
-            act_base = sub.addAction("Modelo Base")
-            act_base.triggered.connect(lambda: _open_reports("base"))
+            if self.has_model("base"):
+                act_base = sub.addAction("Modelo Base")
+                act_base.triggered.connect(lambda: _open_reports("base"))
 
-            # modelos comparados
-            for mk in self.models.keys():
+            for mk, entry in self.iter_model_entries(include_compare_placeholder=False):
                 if mk == "base":
                     continue
-                sub_act = sub.addAction(f"{self.models[mk].get('name', mk)}")
+                sub_act = sub.addAction(f"{entry.name or mk}")
                 sub_act.triggered.connect(lambda _=False, mk=mk: _open_reports(mk))
 
             menu.addSeparator()
 
-            # Toggle visibilidade no 3D
             act_toggle = menu.addAction("Mostrar/Ocultar no 3D (checkbox)")
             def _toggle():
-                # alterna apenas o item clicado
                 st = item.checkState(0)
                 item.setCheckState(0, QtCore.Qt.Unchecked if st == QtCore.Qt.Checked else QtCore.Qt.Checked)
                 self.update_wells_3d()
             act_toggle.triggered.connect(_toggle)
 
-        menu.exec_(self.project_tree.viewport().mapToGlobal(pos))
+            act_remove = menu.addAction("Remover poço")
+            act_remove.triggered.connect(lambda: self.remove_well_by_name(item.data(0, QtCore.Qt.UserRole + 1)))
+
+        elif role == "model_root":
+            model_key = item.data(0, QtCore.Qt.UserRole + 1)
+            if model_key != "base":
+                act_set_base = menu.addAction("Definir como Base")
+                act_set_base.triggered.connect(lambda _=False, mk=model_key: self.set_model_as_base(mk))
+                menu.addSeparator()
+                act_remove = menu.addAction("Remover modelo")
+                act_remove.triggered.connect(lambda _=False, mk=model_key: self.remove_model_by_key(mk))
+            else:
+                act_clear_base = menu.addAction("Remover modelo base")
+                act_clear_base.triggered.connect(self.clear_base_model)
+
+        elif role == "study_folder":
+            act_remove_study = menu.addAction("Remover pasta de calibração")
+            act_remove_study.triggered.connect(lambda: self.remove_study_by_name(item.text(0)))
+
+        elif role == "wells_root":
+            act_remove_checked = menu.addAction("Remover poços selecionados")
+            act_remove_checked.triggered.connect(self.delete_selected_tree_items)
+
+        if menu.actions():
+            menu.exec_(self.project_tree.viewport().mapToGlobal(pos))
 
     def evaluate_models_against_wells(
         self,
@@ -8500,23 +8735,17 @@ class MainWindow(QtWidgets.QMainWindow):
         t_min=0.30,
         ignore_real_zeros=True,
     ):
-        """Calcula ranking dos modelos vs poços usando SCORE POR PROPORÇÃO.
-
-        - Para cada poço: calcula proporções por espessura das fácies (com suavização t_min)
-          e compara REAL vs SIM por distância L1 (score=1-0.5*L1).
-        - Para janela espacial NxN: escolhe a coluna (i,j) com melhor score.
-
-        Peso do score do modelo:
-          - Usa `t_real_valid` (espessura total válida após suavização) como peso.
-        """
+        """Calcula ranking dos modelos vs poços usando score por proporção."""
         import numpy as np
         from analysis import compute_well_match_score
         from load_data import grid as global_grid, facies as global_facies
 
+        if not self.has_base_model():
+            return []
+
         if not self.wells:
             return []
 
-        # 1) Poços
         if well_names is None:
             well_names = list(self.wells.keys())
         else:
@@ -8524,16 +8753,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not well_names:
             return []
 
-        # 2) Modelos
         if model_keys is None:
             model_keys = list(self.models.keys())
             if "base" in self.models and "base" not in model_keys:
                 model_keys.append("base")
-        model_keys = [k for k in model_keys if k in self.models]
+        model_keys = [k for k in model_keys if self.has_model(k)]
         if not model_keys:
             return []
 
-        # window_size ímpar
         try:
             window_size = int(window_size)
         except Exception:
@@ -8546,11 +8773,12 @@ class MainWindow(QtWidgets.QMainWindow):
         results = []
 
         for mk in model_keys:
-            m = self.models.get(mk, {})
+            entry = self.get_model_entry(mk)
+            if entry is None:
+                continue
 
-            # Resolve grid/facies do base
-            g = m.get("grid", None)
-            fac = m.get("facies", None)
+            g = entry.grid
+            fac = entry.facies
             if mk == "base":
                 if g is None:
                     g = global_grid
@@ -8559,7 +8787,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if g is None:
                 continue
 
-            # injeta facies no grid (consistência)
             if fac is not None:
                 try:
                     current_f = g.cell_data.get("Facies")
@@ -8580,12 +8807,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if "DEPT" not in well.data.columns:
                     continue
 
-                # coluna de fácies do poço
-                if "fac" in well.data.columns:
-                    col_real = "fac"
-                elif "lito_upscaled" in well.data.columns:
-                    col_real = "lito_upscaled"
-                else:
+                col_real = None
+                for cand in ("fac", "FACIES", "FAC", "lito_upscaled", "LITO_UPSCALED", "fac_dion", "FAC_DION", "lito", "LITO"):
+                    if cand in well.data.columns:
+                        col_real = cand
+                        break
+                if col_real is None:
                     continue
 
                 full_depth = well.data["DEPT"].to_numpy(dtype=float)
@@ -8597,7 +8824,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 real_depth = full_depth
                 real_fac = np.where(np.isfinite(full_real), full_real, 0.0).astype(int)
 
-                # recorte por marcadores (Top->Base)
                 if markers:
                     mds = sorted([mm.get("md") for mm in markers if mm.get("md") is not None])
                     if len(mds) >= 2:
@@ -8609,23 +8835,19 @@ class MainWindow(QtWidgets.QMainWindow):
                                 real_depth = full_depth[mask]
                                 real_fac = real_fac[mask]
 
-                # aplica agrupamento no REAL quando o toggle estiver ligado
                 if bool(getattr(self, "use_facies_grouping", False)):
                     try:
                         real_fac = self.apply_facies_grouping(real_fac)
                     except Exception:
                         pass
 
-                # (X,Y) de referência do poço
                 xy = self._pick_reference_xy_for_well_report(well, markers)
                 if xy is None:
                     continue
                 xref, yref = xy
 
-                # --- cálculo (1x1 ou NxN) ---
                 if window_size == 1:
                     sim_depth, sim_fac, _ = self._column_profile_from_grid(g, xref, yref)
-                    # aplica agrupamento no SIM quando o toggle estiver ligado
                     if bool(getattr(self, "use_facies_grouping", False)):
                         try:
                             sim_fac = self.apply_facies_grouping(sim_fac)
@@ -8641,7 +8863,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         ignore_real_zeros=ignore_real_zeros,
                     )
                     s["best_i"], s["best_j"] = self._get_ij_from_xy(g, xref, yref)
-
                 else:
                     sim_depth, sim_fac, sim_total, i_best, j_best, s = self._best_profile_score_in_window(
                         g,
@@ -8658,7 +8879,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     s["best_i"] = i_best
                     s["best_j"] = j_best
 
-                # peso = espessura válida do REAL
                 weight = float(s.get("t_real_valid", 0.0))
                 if not np.isfinite(weight) or weight <= 0.0:
                     continue
@@ -8675,7 +8895,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             results.append({
                 "model_key": mk,
-                "model_name": str(m.get("name", mk)),
+                "model_name": self.get_model_name(mk, fallback=str(mk)),
                 "score": score_model,
                 "n_wells_used": int(len(w_list)),
                 "details": per_well,
@@ -8684,6 +8904,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         results.sort(key=lambda d: d["score"], reverse=True)
         return results
+
     def show_models_well_fit_ranking(self):
         """Abre o ranking de modelos vs poços usando o NOVO score por proporção (sem bin-a-bin / sem kappa)."""
         from PyQt5 import QtWidgets
@@ -10311,51 +10532,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # 3D Selection Mode + Inspector (Cell / Column)
     # ============================================================
 
-    def _adjust_main_z_exag(self, wheel_delta):
-        """
-        Ajusta o exagero vertical do 3D principal usando o mesmo controle
-        do Inspector (self.slicer_widget.spin_z).
-        """
-        try:
-            slicer = getattr(self, "slicer_widget", None)
-            if slicer is None:
-                return False
-
-            spin = getattr(slicer, "spin_z", None)
-            if spin is None:
-                return False
-
-            # 1 notch de wheel = 120
-            if wheel_delta == 0:
-                return False
-
-            steps = int(wheel_delta / 120)
-            if steps == 0:
-                steps = 1 if wheel_delta > 0 else -1
-
-            step_size = float(spin.singleStep()) if spin.singleStep() else 1.0
-            current = float(spin.value())
-
-            new_value = current + steps * step_size
-            new_value = max(float(spin.minimum()), min(float(spin.maximum()), new_value))
-
-            if abs(new_value - current) < 1e-9:
-                return False
-
-            # Isso já aciona todo o pipeline normal do seu app
-            spin.setValue(new_value)
-            return True
-
-        except Exception:
-            return False
-
     def _install_3d_pick_filter(self):
+        """Instala um eventFilter Qt no widget do 3D para disparar picking quando pick_mode está ativo.
+
+        Isso é um fallback/solução robusta para casos em que o VTK AddObserver não recebe o evento
+        em QtInteractor embedado.
+        """
         if getattr(self, "_pick_filter_installed", False):
             return
         self._pick_filter_installed = True
         self._pick_press_pos = None
         self._pick_dragging = False
-        self._mid_button_down_3d = False
 
         targets = []
         try:
@@ -10374,7 +10561,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 t.installEventFilter(self)
             except Exception:
                 pass
-            
     def _qt_trigger_pick(self, widget, pos):
             """Converte coordenadas Qt (origem topo-esq) -> VTK/RenderWindow (origem base-esq) e dispara o pick.
 
@@ -10503,29 +10689,6 @@ class MainWindow(QtWidgets.QMainWindow):
             is_target = False
 
         if is_target:
-            et = event.type()
-
-            # =========================================================
-            # BOTÃO DO MEIO + WHEEL = EXAGERO VERTICAL DO 3D PRINCIPAL
-            # Funciona mesmo fora do modo cell/column
-            # =========================================================
-            if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.MiddleButton:
-                self._mid_button_down_3d = True
-                return False  # deixa o VTK continuar recebendo o evento, se quiser
-
-            elif et == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.MiddleButton:
-                self._mid_button_down_3d = False
-                return False
-
-            elif et == QtCore.QEvent.Wheel and getattr(self, "_mid_button_down_3d", False):
-                try:
-                    delta = event.angleDelta().y()
-                except Exception:
-                    delta = 0
-
-                if self._adjust_main_z_exag(delta):
-                    return True
-
             try:
                 mode = self.state.get("pick_mode", None)
             except Exception:
