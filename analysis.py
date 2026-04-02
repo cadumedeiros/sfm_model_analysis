@@ -434,95 +434,370 @@ def make_thickness_2d_from_grid(array_name_3d="thickness_local", array_name_2d="
     surf.cell_data[array_name_2d] = thickness_2d[:nx-1, :ny-1].ravel(order="F")
     return surf
 
-def add_vertical_facies_metrics(facies_selected, prefix="vert_"):
-    if isinstance(facies_selected, (int, np.integer)):
-        facies_set = {int(facies_selected)}
-    else:
-        facies_set = {int(f) for f in facies_selected}
+def _vertical_metric_base_names(include_filtered=True):
+    names = [
+        "Ttot_reservoir",
+        "Tenv_reservoir",
+        "NTG_col_reservoir",
+        "NTG_env_reservoir",
+        "n_packages_reservoir",
+        "Tpack_max_reservoir",
+        "Tpack_mean_reservoir",
+        "Cdom_reservoir",
+        "ICV_reservoir",
+        "ICV_env_reservoir",
+        "ICV_col_reservoir",
+        "Qv_reservoir",
+        "Qv_abs_reservoir",
+        "Tgap_sum_reservoir",
+        "Tgap_max_reservoir",
+        "Gap_env_reservoir",
+        "Nswitch_reservoir",
+        "Dswitch_col_reservoir",
+        "Dswitch_env_reservoir",
+        "Wswitch_reservoir",
+        "WswitchN_col_reservoir",
+        "Npersist_reservoir",
+        "Rpersist_reservoir",
+        "Wpersist_reservoir",
+        "WpersistN_reservoir",
+    ]
+    if include_filtered:
+        names.extend([f"{name}_filt" for name in names])
+    return names
 
-    facies_xyz = facies.reshape((nx, ny, nz), order="F")
-    z_xyz = grid.cell_centers().points[:, 2].reshape((nx, ny, nz), order="F")
 
-    Ttot_3d   = np.zeros((nx, ny, nz), dtype=float)
-    Tenv_3d   = np.zeros((nx, ny, nz), dtype=float)
-    NTGcol_3d = np.zeros((nx, ny, nz), dtype=float)
-    NTGenv_3d = np.zeros((nx, ny, nz), dtype=float)
-    Npack_3d     = np.zeros((nx, ny, nz), dtype=float)
-    Tpackmax_3d  = np.zeros((nx, ny, nz), dtype=float)
-    Tgap_sum_3d  = np.zeros((nx, ny, nz), dtype=float)
-    Tgap_max_3d  = np.zeros((nx, ny, nz), dtype=float)
-    ICV_3d       = np.zeros((nx, ny, nz), dtype=float)
-    Qv_3d        = np.zeros((nx, ny, nz), dtype=float)
-    Qvabs_3d     = np.zeros((nx, ny, nz), dtype=float)
+VERTICAL_NORMALIZED_BASE_NAMES = (
+    "NTG_col_reservoir",
+    "NTG_env_reservoir",
+    "Cdom_reservoir",
+    "ICV_reservoir",
+    "ICV_env_reservoir",
+    "ICV_col_reservoir",
+    "Qv_reservoir",
+    "Qv_abs_reservoir",
+    "Gap_env_reservoir",
+    "Rpersist_reservoir",
+)
+
+
+def is_vertical_metric_normalized_name(name, prefix="vert_"):
+    s = str(name or "")
+    if not s.startswith(prefix):
+        return False
+    core = s[len(prefix):]
+    return any(core == base or core == f"{base}_filt" for base in VERTICAL_NORMALIZED_BASE_NAMES)
+
+
+VERTICAL_PRESET_DEFINITIONS = [
+    ("Espessura", "Ttot_reservoir", "Espessura total reservatório (m)"),
+    ("Espessura no envelope", "Tenv_reservoir", "Espessura no envelope (m)"),
+    ("Proporção de fácies (coluna)", "NTG_col_reservoir", "Proporção de fácies (coluna)"),
+    ("Proporção de fácies (envelope)", "NTG_env_reservoir", "Proporção de fácies (envelope)"),
+    ("Maior pacote", "Tpack_max_reservoir", "Maior pacote (m)"),
+    ("Espessura média dos pacotes", "Tpack_mean_reservoir", "Espessura média dos pacotes (m)"),
+    ("Nº pacotes", "n_packages_reservoir", "Nº pacotes"),
+    ("Dominância do maior pacote", "Cdom_reservoir", "Dominância do maior pacote"),
+    ("ICV", "ICV_reservoir", "ICV"),
+    ("ICV envelope", "ICV_env_reservoir", "ICV envelope"),
+    ("ICV coluna", "ICV_col_reservoir", "ICV coluna"),
+    ("Qv", "Qv_reservoir", "Qv"),
+    ("Qv absoluto", "Qv_abs_reservoir", "Qv absoluto"),
+    ("Soma dos gaps", "Tgap_sum_reservoir", "Soma dos gaps (m)"),
+    ("Maior gap", "Tgap_max_reservoir", "Maior gap (m)"),
+    ("Fração de gaps no envelope", "Gap_env_reservoir", "Fração de gaps no envelope"),
+    ("Nº de trocas", "Nswitch_reservoir", "Nº de trocas"),
+    ("Densidade de trocas (coluna)", "Dswitch_col_reservoir", "Densidade de trocas (coluna)"),
+    ("Densidade de trocas (envelope)", "Dswitch_env_reservoir", "Densidade de trocas (envelope)"),
+    ("Troca ponderada", "Wswitch_reservoir", "Troca ponderada"),
+    ("Troca ponderada norm. (coluna)", "WswitchN_col_reservoir", "Troca ponderada norm. (coluna)"),
+    ("Permanência bruta", "Npersist_reservoir", "Permanência bruta"),
+    ("Permanência relativa", "Rpersist_reservoir", "Permanência relativa"),
+    ("Permanência ponderada", "Wpersist_reservoir", "Permanência ponderada"),
+    ("Permanência ponderada norm.", "WpersistN_reservoir", "Permanência ponderada norm."),
+]
+
+
+def get_vertical_metric_presets(prefix="vert_", include_filtered=True):
+    presets = {}
+    for label, base, title in VERTICAL_PRESET_DEFINITIONS:
+        presets[label] = (f"{prefix}{base}", title)
+        if include_filtered:
+            presets[f"{label} (filtrado)"] = (f"{prefix}{base}_filt", f"{title} (filtrado)")
+    return presets
+
+
+def _zero_vertical_metrics_dict():
+    return {name: 0.0 for name in _vertical_metric_base_names(include_filtered=False)}
+
+
+def _clip01(value):
+    try:
+        return float(np.clip(float(value), 0.0, 1.0))
+    except Exception:
+        return 0.0
+
+
+def _build_binary_runs(binary_flags, thickness_values):
+    flags = np.asarray(binary_flags, dtype=np.int8).ravel()
+    th = np.asarray(thickness_values, dtype=float).ravel()
+    n = min(flags.size, th.size)
+    if n == 0:
+        return []
+
+    runs = []
+    cur_flag = int(flags[0])
+    cur_t = float(th[0])
+    cur_n = 1
+
+    for fl, tt in zip(flags[1:n], th[1:n]):
+        fl = int(fl)
+        tt = float(tt)
+        if fl == cur_flag:
+            cur_t += tt
+            cur_n += 1
+        else:
+            runs.append((cur_flag, cur_t, cur_n))
+            cur_flag = fl
+            cur_t = tt
+            cur_n = 1
+    runs.append((cur_flag, cur_t, cur_n))
+    return runs
+
+
+def _merge_adjacent_same_binary_runs(runs):
+    if not runs:
+        return []
+    out = [tuple(runs[0])]
+    for flag, thick, count in runs[1:]:
+        pf, pt, pc = out[-1]
+        if int(flag) == int(pf):
+            out[-1] = (pf, float(pt) + float(thick), int(pc) + int(count))
+        else:
+            out.append((int(flag), float(thick), int(count)))
+    return out
+
+
+def _merge_thin_binary_runs(runs, t_min):
+    if not runs:
+        return []
+    try:
+        t_min = float(t_min)
+    except Exception:
+        t_min = 0.0
+    if t_min <= 0.0 or len(runs) <= 1:
+        return _merge_adjacent_same_binary_runs(runs)
+
+    runs = [(int(f), float(t), int(c)) for (f, t, c) in runs]
+    runs = _merge_adjacent_same_binary_runs(runs)
+
+    changed = True
+    while changed and len(runs) > 1:
+        changed = False
+        for i, (flag, thick, count) in enumerate(runs):
+            if float(thick) >= t_min:
+                continue
+
+            if i == 0:
+                nf, nt, nc = runs[1]
+                runs[1] = (nf, nt + thick, nc + count)
+                runs.pop(0)
+            elif i == len(runs) - 1:
+                pf, pt, pc = runs[-2]
+                runs[-2] = (pf, pt + thick, pc + count)
+                runs.pop(-1)
+            else:
+                lf, lt, lc = runs[i - 1]
+                rf, rt, rc = runs[i + 1]
+                if float(lt) >= float(rt):
+                    runs[i - 1] = (lf, lt + thick, lc + count)
+                    runs.pop(i)
+                else:
+                    runs[i + 1] = (rf, rt + thick, rc + count)
+                    runs.pop(i)
+
+            runs = _merge_adjacent_same_binary_runs(runs)
+            changed = True
+            break
+
+    return _merge_adjacent_same_binary_runs(runs)
+
+
+def _expand_binary_runs_to_cells(runs):
+    flags = []
+    th = []
+    for flag, thick, count in runs:
+        count = max(int(count), 1)
+        per_cell = float(thick) / float(count)
+        flags.extend([int(flag)] * count)
+        th.extend([per_cell] * count)
+    return np.asarray(flags, dtype=np.int8), np.asarray(th, dtype=float)
+
+
+def _compute_vertical_metrics_from_binary_cells(binary_flags, thickness_values):
+    out = _zero_vertical_metrics_dict()
+
+    flags = np.asarray(binary_flags, dtype=np.int8).ravel()
+    th = np.asarray(thickness_values, dtype=float).ravel()
+    valid = np.isfinite(th) & (th > 0.0)
+    flags = flags[valid]
+    th = th[valid]
+
+    if flags.size == 0 or th.size == 0:
+        return out
+
+    T_col = float(np.sum(th))
+    if T_col <= 0.0:
+        return out
+
+    target_mask = flags == 1
+    if not np.any(target_mask):
+        return out
+
+    idx = np.where(target_mask)[0]
+    start_idx = int(idx[0])
+    end_idx = int(idx[-1])
+
+    T_tot = float(np.sum(th[target_mask]))
+    T_env = float(np.sum(th[start_idx:end_idx + 1])) if end_idx >= start_idx else 0.0
+    NTG_col = T_tot / T_col if T_col > 0.0 else 0.0
+    NTG_env = T_tot / T_env if T_env > 0.0 else 0.0
+
+    runs = _build_binary_runs(flags, th)
+    target_runs = [(f, t, c) for (f, t, c) in runs if int(f) == 1]
+    n_packages = len(target_runs)
+    pack_thicknesses = [float(t) for (_f, t, _c) in target_runs]
+    T_pack_max = max(pack_thicknesses) if pack_thicknesses else 0.0
+    T_pack_mean = (T_tot / float(n_packages)) if n_packages > 0 else 0.0
+    Cdom = (T_pack_max / T_tot) if T_tot > 0.0 else 0.0
+    ICV_env = (T_pack_max / T_env) if T_env > 0.0 else 0.0
+    ICV_col = (T_pack_max / T_col) if T_col > 0.0 else 0.0
+    Qv = NTG_col * ICV_env
+    Qv_abs = ICV_env * ICV_col
+
+    target_run_ids = [i for i, (f, _t, _c) in enumerate(runs) if int(f) == 1]
+    gaps = []
+    if len(target_run_ids) >= 2:
+        for run_id in range(target_run_ids[0] + 1, target_run_ids[-1]):
+            f_gap, t_gap, _c_gap = runs[run_id]
+            if int(f_gap) == 0:
+                gaps.append(float(t_gap))
+    Tgap_sum = float(sum(gaps)) if gaps else 0.0
+    Tgap_max = max(gaps) if gaps else 0.0
+    Gap_env = (Tgap_sum / T_env) if T_env > 0.0 else 0.0
+
+    adj_same_target = (flags[1:] == 1) & (flags[:-1] == 1)
+    adj_switch = flags[1:] != flags[:-1]
+
+    Nswitch = float(np.sum(adj_switch))
+    Dswitch_col = (Nswitch / T_col) if T_col > 0.0 else 0.0
+    Dswitch_env = (Nswitch / T_env) if T_env > 0.0 else 0.0
+    Wswitch = float(np.sum(0.5 * (th[1:] + th[:-1])[adj_switch])) if np.any(adj_switch) else 0.0
+    WswitchN_col = (Wswitch / T_col) if T_col > 0.0 else 0.0
+
+    Npersist = float(np.sum(adj_same_target))
+    n_target_cells = int(np.sum(target_mask))
+    Rpersist = (Npersist / max(n_target_cells - 1, 1)) if n_target_cells > 0 else 0.0
+    Wpersist = float(np.sum(0.5 * (th[1:] + th[:-1])[adj_same_target])) if np.any(adj_same_target) else 0.0
+    WpersistN = (Wpersist / T_tot) if T_tot > 0.0 else 0.0
+
+    out.update({
+        "Ttot_reservoir": T_tot,
+        "Tenv_reservoir": T_env,
+        "NTG_col_reservoir": _clip01(NTG_col),
+        "NTG_env_reservoir": _clip01(NTG_env),
+        "n_packages_reservoir": float(n_packages),
+        "Tpack_max_reservoir": T_pack_max,
+        "Tpack_mean_reservoir": T_pack_mean,
+        "Cdom_reservoir": _clip01(Cdom),
+        "ICV_reservoir": _clip01(ICV_env),
+        "ICV_env_reservoir": _clip01(ICV_env),
+        "ICV_col_reservoir": _clip01(ICV_col),
+        "Qv_reservoir": _clip01(Qv),
+        "Qv_abs_reservoir": _clip01(Qv_abs),
+        "Tgap_sum_reservoir": Tgap_sum,
+        "Tgap_max_reservoir": Tgap_max,
+        "Gap_env_reservoir": _clip01(Gap_env),
+        "Nswitch_reservoir": Nswitch,
+        "Dswitch_col_reservoir": Dswitch_col,
+        "Dswitch_env_reservoir": Dswitch_env,
+        "Wswitch_reservoir": Wswitch,
+        "WswitchN_col_reservoir": WswitchN_col,
+        "Npersist_reservoir": Npersist,
+        "Rpersist_reservoir": _clip01(Rpersist),
+        "Wpersist_reservoir": Wpersist,
+        "WpersistN_reservoir": WpersistN,
+    })
+    return out
+
+
+def compute_vertical_metrics_for_grid(
+    target_grid,
+    facies_array,
+    reservoir_set,
+    prefix="vert_",
+    thin_lamination_threshold=0.30,
+    include_filtered=True,
+):
+    if target_grid is None or facies_array is None:
+        return []
+    if target_grid.n_cells != nx * ny * nz:
+        return []
+
+    metric_names = _vertical_metric_base_names(include_filtered=include_filtered)
+    data_map = {f"{prefix}{name}": np.zeros((nx, ny, nz), dtype=float) for name in metric_names}
+
+    th = _get_cell_thickness(target_grid)
+    if th is None:
+        return []
+
+    try:
+        fac_3d = np.asarray(facies_array).reshape((nx, ny, nz), order="F")
+        th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+    except Exception:
+        return []
+
+    res_list = sorted({int(f) for f in (reservoir_set or [])})
 
     for ix in range(nx):
         for iy in range(ny):
-            col_fac = facies_xyz[ix, iy, :]
-            col_z   = z_xyz[ix, iy, :]
-            z_col_min = float(np.nanmin(col_z))
-            z_col_max = float(np.nanmax(col_z))
-            T_col_total = abs(z_col_max - z_col_min)
-            dz_mean_col = T_col_total / nz if nz > 0 else 0.0
-            mask = np.isin(col_fac, list(facies_set))
-            if not mask.any() or dz_mean_col == 0.0 or T_col_total == 0.0: continue
+            col_fac = fac_3d[ix, iy, :]
+            col_th = th_3d[ix, iy, :]
+            valid_th = np.isfinite(col_th) & (col_th > 0.0)
+            if not np.any(valid_th):
+                continue
 
-            idx = np.where(mask)[0]
-            n_tot = idx.size
-            n_env = int(idx[-1] - idx[0] + 1)
-            T_tot = n_tot * dz_mean_col
-            T_env = n_env * dz_mean_col
-            NTG_col = T_tot / T_col_total if T_col_total > 0 else 0.0
-            NTG_env = T_tot / T_env if T_env > 0 else 0.0
+            mask = np.isin(col_fac, res_list) & valid_th if res_list else np.zeros_like(valid_th, dtype=bool)
+            if not np.any(mask):
+                continue
 
-            packages = []
-            start = idx[0]; prev = idx[0]
-            for k in idx[1:]:
-                if k == prev + 1: prev = k
-                else: packages.append((start, prev)); start = prev = k
-            packages.append((start, prev))
+            raw_metrics = _compute_vertical_metrics_from_binary_cells(mask.astype(np.int8), col_th)
+            for base_name, value in raw_metrics.items():
+                data_map[f"{prefix}{base_name}"][ix, iy, mask] = value
 
-            n_packages = len(packages)
-            thickness_packs = []
-            for (k0, k1) in packages:
-                n_cells = int(k1 - k0 + 1)
-                thickness_packs.append(n_cells * dz_mean_col)
-            Tpack_max = max(thickness_packs) if thickness_packs else 0.0
+            if include_filtered:
+                raw_runs = _build_binary_runs(mask[valid_th].astype(np.int8), col_th[valid_th])
+                filt_runs = _merge_thin_binary_runs(raw_runs, thin_lamination_threshold)
+                filt_flags, filt_th = _expand_binary_runs_to_cells(filt_runs)
+                filt_metrics = _compute_vertical_metrics_from_binary_cells(filt_flags, filt_th)
+                for base_name, value in filt_metrics.items():
+                    data_map[f"{prefix}{base_name}_filt"][ix, iy, mask] = value
 
-            gaps = []
-            if n_packages > 1:
-                for (s1, e1), (s2, e2) in zip(packages[:-1], packages[1:]):
-                    gap_cells = int(s2 - e1 - 1)
-                    if gap_cells > 0: gaps.append(gap_cells * dz_mean_col)
-            Tgap_sum = float(sum(gaps)) if gaps else 0.0
-            Tgap_max = max(gaps) if gaps else 0.0
+    for name, arr_3d in data_map.items():
+        target_grid.cell_data[name] = arr_3d.reshape(-1, order="F")
 
-            ICV = Tpack_max / T_env if T_env > 0 else 0.0
-            ICV = max(0.0, min(1.0, ICV))
-            Qv = NTG_col * ICV
-            frac_pack = Tpack_max / T_col_total if T_col_total > 0 else 0.0
-            Qv_abs = ICV * frac_pack
+    return list(data_map.keys())
 
-            Ttot_3d[ix, iy, mask]   = T_tot
-            Tenv_3d[ix, iy, mask]   = T_env
-            NTGcol_3d[ix, iy, mask] = NTG_col
-            NTGenv_3d[ix, iy, mask] = NTG_env
-            Npack_3d[ix, iy, mask]    = float(n_packages)
-            Tpackmax_3d[ix, iy, mask] = Tpack_max
-            Tgap_sum_3d[ix, iy, mask] = Tgap_sum
-            Tgap_max_3d[ix, iy, mask] = Tgap_max
-            ICV_3d[ix, iy, mask]      = ICV
-            Qv_3d[ix, iy, mask]       = Qv
-            Qvabs_3d[ix, iy, mask]    = Qv_abs
 
-    name_map = {
-        "Ttot_reservoir": Ttot_3d, "Tenv_reservoir": Tenv_3d,
-        "NTG_col_reservoir": NTGcol_3d, "NTG_env_reservoir": NTGenv_3d,
-        "n_packages_reservoir": Npack_3d, "Tpack_max_reservoir": Tpackmax_3d,
-        "Tgap_sum_reservoir": Tgap_sum_3d, "Tgap_max_reservoir": Tgap_max_3d,
-        "ICV_reservoir": ICV_3d, "Qv_reservoir": Qv_3d, "Qv_abs_reservoir": Qvabs_3d
-    }
-    for k, v in name_map.items():
-        grid.cell_data[prefix + k] = v.reshape(-1, order="F")
+def add_vertical_facies_metrics(facies_selected, prefix="vert_", thin_lamination_threshold=0.30, include_filtered=True):
+    return compute_vertical_metrics_for_grid(
+        target_grid=grid,
+        facies_array=facies,
+        reservoir_set=facies_selected,
+        prefix=prefix,
+        thin_lamination_threshold=thin_lamination_threshold,
+        include_filtered=include_filtered,
+    )
 
 # =============================================================================
 # ANÁLISE DE POÇOS

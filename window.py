@@ -19,6 +19,9 @@ from analysis import (
     reservoir_facies_distribution_array,
     _get_cell_volumes,
     _get_cell_z_coords,
+    compute_vertical_metrics_for_grid,
+    get_vertical_metric_presets,
+    is_vertical_metric_normalized_name,
 )
 from wells import Well
 
@@ -2218,25 +2221,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
         self.btn_thick.setIconSize(QtCore.QSize(28, 28))
         self.btn_thick.setAutoRaise(True)
-        
         menu_thick = QtWidgets.QMenu(self.btn_thick)
-        thickness_opts = [
-            "Espessura total da coluna",
-            "Espessura",
-            "Proporção de fácies (coluna)",
-            "Proporção de fácies (envelope)",
-            "Maior pacote",
-            "Nº pacotes",
-            "ICV",
-            "Qv",
-            "Qv absoluto",
-        ]
+        thickness_opts = ["Espessura total da coluna"] + list(get_vertical_metric_presets(prefix="vert_", include_filtered=False).keys())
         for label in thickness_opts:
             action = menu_thick.addAction(label)
             action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
         self.btn_thick.setMenu(menu_thick)
-        self._update_thick_btn("Espessura total da coluna")
         g_esp_row.addWidget(self.btn_thick)
+
+        self.btn_thickness_filter = make_tool_btn("Filtrar\nFinas",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton),
+            checkable=True,
+        )
+        self.btn_thickness_filter.setToolTip("Ignora laminações finas nas métricas por coluna")
+        self.btn_thickness_filter.toggled.connect(self._on_toggle_thickness_filtered)
+        g_esp_row.addWidget(self.btn_thickness_filter)
+
+        self.state.setdefault("thickness_use_filtered", False)
+        self._update_thick_btn("Espessura total da coluna")
 
         # --- NOVO GRUPO: ESTILO (CORES) ---
         g_style, g_style_row = make_group("Estilo")
@@ -3062,19 +3064,62 @@ class MainWindow(QtWidgets.QMainWindow):
         if "refresh" in self.state and callable(self.state["refresh"]):
             self.change_mode(data)
 
+    def _all_thickness_presets(self):
+        presets = self.state.get("thickness_presets")
+        if isinstance(presets, dict) and presets:
+            return presets
+        return {
+            "Espessura total da coluna": ("__total_column_thickness__", "Espessura total da coluna (m)"),
+            **get_vertical_metric_presets(prefix="vert_", include_filtered=True),
+        }
+
+    def _thickness_mode_base_label(self, label):
+        suffix = " (filtrado)"
+        label = str(label or "Espessura total da coluna")
+        return label[:-len(suffix)] if label.endswith(suffix) else label
+
+    def _compose_thickness_mode_label(self, base_label, use_filtered=None):
+        base_label = self._thickness_mode_base_label(base_label)
+        if use_filtered is None:
+            use_filtered = self._is_thickness_filter_enabled()
+        if base_label == "Espessura total da coluna":
+            return base_label
+        filtered_label = f"{base_label} (filtrado)"
+        return filtered_label if use_filtered and filtered_label in self._all_thickness_presets() else base_label
+
+    def _is_thickness_filter_enabled(self):
+        if hasattr(self, "btn_thickness_filter") and self.btn_thickness_filter is not None:
+            try:
+                return bool(self.btn_thickness_filter.isChecked())
+            except Exception:
+                pass
+        return bool(self.state.get("thickness_use_filtered", False))
+
+    def _current_thickness_base_label(self):
+        return self._thickness_mode_base_label(self.state.get("thickness_mode", "Espessura total da coluna"))
+
+    def _on_toggle_thickness_filtered(self, checked):
+        self.state["thickness_use_filtered"] = bool(checked)
+        self._update_thick_btn(self._current_thickness_base_label())
 
     def _update_thick_btn(self, label):
+        base_label = self._thickness_mode_base_label(label)
+        use_filtered = self._is_thickness_filter_enabled()
+        effective_label = self._compose_thickness_mode_label(base_label, use_filtered=use_filtered)
+
         # Texto do botão (ribbon)
         if hasattr(self, "btn_thick") and self.btn_thick is not None:
-            self.btn_thick.setText(f"Espessura\n{label}")
-            self.btn_thick.setToolTip(f"Espessura: {label}")
+            suffix = " (filtrado)" if effective_label != base_label else ""
+            self.btn_thick.setText(f"Espessura\n{base_label}{suffix}")
+            self.btn_thick.setToolTip(f"Espessura: {base_label}{suffix}")
 
         # Sempre salva no state
-        self.state["thickness_mode"] = label
+        self.state["thickness_use_filtered"] = use_filtered
+        self.state["thickness_mode"] = effective_label
 
         # Só aplica (render) se o visualize.run já tiver registrado refresh
         if "refresh" in self.state and callable(self.state["refresh"]):
-            self.change_thickness_mode(label)
+            self.change_thickness_mode(base_label)
 
     def show_main_3d_view(self):
         """Alterna para a visualização 3D respeitando a perspectiva atual."""
@@ -5126,8 +5171,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state["thickness_clim_manual"] = False
         self.state["thickness_global_clim"] = None
 
-        self.state["thickness_mode"] = label
-        is_total_column_mode = (label == "Espessura total da coluna")
+        base_label = self._thickness_mode_base_label(label)
+        use_filtered = self._is_thickness_filter_enabled()
+        effective_label = self._compose_thickness_mode_label(base_label, use_filtered=use_filtered)
+
+        self.state["thickness_use_filtered"] = use_filtered
+        self.state["thickness_mode"] = effective_label
+        is_total_column_mode = (base_label == "Espessura total da coluna")
 
         # 1. Atualiza Visualização PRINCIPAL
         if "update_thickness" in self.state and callable(self.state["update_thickness"]):
@@ -5155,7 +5205,8 @@ class MainWindow(QtWidgets.QMainWindow):
             for st in self.active_comp_states:
                 st["thickness_clim_manual"] = False
                 st["thickness_global_clim"] = None
-                st["thickness_mode"] = label
+                st["thickness_use_filtered"] = use_filtered
+                st["thickness_mode"] = effective_label
 
                 if "update_thickness" in st:
                     st["update_thickness"]()
@@ -6427,86 +6478,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return pd.DataFrame(data_list)
 
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
-        """Recalcula métricas verticais usando a espessura real das células do grid."""
-        if target_grid is None or target_grid.n_cells != nx * ny * nz:
-            return
-
-        th = self._get_grid_cell_thickness_array(target_grid)
-        if th is None:
-            return
-
+        """Wrapper centralizado: métricas verticais passam a ser calculadas em analysis.py."""
         try:
-            th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
-        except Exception:
-            return
-
-        fac_3d = facies_array.reshape((nx, ny, nz), order="F")
-
-        keys = [
-            "vert_Ttot_reservoir", "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
-            "vert_n_packages_reservoir", "vert_Tpack_max_reservoir",
-            "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir"
-        ]
-        data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
-        res_list = list(set(reservoir_set))
-
-        for ix in range(nx):
-            for iy in range(ny):
-                col_fac = fac_3d[ix, iy, :]
-                col_th = th_3d[ix, iy, :]
-                valid_th = np.isfinite(col_th) & (col_th > 0.0)
-                if not np.any(valid_th):
-                    continue
-
-                mask = np.isin(col_fac, res_list) & valid_th
-                if not np.any(mask):
-                    continue
-
-                idx = np.where(mask)[0]
-                T_col = float(np.sum(col_th[valid_th]))
-                if T_col <= 0.0:
-                    continue
-
-                T_tot = float(np.sum(col_th[mask]))
-                start_k, end_k = int(idx[0]), int(idx[-1])
-                env_mask = valid_th.copy()
-                env_mask[:start_k] = False
-                env_mask[end_k + 1:] = False
-                T_env = float(np.sum(col_th[env_mask])) if np.any(env_mask) else 0.0
-
-                NTG_col = T_tot / T_col if T_col > 0.0 else 0.0
-                NTG_env = T_tot / T_env if T_env > 0.0 else 0.0
-
-                package_thicknesses = []
-                start = idx[0]
-                prev = idx[0]
-                for k in idx[1:]:
-                    if k == prev + 1:
-                        prev = k
-                    else:
-                        package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
-                        start = prev = k
-                package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
-
-                T_pack_max = max(package_thicknesses) if package_thicknesses else 0.0
-                n_packages = len(package_thicknesses)
-                ICV = T_pack_max / T_env if T_env > 0.0 else 0.0
-                Qv = NTG_col * ICV
-                Qv_abs = ICV * (T_pack_max / T_col) if T_col > 0.0 else 0.0
-
-                data_map["vert_Ttot_reservoir"][ix, iy, mask] = T_tot
-                data_map["vert_NTG_col_reservoir"][ix, iy, mask] = NTG_col
-                data_map["vert_NTG_env_reservoir"][ix, iy, mask] = NTG_env
-                data_map["vert_n_packages_reservoir"][ix, iy, mask] = float(n_packages)
-                data_map["vert_Tpack_max_reservoir"][ix, iy, mask] = T_pack_max
-                data_map["vert_ICV_reservoir"][ix, iy, mask] = ICV
-                data_map["vert_Qv_reservoir"][ix, iy, mask] = Qv
-                data_map["vert_Qv_abs_reservoir"][ix, iy, mask] = Qv_abs
-
-        for k, v in data_map.items():
-            target_grid.cell_data[k] = v.reshape(-1, order="F")
-
-
+            compute_vertical_metrics_for_grid(
+                target_grid,
+                facies_array,
+                reservoir_set,
+                prefix="vert_",
+                thin_lamination_threshold=0.30,
+                include_filtered=True,
+            )
+        except Exception as e:
+            print(f"[recalc_vertical_metrics] falhou: {e}")
 
 
     def _open_matplotlib_report(
@@ -9667,13 +9650,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if s in user_set:
             return True
 
-        if s in (
-            "vert_NTG_col_reservoir",
-            "vert_NTG_env_reservoir",
-            "vert_ICV_reservoir",
-            "vert_Qv_reservoir",
-            "vert_Qv_abs_reservoir",
-        ):
+        if is_vertical_metric_normalized_name(s):
             return True
 
         return False
@@ -10506,25 +10483,23 @@ class MainWindow(QtWidgets.QMainWindow):
             et = event.type()
 
             # =========================================================
-            # BOTÃO DO MEIO + WHEEL = EXAGERO VERTICAL DO 3D PRINCIPAL
-            # Funciona mesmo fora do modo cell/column
+            # SHIFT + WHEEL = EXAGERO VERTICAL DO 3D PRINCIPAL
+            # Wheel sozinho continua com o zoom normal do VTK
             # =========================================================
-            if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.MiddleButton:
-                self._mid_button_down_3d = True
-                return False  # deixa o VTK continuar recebendo o evento, se quiser
-
-            elif et == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.MiddleButton:
-                self._mid_button_down_3d = False
-                return False
-
-            elif et == QtCore.QEvent.Wheel and getattr(self, "_mid_button_down_3d", False):
+            if et == QtCore.QEvent.Wheel:
                 try:
-                    delta = event.angleDelta().y()
+                    mods = event.modifiers()
                 except Exception:
-                    delta = 0
+                    mods = QtCore.Qt.NoModifier
 
-                if self._adjust_main_z_exag(delta):
-                    return True
+                if mods & QtCore.Qt.ShiftModifier:
+                    try:
+                        delta = event.angleDelta().y()
+                    except Exception:
+                        delta = 0
+
+                    if self._adjust_main_z_exag(delta):
+                        return True
 
             try:
                 mode = self.state.get("pick_mode", None)
@@ -11318,6 +11293,9 @@ class MainWindow(QtWidgets.QMainWindow):
             flat = out2d[np.isfinite(out2d)]
             if flat.size:
                 vals.append(flat)
+
+        if self._is_normalized_property(scalar_name):
+            return (0.0, 1.0)
 
         if not vals:
             return None

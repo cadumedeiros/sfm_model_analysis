@@ -8,7 +8,12 @@ from scipy.ndimage import label as nd_label, generate_binary_structure
 # Importamos globais para valores default
 from load_data import grid as global_grid, nx, ny, nz
 from config import load_facies_colors
-from analysis import make_thickness_2d_from_grid
+from analysis import (
+    make_thickness_2d_from_grid,
+    compute_vertical_metrics_for_grid,
+    get_vertical_metric_presets,
+    is_vertical_metric_normalized_name,
+)
 
 FACIES_COLORS = load_facies_colors()
 
@@ -36,28 +41,13 @@ SHOW_SCALAR_BAR = False
 def get_2d_clim(base_scalar_name, arr=None):
     """
     Retorna (vmin, vmax) para mapas 2D.
-    Se houver preset para o campo, usa o preset.
-    Caso contrário, usa os próprios dados como fallback.
+    - Métricas normalizadas ficam em 0–1.
+    - Demais métricas verticais/espessuras usam vmin=0 e vmax pelos dados.
     """
+    if is_vertical_metric_normalized_name(base_scalar_name):
+        return (0.0, 1.0)
+
     preset = THICKNESS_2D_CLIM.get(base_scalar_name)
-
-    # Para alguns campos de "espessura" a escala NÃO deve ser fixa (ex.: 0–200),
-    # porque isso atrapalha a comparação quando os modelos mudam. Para esses casos,
-    # usamos os próprios dados (quando arr foi fornecido) e fixamos apenas o vmin em 0.
-    if arr is not None and base_scalar_name in (
-        "vert_Ttot_reservoir",
-        "vert_Tpack_max_reservoir",
-        "vert_n_packages_reservoir",
-    ):
-        arr = np.asarray(arr)
-        finite = arr[np.isfinite(arr)]
-        if finite.size == 0:
-            return (0.0, 1.0)
-        vmax = float(np.nanmax(finite))
-        if not np.isfinite(vmax) or vmax <= 0.0:
-            vmax = 1.0
-        return (0.0, vmax)
-
     if preset is not None:
         return preset
 
@@ -69,8 +59,16 @@ def get_2d_clim(base_scalar_name, arr=None):
     if finite.size == 0:
         return None
 
-    vmin = float(finite.min())
-    vmax = float(finite.max())
+    vmax = float(np.nanmax(finite))
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
+
+    if str(base_scalar_name).startswith("vert_") or base_scalar_name == "__total_column_thickness__":
+        return (0.0, vmax)
+
+    vmin = float(np.nanmin(finite))
+    if not np.isfinite(vmin):
+        vmin = 0.0
     if vmax <= vmin:
         vmax = vmin + 1e-6
     return (vmin, vmax)
@@ -213,86 +211,6 @@ def _ensure_total_column_thickness_scalar(target_grid):
 
     target_grid.cell_data["__total_column_thickness__"] = out.reshape(-1, order="F")
 
-def _calc_vertical_metrics(target_grid, facies_array, reservoir_set):
-    keys = [
-        "vert_Ttot_reservoir", "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
-        "vert_n_packages_reservoir", "vert_Tpack_max_reservoir", "vert_ICV_reservoir",
-        "vert_Qv_reservoir", "vert_Qv_abs_reservoir"
-    ]
-    data_map = {k: np.zeros((nx, ny, nz), dtype=float) for k in keys}
-
-    if target_grid.n_cells != nx * ny * nz:
-        return
-
-    th = _get_cell_thickness_for_grid(target_grid)
-    if th is None:
-        return
-
-    try:
-        th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
-    except Exception:
-        return
-
-    fac_3d = facies_array.reshape((nx, ny, nz), order="F")
-    res_list = list(set(reservoir_set))
-
-    for ix in range(nx):
-        for iy in range(ny):
-            col_fac = fac_3d[ix, iy, :]
-            col_th = th_3d[ix, iy, :]
-            valid_th = np.isfinite(col_th) & (col_th > 0.0)
-            if not np.any(valid_th):
-                continue
-
-            mask = np.isin(col_fac, res_list) & valid_th
-            if not np.any(mask):
-                continue
-
-            idx = np.where(mask)[0]
-            T_col = float(np.sum(col_th[valid_th]))
-            if T_col <= 0.0:
-                continue
-
-            T_tot = float(np.sum(col_th[mask]))
-            start_k, end_k = int(idx[0]), int(idx[-1])
-            env_mask = valid_th.copy()
-            env_mask[:start_k] = False
-            env_mask[end_k + 1:] = False
-            T_env = float(np.sum(col_th[env_mask])) if np.any(env_mask) else 0.0
-
-            NTG_col = T_tot / T_col if T_col > 0.0 else 0.0
-            NTG_env = T_tot / T_env if T_env > 0.0 else 0.0
-
-            package_thicknesses = []
-            start = idx[0]
-            prev = idx[0]
-            for k in idx[1:]:
-                if k == prev + 1:
-                    prev = k
-                else:
-                    package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
-                    start = prev = k
-            package_thicknesses.append(float(np.sum(col_th[start:prev + 1])))
-
-            T_pack_max = max(package_thicknesses) if package_thicknesses else 0.0
-            n_packages = len(package_thicknesses)
-            ICV = T_pack_max / T_env if T_env > 0.0 else 0.0
-            Qv = NTG_col * ICV
-            Qv_abs = ICV * (T_pack_max / T_col) if T_col > 0.0 else 0.0
-
-            data_map["vert_Ttot_reservoir"][ix, iy, mask] = T_tot
-            data_map["vert_NTG_col_reservoir"][ix, iy, mask] = NTG_col
-            data_map["vert_NTG_env_reservoir"][ix, iy, mask] = NTG_env
-            data_map["vert_n_packages_reservoir"][ix, iy, mask] = float(n_packages)
-            data_map["vert_Tpack_max_reservoir"][ix, iy, mask] = T_pack_max
-            data_map["vert_ICV_reservoir"][ix, iy, mask] = ICV
-            data_map["vert_Qv_reservoir"][ix, iy, mask] = Qv
-            data_map["vert_Qv_abs_reservoir"][ix, iy, mask] = Qv_abs
-
-    for name, arr_3d in data_map.items():
-        target_grid.cell_data[name] = arr_3d.reshape(-1, order="F")
-
-
 # =============================================================================
 # FUNÇÃO PRINCIPAL
 # =============================================================================
@@ -360,14 +278,7 @@ def run(
     
     default_presets = {
         "Espessura total da coluna": ("__total_column_thickness__", "Espessura total da coluna (m)"),
-        "Espessura": ("vert_Ttot_reservoir", "Espessura total reservatório (m)"),
-        "Proporção de fácies (coluna)": ("vert_NTG_col_reservoir", "Proporção de fácies (coluna)"),
-        "Proporção de fácies (envelope)": ("vert_NTG_env_reservoir", "Proporção de fácies (envelope)"),
-        "Maior pacote": ("vert_Tpack_max_reservoir", "Maior pacote (m)"),
-        "Nº pacotes": ("vert_n_packages_reservoir", "Nº pacotes"),
-        "ICV": ("vert_ICV_reservoir", "ICV"),
-        "Qv": ("vert_Qv_reservoir", "Qv"),
-        "Qv absoluto": ("vert_Qv_abs_reservoir", "Qv absoluto"),
+        **get_vertical_metric_presets(prefix="vert_", include_filtered=True),
     }
 
 
@@ -423,8 +334,15 @@ def run(
         current_g.cell_data["Clusters"] = clusters_1d
         current_g.cell_data["LargestCluster"] = largest_mask_1d
         
-        # Recalcula métricas verticais
-        _calc_vertical_metrics(current_g, current_f, rf_list) 
+        # Recalcula métricas verticais (fonte única em analysis.py)
+        compute_vertical_metrics_for_grid(
+            current_g,
+            current_f,
+            rf_list,
+            prefix="vert_",
+            thin_lamination_threshold=0.30,
+            include_filtered=True,
+        )
 
         # Sincroniza campos calculados com o grid base de visualização
         sync_names = ["Reservoir", "Clusters", "LargestCluster", "NTG_local", "Facies", "i_index", "j_index", "k_index"]
@@ -468,14 +386,11 @@ def run(
                 state["thickness_clim"] = (0.0, 1.0)
                 return
 
-            if s_name in (
-                "vert_NTG_col_reservoir", "vert_NTG_env_reservoir",
-                "vert_ICV_reservoir", "vert_Qv_reservoir", "vert_Qv_abs_reservoir",
-            ):
+            if is_vertical_metric_normalized_name(s_name):
                 state["thickness_clim"] = (0.0, 1.0)
                 return
 
-            if (s_name == "__total_column_thickness__") or ("Ttot" in s_name) or ("thickness" in s_name.lower()) or ("Espessura" in mode_label):
+            if (s_name == "__total_column_thickness__") or str(s_name).startswith("vert_") or ("thickness" in s_name.lower()) or ("Espessura" in mode_label):
                 vmax = float(np.nanmax(finite))
                 if not np.isfinite(vmax) or vmax <= 0:
                     vmax = 1.0
