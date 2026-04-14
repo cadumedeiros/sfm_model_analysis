@@ -4170,7 +4170,7 @@ class MainWindow(QtWidgets.QMainWindow):
             plotter.render()
             return
 
-        nx, ny, nz = dims
+        nx, ny, nz = dims  # <- número de CÉLULAS
 
         map_2d = self._reduce_grid_scalar_to_2d(grid_source, scalar_name_3d)
         if map_2d is None:
@@ -4180,14 +4180,27 @@ class MainWindow(QtWidgets.QMainWindow):
         total_thickness_2d = self._reduce_total_column_thickness_to_2d(grid_source)
 
         x_min, x_max, y_min, y_max, _, z_max = grid_source.bounds
-        xs = np.linspace(x_min, x_max, nx)
-        ys = np.linspace(y_max, y_min, ny)
+
+        # Para representar nx x ny CÉLULAS, a superfície precisa ter (nx+1) x (ny+1) PONTOS
+        xs = np.linspace(x_min, x_max, nx + 1)
+        ys = np.linspace(y_max, y_min, ny + 1)
         xs, ys = np.meshgrid(xs, ys, indexing="ij")
-        zs = np.full_like(xs, z_max)
+        zs = np.full_like(xs, z_max, dtype=float)
 
         surf = pv.StructuredGrid(xs, ys, zs)
+
         name2d = scalar_name_3d + "_2d"
-        surf.cell_data[name2d] = map_2d[:nx-1, :ny-1].ravel(order="F")
+
+        arr2d = np.asarray(map_2d, dtype=float)
+        if arr2d.shape != (nx, ny):
+            try:
+                arr2d = arr2d.reshape((nx, ny), order="F")
+            except Exception:
+                plotter.render()
+                return
+
+        # Agora usa TODAS as células do mapa, sem cortar [:nx-1, :ny-1]
+        surf.cell_data[name2d] = arr2d.ravel(order="F")
 
         arr = np.asarray(surf.cell_data[name2d], dtype=float)
         arr = np.where(np.isfinite(arr), arr, np.nan)
@@ -4206,7 +4219,10 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 clim = (0.0, 1.0)
         else:
-            clim = clim_override if clim_override is not None else get_2d_clim(base_scalar_name=scalar_name_3d, arr=arr)
+            clim = clim_override if clim_override is not None else get_2d_clim(
+                base_scalar_name=scalar_name_3d,
+                arr=arr,
+            )
 
         if cmap is None:
             cmap = self.state.get("current_scalar_cmap") or self.state.get("thickness_cmap") or "jet"
@@ -4265,7 +4281,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "model_name": getattr(plotter, "_hover2d_model_name", None),
                 "grid_source": grid_source,
                 "scalar_name_3d": scalar_name_3d,
-                "dims": (nx, ny, nz),
+                # usa as dimensões da SUPERFÍCIE (em pontos), não as do grid em células
+                "dims": tuple(int(v) for v in surf.dimensions),
                 "total_thickness_2d": total_thickness_2d,
             }
         except Exception:
@@ -10151,11 +10168,25 @@ class MainWindow(QtWidgets.QMainWindow):
         """Converte cell_id da superfície 2D para índices (i,j) do mapa reduzido."""
         if dims is None:
             return None, None
-        nx2 = int(dims[0] - 1)
-        if nx2 <= 0:
+
+        try:
+            nx_pts = int(dims[0])
+            ny_pts = int(dims[1])
+        except Exception:
             return None, None
-        iy = int(cell_id // nx2)
-        ix = int(cell_id % nx2)
+
+        nx_cells = nx_pts - 1
+        ny_cells = ny_pts - 1
+
+        if nx_cells <= 0 or ny_cells <= 0:
+            return None, None
+
+        iy = int(cell_id // nx_cells)
+        ix = int(cell_id % nx_cells)
+
+        if ix < 0 or ix >= nx_cells or iy < 0 or iy >= ny_cells:
+            return None, None
+
         return ix, iy
 
 
