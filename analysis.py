@@ -1467,3 +1467,415 @@ def compute_continuous_uncertainty_map(list_of_arrays, target_grid=None, metric=
         return np.ptp(stack, axis=0) # Peak to peak (Max - Min)
     
     return np.zeros(stack.shape[1])
+
+# =============================================================================
+# MÉDIA PONDERADA POR ESPESSURA E INCERTEZA DO ENSEMBLE
+# =============================================================================
+
+def _ensemble_stat(stack, metric="std"):
+    """
+    Calcula estatística entre modelos no eixo 0.
+
+    stack shape:
+        (n_modelos, n_amostras)
+
+    metric:
+        "mean"  -> média entre cenários
+        "std"   -> desvio padrão entre cenários
+        "var"   -> variância entre cenários
+        "range" -> amplitude: max - min
+    """
+    import numpy as np
+
+    stack = np.asarray(stack, dtype=float)
+
+    if stack.size == 0:
+        return np.array([])
+
+    metric = str(metric or "std").lower()
+
+    if metric in ("mean", "media", "média", "mu"):
+        return np.nanmean(stack, axis=0)
+
+    if metric in ("std", "desvio", "desvio_padrao", "desvio_padrão", "sigma"):
+        return np.nanstd(stack, axis=0)
+
+    if metric in ("var", "variance", "variancia", "variância"):
+        return np.nanvar(stack, axis=0)
+
+    if metric in ("range", "amplitude", "amp"):
+        return np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)
+
+    return np.nanstd(stack, axis=0)
+
+
+def compute_continuous_uncertainty_map(list_of_arrays, target_grid=None, metric="std"):
+    """
+    Calcula estatísticas entre cenários para variáveis contínuas célula a célula.
+
+    metric:
+        "mean"  -> média entre cenários
+        "std"   -> desvio padrão
+        "var"   -> variância
+        "range" -> amplitude
+    """
+    import numpy as np
+
+    if not list_of_arrays:
+        if target_grid is not None:
+            return np.zeros(target_grid.n_cells, dtype=float)
+        return np.array([], dtype=float)
+
+    try:
+        stack = np.vstack([np.asarray(a, dtype=float).ravel() for a in list_of_arrays])
+    except Exception:
+        return np.zeros(target_grid.n_cells, dtype=float) if target_grid is not None else np.array([], dtype=float)
+
+    return _ensemble_stat(stack, metric=metric)
+
+
+def compute_thickness_weighted_property_map(
+    target_grid,
+    scalar_name,
+    output_name=None,
+    *,
+    clip_to_01=False,
+):
+    """
+    Calcula a média ponderada por espessura de uma propriedade por coluna.
+
+    Para cada coluna (i,j):
+
+        mean_h = sum_k(h_ijk * p_ijk) / sum_k(h_ijk)
+
+    O resultado é salvo como cell_data replicado verticalmente na coluna,
+    permitindo visualização 3D e redução 2D pelo fluxo atual do programa.
+
+    Retorna:
+        output_name, out_2d
+    """
+    import numpy as np
+
+    if target_grid is None:
+        return None, None
+
+    if scalar_name not in target_grid.cell_data:
+        return None, None
+
+    if target_grid.n_cells != nx * ny * nz:
+        return None, None
+
+    prop = np.asarray(target_grid.cell_data[scalar_name], dtype=float)
+    th = _get_cell_thickness(target_grid)
+
+    if prop.size != target_grid.n_cells or th is None or len(th) != target_grid.n_cells:
+        return None, None
+
+    try:
+        prop_3d = prop.reshape((nx, ny, nz), order="F")
+        th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+    except Exception:
+        return None, None
+
+    out_2d = np.full((nx, ny), np.nan, dtype=float)
+    out_3d = np.zeros((nx, ny, nz), dtype=float)
+
+    for ix in range(nx):
+        for iy in range(ny):
+            p_col = prop_3d[ix, iy, :]
+            h_col = th_3d[ix, iy, :]
+
+            mask = np.isfinite(p_col) & np.isfinite(h_col) & (h_col > 0.0)
+            if not np.any(mask):
+                continue
+
+            p = p_col[mask]
+            h = h_col[mask]
+
+            if clip_to_01:
+                p = np.clip(p, 0.0, 1.0)
+
+            h_sum = float(np.sum(h))
+            if h_sum <= 0.0:
+                continue
+
+            val = float(np.sum(h * p) / h_sum)
+
+            out_2d[ix, iy] = val
+
+            # replica o valor na coluna para visualização 3D
+            out_3d[ix, iy, mask] = val
+
+    if output_name is None:
+        safe = "".join(c if c.isalnum() or c == "_" else "_" for c in str(scalar_name))
+        output_name = f"wmean_th_{safe}"
+
+    target_grid.cell_data[output_name] = out_3d.reshape(-1, order="F")
+    return output_name, out_2d
+
+
+def reduce_grid_scalar_to_column_map(
+    target_grid,
+    scalar_name,
+    *,
+    reduction="max",
+    clip_to_01=False,
+):
+    """
+    Reduz um campo 3D para mapa 2D por coluna.
+
+    reduction:
+        "max"           -> máximo finito da coluna
+        "mean"          -> média aritmética
+        "sum"           -> soma
+        "weighted_mean" -> média ponderada por espessura
+        "equivalent"    -> soma h*p, útil para propriedades fracionárias
+    """
+    import numpy as np
+
+    if target_grid is None:
+        return None
+
+    if scalar_name == "__total_column_thickness__":
+        th = _get_cell_thickness(target_grid)
+        if th is None or len(th) != target_grid.n_cells:
+            return None
+
+        try:
+            th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+        except Exception:
+            return None
+
+        out = np.full((nx, ny), np.nan, dtype=float)
+        for ix in range(nx):
+            for iy in range(ny):
+                col = th_3d[ix, iy, :]
+                mask = np.isfinite(col) & (col > 0.0)
+                if np.any(mask):
+                    out[ix, iy] = float(np.sum(col[mask]))
+        return out
+
+    if scalar_name not in target_grid.cell_data:
+        return None
+
+    if target_grid.n_cells != nx * ny * nz:
+        return None
+
+    arr = np.asarray(target_grid.cell_data[scalar_name], dtype=float)
+    if arr.size != target_grid.n_cells:
+        return None
+
+    try:
+        arr_3d = arr.reshape((nx, ny, nz), order="F")
+    except Exception:
+        return None
+
+    reduction = str(reduction or "max").lower()
+    out = np.full((nx, ny), np.nan, dtype=float)
+
+    if reduction in ("weighted_mean", "media_ponderada", "média_ponderada", "equivalent", "equivalente"):
+        th = _get_cell_thickness(target_grid)
+        if th is None or len(th) != target_grid.n_cells:
+            return None
+
+        try:
+            th_3d = np.asarray(th, dtype=float).reshape((nx, ny, nz), order="F")
+        except Exception:
+            return None
+
+        for ix in range(nx):
+            for iy in range(ny):
+                p_col = arr_3d[ix, iy, :]
+                h_col = th_3d[ix, iy, :]
+
+                mask = np.isfinite(p_col) & np.isfinite(h_col) & (h_col > 0.0)
+                if not np.any(mask):
+                    continue
+
+                p = p_col[mask]
+                h = h_col[mask]
+
+                if clip_to_01:
+                    p = np.clip(p, 0.0, 1.0)
+
+                eq = float(np.sum(h * p))
+
+                if reduction in ("equivalent", "equivalente"):
+                    out[ix, iy] = eq
+                else:
+                    h_sum = float(np.sum(h))
+                    out[ix, iy] = eq / h_sum if h_sum > 0.0 else np.nan
+
+        return out
+
+    for ix in range(nx):
+        for iy in range(ny):
+            col = arr_3d[ix, iy, :]
+            finite = col[np.isfinite(col)]
+            if finite.size == 0:
+                continue
+
+            if reduction == "mean":
+                out[ix, iy] = float(np.nanmean(finite))
+            elif reduction == "sum":
+                out[ix, iy] = float(np.nansum(finite))
+            else:
+                out[ix, iy] = float(np.nanmax(finite))
+
+    return out
+
+
+def compute_column_ensemble_stat_map(
+    list_of_grids,
+    scalar_name,
+    *,
+    metric="std",
+    reduction="weighted_mean",
+    clip_to_01=False,
+):
+    """
+    Calcula estatística entre cenários depois de reduzir cada modelo para mapa 2D.
+
+    Exemplo:
+        - primeiro calcula Qv(i,j) para cada modelo;
+        - depois calcula std(Qv)(i,j), var(Qv)(i,j), range(Qv)(i,j), etc.
+    """
+    import numpy as np
+
+    maps = []
+
+    for g in list_of_grids or []:
+        m2d = reduce_grid_scalar_to_column_map(
+            g,
+            scalar_name,
+            reduction=reduction,
+            clip_to_01=clip_to_01,
+        )
+        if m2d is None:
+            continue
+        maps.append(np.asarray(m2d, dtype=float).reshape(-1, order="F"))
+
+    if not maps:
+        return None
+
+    try:
+        stack = np.vstack(maps)
+    except Exception:
+        return None
+
+    out_flat = _ensemble_stat(stack, metric=metric)
+
+    try:
+        return out_flat.reshape((nx, ny), order="F")
+    except Exception:
+        return None
+
+
+def expand_column_map_to_cell_data(target_grid, column_map_2d, output_name):
+    """
+    Expande um mapa 2D (nx,ny) para cell_data 3D replicado em k.
+    Útil para visualizar incerteza por coluna no viewer 3D.
+    """
+    import numpy as np
+
+    if target_grid is None or column_map_2d is None:
+        return None
+
+    arr2d = np.asarray(column_map_2d, dtype=float)
+
+    try:
+        arr2d = arr2d.reshape((nx, ny), order="F")
+    except Exception:
+        return None
+
+    out3d = np.zeros((nx, ny, nz), dtype=float)
+
+    for ix in range(nx):
+        for iy in range(ny):
+            val = arr2d[ix, iy]
+            if np.isfinite(val):
+                out3d[ix, iy, :] = float(val)
+
+    out1d = out3d.reshape(-1, order="F")
+    target_grid.cell_data[output_name] = out1d
+    return out1d
+
+
+def compute_model_level_ensemble_summary(
+    list_of_grids,
+    model_names,
+    scalar_name,
+    *,
+    reduction="weighted_mean",
+    clip_to_01=False,
+):
+    """
+    Resume cada modelo em um valor único e calcula estatísticas do ensemble.
+
+    Para cada modelo:
+        valor_modelo = média espacial do mapa reduzido por coluna
+
+    Depois, entre modelos:
+        média, desvio padrão, variância e amplitude.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rows = []
+
+    for g, name in zip(list_of_grids or [], model_names or []):
+        m2d = reduce_grid_scalar_to_column_map(
+            g,
+            scalar_name,
+            reduction=reduction,
+            clip_to_01=clip_to_01,
+        )
+
+        if m2d is None:
+            continue
+
+        finite = np.asarray(m2d, dtype=float)
+        finite = finite[np.isfinite(finite)]
+
+        if finite.size == 0:
+            continue
+
+        rows.append({
+            "modelo": str(name),
+            "valor_medio_espacial": float(np.nanmean(finite)),
+            "desvio_espacial": float(np.nanstd(finite)),
+            "min_espacial": float(np.nanmin(finite)),
+            "max_espacial": float(np.nanmax(finite)),
+        })
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return {
+            "per_model": df,
+            "ensemble": {
+                "mean": 0.0,
+                "std": 0.0,
+                "var": 0.0,
+                "range": 0.0,
+            }
+        }
+
+    vals = df["valor_medio_espacial"].to_numpy(dtype=float)
+
+    ens_mean = float(np.nanmean(vals))
+    ens_std = float(np.nanstd(vals))
+    ens_var = float(np.nanvar(vals))
+    ens_range = float(np.nanmax(vals) - np.nanmin(vals))
+
+    df["desvio_abs_da_media_ensemble"] = np.abs(df["valor_medio_espacial"] - ens_mean)
+
+    return {
+        "per_model": df,
+        "ensemble": {
+            "mean": ens_mean,
+            "std": ens_std,
+            "var": ens_var,
+            "range": ens_range,
+        }
+    }

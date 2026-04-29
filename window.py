@@ -553,7 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wells = {}
         
         self.facies_colors = load_facies_colors() # Sua função
-        self.markers_db = load_markers("assets/wellMarkers_mixed.txt")
+        self.markers_db = load_markers("assets/wellMarkers.txt")
         
         # Criação do Colormap
         self.pv_cmap = None
@@ -951,102 +951,485 @@ class MainWindow(QtWidgets.QMainWindow):
         self.central_stack.addWidget(self.uncertainty_page)
     
     def setup_uncertainty_tab(self, parent_widget):
-        """Layout: Painel Esquerdo (Opções) | Centro (3D) | Painel Direito (Geometria)."""
+        """
+        Layout da aba Incerteza.
+
+        Estrutura:
+            Painel esquerdo: configuração
+            Centro: stack com 3 saídas possíveis
+                0 -> visualização 3D, para incerteza célula a célula
+                1 -> mapa 2D, para incerteza por coluna
+                2 -> tabela grande, para resumo por modelo / ensemble
+            Painel direito: geometria/cortes, visível apenas no modo 3D
+        """
         from load_data import nx, ny, nz
-        
+
         # 1. Limpeza para evitar sobreposição se a aba for recriada
         if parent_widget.layout():
             old = parent_widget.layout()
             while old.count():
                 it = old.takeAt(0)
-                if it.widget(): it.widget().deleteLater()
+                if it.widget():
+                    it.widget().deleteLater()
             QtWidgets.QWidget().setLayout(old)
-            
+
         layout = QtWidgets.QHBoxLayout(parent_widget)
-        
-        # --- COLUNA DA ESQUERDA (Config e Diagnóstico) ---
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        # ============================================================
+        # PAINEL ESQUERDO: CONFIGURAÇÃO
+        # ============================================================
         left_panel = QtWidgets.QFrame()
         left_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        left_panel.setFixedWidth(300)
+        left_panel.setFixedWidth(320)
         vl_left = QtWidgets.QVBoxLayout(left_panel)
-        
+        vl_left.setContentsMargins(8, 8, 8, 8)
+        vl_left.setSpacing(6)
+
         vl_left.addWidget(QtWidgets.QLabel("<b>Configuração</b>"))
-        
+
+        vl_left.addWidget(QtWidgets.QLabel("Propriedade / descritor:"))
         self.cmb_uncert_prop = QtWidgets.QComboBox()
-        self.cmb_uncert_prop.addItem("Fácies (Entropia)", "facies")
+        self.cmb_uncert_prop.addItem(
+            "Fácies (Entropia)",
+            {"kind": "facies", "scalar": None, "reduction": "entropy"}
+        )
+        self.cmb_uncert_prop.currentIndexChanged.connect(self.on_uncert_settings_changed)
         vl_left.addWidget(self.cmb_uncert_prop)
-        
+
+        vl_left.addWidget(QtWidgets.QLabel("Escala da incerteza:"))
+        self.cmb_uncert_scope = QtWidgets.QComboBox()
+        self.cmb_uncert_scope.addItem("Célula a célula", "cell")
+        self.cmb_uncert_scope.addItem("Por coluna", "column")
+        self.cmb_uncert_scope.addItem("Resumo por modelo / ensemble", "model")
+        self.cmb_uncert_scope.currentIndexChanged.connect(self.on_uncert_settings_changed)
+        vl_left.addWidget(self.cmb_uncert_scope)
+
+        vl_left.addWidget(QtWidgets.QLabel("Estatística entre cenários:"))
+        self.cmb_uncert_metric = QtWidgets.QComboBox()
+        self.cmb_uncert_metric.addItem("Média", "mean")
+        self.cmb_uncert_metric.addItem("Desvio padrão", "std")
+        self.cmb_uncert_metric.addItem("Variância", "var")
+        self.cmb_uncert_metric.addItem("Amplitude", "range")
+        self.cmb_uncert_metric.currentIndexChanged.connect(self.on_uncert_settings_changed)
+        vl_left.addWidget(self.cmb_uncert_metric)
+
         vl_left.addWidget(QtWidgets.QLabel("Modelos:"))
         self.lst_uncert_models = QtWidgets.QListWidget()
         self.lst_uncert_models.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        vl_left.addWidget(self.lst_uncert_models)
-        
+        vl_left.addWidget(self.lst_uncert_models, 1)
+
         h_sel = QtWidgets.QHBoxLayout()
-        b_all = QtWidgets.QPushButton("Todos"); b_all.clicked.connect(self._uncert_sel_all)
-        b_none = QtWidgets.QPushButton("Nenhum"); b_none.clicked.connect(self._uncert_sel_none)
-        h_sel.addWidget(b_all); h_sel.addWidget(b_none)
+        b_all = QtWidgets.QPushButton("Todos")
+        b_all.clicked.connect(self._uncert_sel_all)
+        b_none = QtWidgets.QPushButton("Nenhum")
+        b_none.clicked.connect(self._uncert_sel_none)
+        h_sel.addWidget(b_all)
+        h_sel.addWidget(b_none)
         vl_left.addLayout(h_sel)
-        
-        vl_left.addSpacing(15)
-        
-        # Diagnóstico (Labels que serão atualizados)
+
+        vl_left.addSpacing(8)
+
+        # Diagnóstico
         gb_diag = QtWidgets.QGroupBox("Diagnóstico")
         l_diag = QtWidgets.QVBoxLayout(gb_diag)
+
         self.lbl_uncert_n = QtWidgets.QLabel("Modelos (N): -")
         self.lbl_uncert_max_theo = QtWidgets.QLabel("Máx. Teórico: -")
         self.lbl_uncert_max_real = QtWidgets.QLabel("Máx. Encontrado: -")
-        
-        # Estilo para leitura fácil
         self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; font-size: 13px;")
-        
+
         l_diag.addWidget(self.lbl_uncert_n)
         l_diag.addWidget(self.lbl_uncert_max_theo)
         l_diag.addWidget(self.lbl_uncert_max_real)
+
         vl_left.addWidget(gb_diag)
-        
+
         self.chk_abs_scale = QtWidgets.QCheckBox("Usar Escala Absoluta")
         self.chk_abs_scale.stateChanged.connect(self.on_uncert_settings_changed)
         vl_left.addWidget(self.chk_abs_scale)
-        
+
         btn_calc = QtWidgets.QPushButton("Calcular Incerteza")
         btn_calc.setFixedHeight(40)
         btn_calc.setStyleSheet("background-color: #d0f0c0; font-weight: bold;")
         btn_calc.clicked.connect(self.calculate_uncertainty)
         vl_left.addWidget(btn_calc)
-        
-        vl_left.addStretch(1) # Empurra tudo para cima
-        
-        # --- COLUNA CENTRAL (3D) ---
-        self.uncert_plotter, uncert_widget = self._make_embedded_plotter(parent=parent_widget)
-        
-        # --- COLUNA DA DIREITA (Geometria / Slicer) ---
-        right_panel = QtWidgets.QFrame()
-        right_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        right_panel.setFixedWidth(280)
-        vl_right = QtWidgets.QVBoxLayout(right_panel)
-        
+
+        # ============================================================
+        # CENTRO: RESULTADOS DINÂMICOS
+        # ============================================================
+        self.uncert_result_stack = QtWidgets.QStackedWidget()
+
+        # Página 0: resultado 3D
+        self.uncert_page_3d = QtWidgets.QWidget()
+        l_3d = QtWidgets.QVBoxLayout(self.uncert_page_3d)
+        l_3d.setContentsMargins(0, 0, 0, 0)
+        self.uncert_plotter, uncert_widget = self._make_embedded_plotter(parent=self.uncert_page_3d)
+        l_3d.addWidget(uncert_widget, 1)
+        self.uncert_result_stack.addWidget(self.uncert_page_3d)
+
+        # Página 1: resultado 2D por coluna
+        self.uncert_page_2d = QtWidgets.QWidget()
+        l_2d = QtWidgets.QVBoxLayout(self.uncert_page_2d)
+        l_2d.setContentsMargins(0, 0, 0, 0)
+        self.uncert_plotter_2d, uncert_2d_widget = self._make_embedded_plotter(parent=self.uncert_page_2d)
+        l_2d.addWidget(uncert_2d_widget, 1)
+        self.uncert_result_stack.addWidget(self.uncert_page_2d)
+
+        # Página 2: resumo por modelo / ensemble
+        self.uncert_page_table = QtWidgets.QWidget()
+        l_table = QtWidgets.QVBoxLayout(self.uncert_page_table)
+        l_table.setContentsMargins(8, 8, 8, 8)
+        l_table.setSpacing(6)
+
+        lbl_table = QtWidgets.QLabel("<b>Resumo por modelo / ensemble</b>")
+        l_table.addWidget(lbl_table)
+
+        self.txt_uncert_summary = QtWidgets.QTextEdit()
+        self.txt_uncert_summary.setReadOnly(True)
+        self.txt_uncert_summary.setMaximumHeight(95)
+        self.txt_uncert_summary.setPlainText(
+            "Escolha uma propriedade/descritor, selecione os modelos e clique em Calcular Incerteza."
+        )
+        l_table.addWidget(self.txt_uncert_summary)
+
+        self.tbl_uncert_summary = QtWidgets.QTableWidget()
+        self.tbl_uncert_summary.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_uncert_summary.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_uncert_summary.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_uncert_summary.setSortingEnabled(True)
+        self.tbl_uncert_summary.setAlternatingRowColors(True)
+        l_table.addWidget(self.tbl_uncert_summary, 1)
+
+        self.uncert_result_stack.addWidget(self.uncert_page_table)
+
+        # ============================================================
+        # PAINEL DIREITO: GEOMETRIA / CORTES
+        # ============================================================
+        self.uncert_right_panel = QtWidgets.QFrame()
+        self.uncert_right_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.uncert_right_panel.setFixedWidth(280)
+
+        vl_right = QtWidgets.QVBoxLayout(self.uncert_right_panel)
+        vl_right.setContentsMargins(8, 8, 8, 8)
+
         gb_geo = QtWidgets.QGroupBox("Geometria & Cortes")
         l_geo = QtWidgets.QVBoxLayout(gb_geo)
-        # Cria o slicer dedicado
+
         self.uncert_slicer = GridSlicerWidget(nx, ny, nz, self.on_uncert_slice_changed)
         l_geo.addWidget(self.uncert_slicer)
+
         vl_right.addWidget(gb_geo)
         vl_right.addStretch(1)
 
-        # Adiciona ao layout principal na ordem: Esq -> Centro -> Dir
+        # ============================================================
+        # MONTA LAYOUT FINAL
+        # ============================================================
         layout.addWidget(left_panel)
-        layout.addWidget(uncert_widget, 1) # Stretch factor 1
-        layout.addWidget(right_panel)
+        layout.addWidget(self.uncert_result_stack, 1)
+        layout.addWidget(self.uncert_right_panel)
 
         self.uncert_view_state = None
+        self._uncert_has_result = False
+
+        # Estado inicial: fácies/entropia célula a célula em 3D
+        self._set_uncert_result_mode("cell")
 
     # --- Callbacks necessários para a interface acima não dar erro ---
     
     def on_uncert_settings_changed(self, state=None):
-        """Recalcula visualização ao clicar no Checkbox."""
-        # Se a aba existe, recalcula. O QtInteractor não tem atributo .mesh.
-        if hasattr(self, "uncert_plotter"):
+        """
+        Atualiza a forma de exibição da aba Incerteza.
+
+        Regra:
+            - fácies/entropia sempre usa célula a célula em 3D;
+            - escala por célula usa página 3D;
+            - escala por coluna usa página 2D;
+            - resumo por modelo usa página de tabela.
+        """
+        data = self.cmb_uncert_prop.currentData() if hasattr(self, "cmb_uncert_prop") else None
+        if not isinstance(data, dict):
+            data = {"kind": "facies", "scalar": None, "reduction": "entropy"}
+
+        kind = data.get("kind", "facies")
+
+        scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
+
+        # Fácies categórica só faz sentido como entropia célula a célula
+        if kind == "facies":
+            scope = "cell"
+
+            if hasattr(self, "cmb_uncert_scope"):
+                idx_cell = self.cmb_uncert_scope.findData("cell")
+                if idx_cell >= 0 and self.cmb_uncert_scope.currentIndex() != idx_cell:
+                    self.cmb_uncert_scope.blockSignals(True)
+                    self.cmb_uncert_scope.setCurrentIndex(idx_cell)
+                    self.cmb_uncert_scope.blockSignals(False)
+
+        self._set_uncert_result_mode(scope)
+
+        # Recalcula automaticamente apenas depois que já existe um resultado.
+        # Isso evita avisos durante a montagem inicial da interface.
+        if getattr(self, "_uncert_has_result", False):
             self.calculate_uncertainty()
+
+    def _set_uncert_result_mode(self, scope):
+        """
+        Escolhe qual página central da aba Incerteza deve aparecer.
+        """
+        scope = str(scope or "cell").lower()
+
+        if not hasattr(self, "uncert_result_stack"):
+            return
+
+        if scope == "model":
+            # Tabela grande
+            self.uncert_result_stack.setCurrentIndex(2)
+            if hasattr(self, "uncert_right_panel"):
+                self.uncert_right_panel.setVisible(False)
+
+        elif scope == "column":
+            # Mapa 2D por coluna
+            self.uncert_result_stack.setCurrentIndex(1)
+            if hasattr(self, "uncert_right_panel"):
+                self.uncert_right_panel.setVisible(False)
+
+        else:
+            # Visualizador 3D
+            self.uncert_result_stack.setCurrentIndex(0)
+            if hasattr(self, "uncert_right_panel"):
+                self.uncert_right_panel.setVisible(True)
+
+        # A escala absoluta só é útil para entropia de fácies.
+        try:
+            data = self.cmb_uncert_prop.currentData()
+            is_facies_entropy = isinstance(data, dict) and data.get("kind") == "facies"
+            self.chk_abs_scale.setVisible(bool(is_facies_entropy))
+        except Exception:
+            pass
+
+
+    def _clear_uncert_summary_table(self):
+        """Limpa a tabela central de resumo da aba Incerteza."""
+        if hasattr(self, "tbl_uncert_summary"):
+            self.tbl_uncert_summary.clear()
+            self.tbl_uncert_summary.setRowCount(0)
+            self.tbl_uncert_summary.setColumnCount(0)
+
+        if hasattr(self, "txt_uncert_summary"):
+            self.txt_uncert_summary.clear()
+
+
+    def _fill_uncert_summary_table(self, df):
+        """
+        Preenche a tabela central do resumo por modelo / ensemble.
+        """
+        if not hasattr(self, "tbl_uncert_summary"):
+            return
+
+        self.tbl_uncert_summary.setSortingEnabled(False)
+        self.tbl_uncert_summary.clear()
+
+        if df is None or df.empty:
+            self.tbl_uncert_summary.setRowCount(0)
+            self.tbl_uncert_summary.setColumnCount(0)
+            self.tbl_uncert_summary.setSortingEnabled(True)
+            return
+
+        self.tbl_uncert_summary.setRowCount(len(df))
+        self.tbl_uncert_summary.setColumnCount(len(df.columns))
+        self.tbl_uncert_summary.setHorizontalHeaderLabels([str(c) for c in df.columns])
+
+        for r in range(len(df)):
+            for c, col in enumerate(df.columns):
+                val = df.iloc[r, c]
+
+                if isinstance(val, (float, np.floating)):
+                    txt = f"{float(val):.6g}"
+                else:
+                    txt = str(val)
+
+                item = QtWidgets.QTableWidgetItem(txt)
+
+                # Permite ordenação numérica em colunas numéricas
+                if isinstance(val, (int, float, np.integer, np.floating)):
+                    item.setData(QtCore.Qt.UserRole, float(val))
+
+                self.tbl_uncert_summary.setItem(r, c, item)
+
+        self.tbl_uncert_summary.resizeColumnsToContents()
+        self.tbl_uncert_summary.horizontalHeader().setStretchLastSection(True)
+        self.tbl_uncert_summary.setSortingEnabled(True)
+
+
+    def _draw_uncertainty_2d_map(self, grid_template, array_2d, title, clim=None, cmap="jet"):
+        """
+        Desenha um mapa 2D de incerteza por coluna diretamente a partir de um array (nx, ny).
+        """
+        import numpy as np
+        import pyvista as pv
+
+        if not hasattr(self, "uncert_plotter_2d"):
+            return
+
+        plotter = self.uncert_plotter_2d
+        plotter.clear()
+
+        try:
+            plotter.remove_scalar_bar()
+        except Exception:
+            pass
+
+        if grid_template is None or array_2d is None:
+            plotter.render()
+            return
+
+        dims = self._infer_grid_cell_dims(grid_template)
+        if not dims:
+            plotter.render()
+            return
+
+        nx_, ny_, nz_ = dims
+
+        arr2d = np.asarray(array_2d, dtype=float)
+        if arr2d.shape != (nx_, ny_):
+            try:
+                arr2d = arr2d.reshape((nx_, ny_), order="F")
+            except Exception:
+                plotter.render()
+                return
+
+        x_min, x_max, y_min, y_max, _, z_max = grid_template.bounds
+
+        xs = np.linspace(x_min, x_max, nx_ + 1)
+        ys = np.linspace(y_max, y_min, ny_ + 1)
+        xs, ys = np.meshgrid(xs, ys, indexing="ij")
+        zs = np.full_like(xs, z_max, dtype=float)
+
+        surf = pv.StructuredGrid(xs, ys, zs)
+
+        scalar_name = "uncertainty_2d"
+        surf.cell_data[scalar_name] = arr2d.ravel(order="F")
+
+        flat = arr2d[np.isfinite(arr2d)]
+
+        if clim is None:
+            if flat.size:
+                vmin = float(np.nanmin(flat))
+                vmax = float(np.nanmax(flat))
+                if vmin >= 0.0:
+                    vmin = 0.0
+                if vmax <= vmin:
+                    vmax = vmin + 1e-6
+                clim = (vmin, vmax)
+            else:
+                clim = (0.0, 1.0)
+
+        plotter.add_mesh(
+            surf,
+            scalars=scalar_name,
+            cmap=cmap or "jet",
+            show_edges=True,
+            edge_color="black",
+            line_width=0.5,
+            nan_color="white",
+            show_scalar_bar=False,
+            clim=clim,
+        )
+
+        plotter.view_xy()
+        plotter.enable_parallel_projection()
+        plotter.enable_image_style()
+        plotter.set_background("white")
+        plotter.add_axes()
+
+        plotter.show_bounds(
+            grid="front",
+            location="outer",
+            ticks="outside",
+            color="gray",
+            minor_ticks=True,
+            n_xlabels=4,
+            n_ylabels=4,
+            font_size=8,
+            fmt="%.0f",
+            xtitle="X",
+            ytitle="Y",
+        )
+
+        plotter.add_scalar_bar(
+            title=title,
+            n_labels=5,
+            fmt="%.3g",
+            title_font_size=14,
+            label_font_size=12,
+        )
+
+        try:
+            plotter.add_text(title, position="upper_left", font_size=10, color="black")
+        except Exception:
+            pass
+
+        plotter.render()
+
+
+    def _render_uncertainty_3d(self, vis_grid, scalar_name, result_map, title, clim):
+        """
+        Renderiza a incerteza célula a célula em 3D.
+        """
+        from visualize import run
+        import numpy as np
+
+        if vis_grid is None or result_map is None:
+            return
+
+        vis_grid.cell_data[scalar_name] = np.asarray(result_map, dtype=float)
+
+        uncert_state = {
+            "mode": "scalar",
+            "current_scalar_name": scalar_name,
+            "current_scalar_title": title,
+            "current_scalar_clim": clim,
+            "current_scalar_cmap": "jet",
+            "z_exag": float(self.state.get("z_exag", 1.0)),
+            "show_scalar_bar": True,
+        }
+
+        self.uncert_plotter.clear()
+
+        _, final_state = run(
+            mode="scalar",
+            z_exag=uncert_state["z_exag"],
+            show_scalar_bar=True,
+            external_plotter=self.uncert_plotter,
+            external_state=uncert_state,
+            target_grid=vis_grid,
+            target_facies=None,
+        )
+
+        self.uncert_view_state = final_state
+
+        try:
+            if hasattr(self.uncert_plotter, "scalar_bars"):
+                for k in list(self.uncert_plotter.scalar_bars.keys()):
+                    self.uncert_plotter.remove_scalar_bar(k)
+        except Exception:
+            pass
+
+        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
+
+        if mapper:
+            mapper.SetScalarRange(clim)
+            self.uncert_plotter.add_scalar_bar(
+                title=title,
+                mapper=mapper,
+                fmt="%.3g",
+                title_font_size=14,
+                label_font_size=12,
+            )
+
+        self.uncert_plotter.reset_camera()
 
 
     def on_uncert_slice_changed(self, axis, mode, value):
@@ -1102,6 +1485,57 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 6. Atualiza a lista de modelos
         self._refresh_uncert_model_list()
+        self._refresh_uncert_property_combo()
+    
+    def _refresh_uncert_property_combo(self):
+        """
+        Atualiza lista de propriedades disponíveis para cálculo de incerteza.
+        """
+        if not hasattr(self, "cmb_uncert_prop"):
+            return
+
+        current_text = self.cmb_uncert_prop.currentText()
+
+        self.cmb_uncert_prop.blockSignals(True)
+        try:
+            self.cmb_uncert_prop.clear()
+
+            self.cmb_uncert_prop.addItem(
+                "Fácies (Entropia)",
+                {"kind": "facies", "scalar": None, "reduction": "entropy"}
+            )
+
+            # Propriedades escalares carregadas do grid
+            try:
+                props = self._get_union_grid_property_names()
+            except Exception:
+                props = []
+
+            for p in props:
+                self.cmb_uncert_prop.addItem(
+                    f"Propriedade: {p}",
+                    {"kind": "scalar", "scalar": p, "reduction": "weighted_mean"}
+                )
+
+            # Métricas verticais já calculadas
+            try:
+                presets = get_vertical_metric_presets(prefix="vert_", include_filtered=False)
+                for label, (scalar, title) in presets.items():
+                    self.cmb_uncert_prop.addItem(
+                        f"Métrica vertical: {label}",
+                        {"kind": "scalar", "scalar": scalar, "reduction": "max"}
+                    )
+            except Exception:
+                pass
+
+            # tenta restaurar seleção anterior
+            for i in range(self.cmb_uncert_prop.count()):
+                if self.cmb_uncert_prop.itemText(i) == current_text:
+                    self.cmb_uncert_prop.setCurrentIndex(i)
+                    break
+
+        finally:
+            self.cmb_uncert_prop.blockSignals(False)
         
     def _refresh_uncert_model_list(self):
         """Atualiza a lista de modelos disponíveis na aba Incerteza."""
@@ -1131,111 +1565,348 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_uncert_models.addItem(it)
 
     def calculate_uncertainty(self):
-        """Calcula Entropia, atualiza números na tela e desenha o mapa."""
-        from analysis import compute_facies_entropy_map
+        """
+        Calcula incerteza do ensemble em três escalas:
+
+        - cell:
+            estatística célula a célula entre modelos.
+
+        - column:
+            reduz cada modelo para mapa 2D por coluna e calcula estatística entre modelos.
+
+        - model:
+            resume cada modelo em um valor médio espacial e calcula estatísticas do ensemble.
+        """
+        from analysis import (
+            compute_facies_entropy_map,
+            compute_continuous_uncertainty_map,
+            compute_column_ensemble_stat_map,
+            expand_column_map_to_cell_data,
+            compute_model_level_ensemble_summary,
+            compute_vertical_metrics_for_grid,
+        )
         from visualize import run
         from load_data import grid as global_grid
         import numpy as np
+        import pandas as pd
 
-        # 1. Coleta Modelos
+        # ------------------------------------------------------------
+        # 1. Modelos selecionados
+        # ------------------------------------------------------------
         selected_keys = []
         if hasattr(self, "lst_uncert_models"):
             for i in range(self.lst_uncert_models.count()):
                 it = self.lst_uncert_models.item(i)
                 if it.checkState() == QtCore.Qt.Checked:
                     selected_keys.append(it.data(QtCore.Qt.UserRole))
-        
+
         if not selected_keys:
             QtWidgets.QMessageBox.warning(self, "Aviso", "Selecione modelos na lista.")
             return
 
-        # 2. Pega Arrays
-        arrays = []
+        grids = []
+        facies_arrays = []
+        model_names = []
+
         for k in selected_keys:
-            if k in self.models:
-                arr = self.models[k].get("facies")
-                if arr is not None: arrays.append(arr)
+            if k not in self.models:
+                continue
 
-        if not arrays: return
+            m = self.models[k]
+            g = m.get("grid")
+            if g is None and k == "base":
+                g = self.state.get("current_grid_source") or global_grid
 
-        # 3. Prepara Grid
-        base_model = self.models.get("base", {})
-        grid_template = base_model.get("grid") or global_grid
+            f = m.get("facies")
+
+            if g is None:
+                continue
+
+            grids.append(g)
+            facies_arrays.append(f)
+            model_names.append(m.get("name", "Modelo Base" if k == "base" else str(k)))
+
+        if not grids:
+            return
+
+        # ------------------------------------------------------------
+        # 2. Configuração escolhida na interface
+        # ------------------------------------------------------------
+        data = self.cmb_uncert_prop.currentData() if hasattr(self, "cmb_uncert_prop") else None
+        if not isinstance(data, dict):
+            data = {"kind": "facies", "scalar": None, "reduction": "entropy"}
+
+        kind = data.get("kind", "facies")
+        scalar_name = data.get("scalar", None)
+        reduction = data.get("reduction", "weighted_mean")
+
+        scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
+        metric = self.cmb_uncert_metric.currentData() if hasattr(self, "cmb_uncert_metric") else "std"
+
+        # Fácies só faz sentido como entropia neste fluxo
+        if kind == "facies":
+            scope = "cell"
+            metric = "entropy"
+        
+        self._clear_uncert_summary_table()
+        self._set_uncert_result_mode(scope)
+
+        # ------------------------------------------------------------
+        # 3. Grid de visualização
+        # ------------------------------------------------------------
+        grid_template = self.models.get("base", {}).get("grid") or self.state.get("current_grid_source") or global_grid
         vis_grid = grid_template.copy(deep=True)
 
-        # 4. Cálculos Matemáticos
-        n_models = len(arrays)
-        
-        # Calcula mapa de entropia
-        result_map = compute_facies_entropy_map(arrays, target_grid=vis_grid)
-        
-        # Estatísticas para o Diagnóstico
-        max_real = float(np.max(result_map)) if len(result_map) > 0 else 0.0
-        max_theo = float(np.log(n_models)) if n_models > 1 else 0.0
-        
-        # --- ATUALIZAÇÃO DOS TEXTOS NA TELA ---
-        if hasattr(self, "lbl_uncert_n"):
-            self.lbl_uncert_n.setText(f"Modelos (N): {n_models}")
-            self.lbl_uncert_max_theo.setText(f"Máx. Teórico: {max_theo:.3f}")
-            self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {max_real:.3f}")
-            
-            # Muda cor do texto se estiver crítico
-            if max_theo > 0 and max_real > (0.85 * max_theo):
-                self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: red; font-size: 13px;")
+        scalar_out = "Uncertainty"
+        title = "Incerteza"
+        result_map = None
+        result_2d = None
+        clim = None
+
+        # ------------------------------------------------------------
+        # 4A. Incerteza categórica: entropia de fácies célula a célula
+        # ------------------------------------------------------------
+        if kind == "facies":
+            arrays = [a for a in facies_arrays if a is not None]
+            if not arrays:
+                return
+
+            n_models = len(arrays)
+            result_map = compute_facies_entropy_map(arrays, target_grid=vis_grid)
+
+            max_real = float(np.nanmax(result_map)) if result_map.size else 0.0
+            max_theo = float(np.log(n_models)) if n_models > 1 else 0.0
+
+            title = f"Entropia de fácies (N={n_models})"
+
+            use_abs = self.chk_abs_scale.isChecked() if hasattr(self, "chk_abs_scale") else False
+            if use_abs:
+                clim = (0.0, max_theo if max_theo > 0 else 0.1)
             else:
-                self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; color: green; font-size: 13px;")
+                clim = (0.0, max_real if max_real > 0 else 0.1)
 
-        # 5. Configuração Visual
-        scalar_name = "Uncertainty"
-        vis_grid.cell_data[scalar_name] = result_map
-        
-        # Escala Absoluta ou Relativa?
-        use_abs = self.chk_abs_scale.isChecked() if hasattr(self, "chk_abs_scale") else False
-        
-        if use_abs:
-            clim = (0.0, max_theo if max_theo > 0 else 0.1)
+            if hasattr(self, "lbl_uncert_n"):
+                self.lbl_uncert_n.setText(f"Modelos (N): {n_models}")
+                self.lbl_uncert_max_theo.setText(f"Máx. Teórico: {max_theo:.3f}")
+                self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {max_real:.3f}")
+
+        # ------------------------------------------------------------
+        # 4B. Propriedade contínua / descritor
+        # ------------------------------------------------------------
         else:
-            clim = (0.0, max_real if max_real > 0 else 0.1)
+            if not scalar_name:
+                return
 
-        uncert_state = {
-            "mode": "scalar",
-            "current_scalar_name": scalar_name,
-            "current_scalar_title": f"Entropia (N={n_models})",
-            "current_scalar_clim": clim,
-            "current_scalar_cmap": "jet",
-            "z_exag": float(self.state.get("z_exag", 15.0)),
-            "show_scalar_bar": True
-        }
+            # Se for métrica vertical, garante que foi recalculada em todos os modelos
+            if str(scalar_name).startswith("vert_"):
+                rf_global = set(self.state.get("reservoir_facies", set()) or [])
+                for g, f in zip(grids, facies_arrays):
+                    if g is None or f is None:
+                        continue
+                    try:
+                        compute_vertical_metrics_for_grid(
+                            g,
+                            f,
+                            rf_global,
+                            prefix="vert_",
+                            thin_lamination_threshold=0.30,
+                            include_filtered=True,
+                        )
+                    except Exception:
+                        pass
 
-        # 6. Renderizar
-        self.uncert_plotter.clear()
-        
-        _, final_state = run(
-            mode="scalar",
-            z_exag=uncert_state["z_exag"],
-            show_scalar_bar=True,
-            external_plotter=self.uncert_plotter,
-            external_state=uncert_state,
-            target_grid=vis_grid,
-            target_facies=None
+            clip_to_01 = self._is_normalized_property(scalar_name)
+
+            # ------------------------
+            # Célula a célula
+            # ------------------------
+            if scope == "cell":
+                arrays = []
+                valid_names = []
+
+                for g, name in zip(grids, model_names):
+                    if scalar_name not in getattr(g, "cell_data", {}):
+                        continue
+
+                    arr = np.asarray(g.cell_data[scalar_name], dtype=float)
+                    if arr.size != g.n_cells:
+                        continue
+
+                    if clip_to_01:
+                        arr = np.clip(arr, 0.0, 1.0)
+
+                    arrays.append(arr)
+                    valid_names.append(name)
+
+                if not arrays:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Incerteza",
+                        f"A propriedade '{scalar_name}' não foi encontrada nos modelos selecionados."
+                    )
+                    return
+
+                result_map = compute_continuous_uncertainty_map(
+                    arrays,
+                    target_grid=vis_grid,
+                    metric=metric,
+                )
+
+                stat_label = {
+                    "mean": "Média",
+                    "std": "Desvio padrão",
+                    "var": "Variância",
+                    "range": "Amplitude",
+                }.get(metric, metric)
+
+                title = f"{stat_label} célula a célula: {scalar_name}"
+
+                finite = result_map[np.isfinite(result_map)]
+                vmax = float(np.nanmax(finite)) if finite.size else 1.0
+                if metric == "mean" and clip_to_01:
+                    clim = (0.0, 1.0)
+                else:
+                    clim = (0.0, vmax if vmax > 0 else 1.0)
+
+                if hasattr(self, "lbl_uncert_n"):
+                    self.lbl_uncert_n.setText(f"Modelos (N): {len(arrays)}")
+                    self.lbl_uncert_max_theo.setText("Máx. Teórico: -")
+                    self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {vmax:.4g}")
+
+            # ------------------------
+            # Por coluna
+            # ------------------------
+            elif scope == "column":
+                # Para propriedades escalares, usa média ponderada por espessura.
+                # Para métricas verticais, usa max porque elas já são constantes por coluna.
+                red = "max" if str(scalar_name).startswith("vert_") else reduction
+
+                result_2d = compute_column_ensemble_stat_map(
+                    grids,
+                    scalar_name,
+                    metric=metric,
+                    reduction=red,
+                    clip_to_01=clip_to_01,
+                )
+
+                if result_2d is None:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Incerteza",
+                        f"Não foi possível calcular incerteza por coluna para '{scalar_name}'."
+                    )
+                    return
+
+                result_2d = np.asarray(result_2d, dtype=float)
+
+                stat_label = {
+                    "mean": "Média",
+                    "std": "Desvio padrão",
+                    "var": "Variância",
+                    "range": "Amplitude",
+                }.get(metric, metric)
+
+                title = f"{stat_label} por coluna: {scalar_name}"
+
+                finite = result_2d[np.isfinite(result_2d)]
+                vmax = float(np.nanmax(finite)) if finite.size else 1.0
+
+                if metric == "mean" and clip_to_01:
+                    clim = (0.0, 1.0)
+                else:
+                    clim = (0.0, vmax if vmax > 0 else 1.0)
+
+                if hasattr(self, "lbl_uncert_n"):
+                    self.lbl_uncert_n.setText(f"Modelos (N): {len(grids)}")
+                    self.lbl_uncert_max_theo.setText("Máx. Teórico: -")
+                    self.lbl_uncert_max_real.setText(f"Máx. Encontrado: {vmax:.4g}")
+
+            # ------------------------
+            # Resumo por modelo / ensemble
+            # ------------------------
+            else:
+                red = "max" if str(scalar_name).startswith("vert_") else reduction
+
+                summary = compute_model_level_ensemble_summary(
+                    grids,
+                    model_names,
+                    scalar_name,
+                    reduction=red,
+                    clip_to_01=clip_to_01,
+                )
+
+                df = summary["per_model"]
+                ens = summary["ensemble"]
+
+                self._set_uncert_result_mode("model")
+                self._fill_uncert_summary_table(df)
+
+                n_df = len(df) if df is not None else 0
+
+                if hasattr(self, "lbl_uncert_n"):
+                    self.lbl_uncert_n.setText(f"Modelos (N): {n_df}")
+                    self.lbl_uncert_max_theo.setText(f"Média ensemble: {ens['mean']:.6g}")
+                    self.lbl_uncert_max_real.setText(
+                        f"std={ens['std']:.6g} | var={ens['var']:.6g} | amp={ens['range']:.6g}"
+                    )
+
+                if hasattr(self, "txt_uncert_summary"):
+                    stat_label = {
+                        "mean": "Média",
+                        "std": "Desvio padrão",
+                        "var": "Variância",
+                        "range": "Amplitude",
+                    }.get(metric, str(metric))
+
+                    self.txt_uncert_summary.setPlainText(
+                        f"Resumo por modelo / ensemble\n"
+                        f"Propriedade/descritor: {scalar_name}\n"
+                        f"Redução espacial por modelo: média espacial do mapa reduzido por coluna\n"
+                        f"Estatística selecionada: {stat_label}\n\n"
+                        f"Média ensemble: {ens['mean']:.6g}\n"
+                        f"Desvio padrão: {ens['std']:.6g}\n"
+                        f"Variância: {ens['var']:.6g}\n"
+                        f"Amplitude: {ens['range']:.6g}"
+                    )
+
+                self._uncert_has_result = True
+                return
+
+        # ------------------------------------------------------------
+        # 5. Renderização
+        # ------------------------------------------------------------
+
+        # Incerteza por coluna: resultado é mapa 2D, não volume 3D.
+        if scope == "column":
+            if result_2d is None:
+                return
+
+            self._set_uncert_result_mode("column")
+            self._draw_uncertainty_2d_map(
+                grid_template,
+                result_2d,
+                title,
+                clim=clim,
+                cmap="jet",
+            )
+
+            self._uncert_has_result = True
+            return
+
+        # Incerteza célula a célula: resultado é volume 3D.
+        if result_map is None:
+            return
+
+        self._set_uncert_result_mode("cell")
+        self._render_uncertainty_3d(
+            vis_grid,
+            scalar_out,
+            result_map,
+            title,
+            clim,
         )
-        
-        # Salva estado para o Slicer funcionar
-        self.uncert_view_state = final_state
-        
-        # Limpa barras antigas (Correção QtInteractor)
-        if hasattr(self.uncert_plotter, 'scalar_bars'):
-             keys = list(self.uncert_plotter.scalar_bars.keys())
-             for k in keys:
-                 self.uncert_plotter.remove_scalar_bar(k)
-        
-        # Adiciona nova barra
-        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
-        if mapper:
-            mapper.SetScalarRange(clim)
-            self.uncert_plotter.add_scalar_bar(title=uncert_state["current_scalar_title"], mapper=mapper, fmt="%.2f", title_font_size=14, label_font_size=12)
 
-        self.uncert_plotter.reset_camera()
+        self._uncert_has_result = True
 
     def _copy_table_to_clipboard(self, table_widget):
         """Copia o conteúdo de uma QTableWidget para o clipboard (formato CSV/Excel)."""
@@ -2523,6 +3194,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 action = menu.addAction(f"{name}")
                 action.triggered.connect(lambda ch, n=name: self.change_scalar_view(n))
+
+        # Médias ponderadas por espessura
+        if all_cell_keys:
+            weighted_props = []
+            for name in sorted(all_cell_keys):
+                if name in exact_ignore:
+                    continue
+                if str(name).endswith("_index"):
+                    continue
+                if str(name).startswith("vert_"):
+                    continue
+                if str(name).startswith("wmean_th_"):
+                    continue
+                if "Ghost" in str(name):
+                    continue
+                weighted_props.append(str(name))
+
+            if weighted_props:
+                menu.addSection("Média ponderada por espessura")
+                for name in weighted_props:
+                    action = menu.addAction(f"Média ponderada: {name}")
+                    action.triggered.connect(lambda ch, n=name: self.change_weighted_mean_view(n))
 
         # Config
         menu.addSeparator()
@@ -9888,6 +10581,137 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
+
+    def _weighted_mean_output_name(self, scalar_name):
+        import re
+        safe = re.sub(r"[^0-9a-zA-Z_]+", "_", str(scalar_name)).strip("_")
+        return f"wmean_th_{safe}"
+
+
+    def _register_extra_sync_cell_data(self, scalar_name):
+        extra = set(self.state.get("extra_sync_cell_data", set()) or set())
+        extra.add(str(scalar_name))
+        self.state["extra_sync_cell_data"] = extra
+
+
+    def _ensure_weighted_mean_on_grid(self, grid_source, scalar_name):
+        """
+        Calcula e salva no grid a média ponderada por espessura de scalar_name.
+        """
+        from analysis import compute_thickness_weighted_property_map
+        import numpy as np
+
+        if grid_source is None:
+            return None, None
+
+        if scalar_name not in getattr(grid_source, "cell_data", {}):
+            return None, None
+
+        output_name = self._weighted_mean_output_name(scalar_name)
+
+        clip_to_01 = self._is_normalized_property(scalar_name)
+
+        out_name, out_2d = compute_thickness_weighted_property_map(
+            grid_source,
+            scalar_name,
+            output_name=output_name,
+            clip_to_01=clip_to_01,
+        )
+
+        if out_name is None:
+            return None, None
+
+        self._register_extra_sync_cell_data(out_name)
+
+        return out_name, out_2d
+
+
+    def change_weighted_mean_view(self, scalar_name):
+        """
+        Cria e visualiza a média ponderada por espessura de uma propriedade.
+        """
+        import numpy as np
+
+        grid = self.state.get("current_grid_source")
+        if grid is None and "base" in self.models:
+            grid = self.models["base"].get("grid")
+
+        if grid is None:
+            return
+
+        out_name, _ = self._ensure_weighted_mean_on_grid(grid, scalar_name)
+        if out_name is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Média ponderada",
+                f"Não foi possível calcular média ponderada para '{scalar_name}'."
+            )
+            return
+
+        title = f"Média ponderada por espessura: {scalar_name}"
+
+        # Também calcula para os grids ativos da comparação, se existirem
+        for st in getattr(self, "active_comp_states", []) or []:
+            try:
+                g = st.get("current_grid_source")
+                if g is not None and scalar_name in g.cell_data:
+                    self._ensure_weighted_mean_on_grid(g, scalar_name)
+            except Exception:
+                pass
+
+        arr = np.asarray(grid.cell_data[out_name], dtype=float)
+        finite = arr[np.isfinite(arr)]
+
+        if self._is_normalized_property(scalar_name):
+            clim = (0.0, 1.0)
+        elif finite.size:
+            vmin = float(np.nanmin(finite))
+            vmax = float(np.nanmax(finite))
+            if vmin >= 0.0:
+                vmin = 0.0
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+            clim = (vmin, vmax)
+        else:
+            clim = (0.0, 1.0)
+
+        # registra como preset de métricas por coluna
+        presets = self.state.get("thickness_presets", {})
+        label = f"Média ponderada: {scalar_name}"
+        presets[label] = (out_name, title)
+        self.state["thickness_presets"] = presets
+
+        self.state["mode"] = "thickness_local"
+        self.state["thickness_mode"] = label
+        self.state["thickness_clim"] = clim
+        self.state["thickness_clim_manual"] = True
+        self.state["thickness_cmap"] = self.state.get("thickness_cmap", "jet")
+
+        # limpa estado de scalar genérico para não conflitar
+        self.state.pop("current_scalar_name", None)
+        self.state.pop("current_scalar_title", None)
+        self.state.pop("current_scalar_clim", None)
+
+        # força sincronização com grid_base interno do visualize.py
+        upd = self.state.get("update_reservoir_fields")
+        if callable(upd):
+            try:
+                upd(set(self.state.get("reservoir_facies", set()) or []))
+            except Exception:
+                pass
+
+        refresh = self.state.get("refresh")
+        if callable(refresh):
+            refresh()
+
+        if hasattr(self, "update_2d_map"):
+            self.update_2d_map()
+
+        if hasattr(self, "btn_mode"):
+            self.btn_mode.setText("Média\nPond.")
+
+        if hasattr(self, "btn_thick"):
+            self.btn_thick.setText(f"Média\n{scalar_name}")
 
     def _finalize_vtk_widget(self, obj):
         """Fecha plotters/QtInteractors de forma agressiva para evitar erros do VTK no shutdown."""

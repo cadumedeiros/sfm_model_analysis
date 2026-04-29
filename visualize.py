@@ -349,8 +349,19 @@ def run(
         
         _ensure_total_column_thickness_scalar(current_g)
 
+        extra_sync = set(state.get("extra_sync_cell_data", set()) or set())
+
         for key in current_g.cell_data.keys():
-            if key.startswith("vert_") or key in sync_names or key == "__total_column_thickness__":
+            if (
+                key.startswith("vert_")
+                or key.startswith("wmean_th_")
+                or key.startswith("unc_")
+                or key in sync_names
+                or key == "__total_column_thickness__"
+                or key == "Entropy"
+                or key == "Uncertainty"
+                or key in extra_sync
+            ):
                 grid_base.cell_data[key] = current_g.cell_data[key]
 
         state["clusters_lut"], state["clusters_rng"] = make_clusters_lut(clusters_1d)
