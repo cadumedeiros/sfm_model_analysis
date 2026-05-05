@@ -974,7 +974,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QWidget().setLayout(old)
 
         layout = QtWidgets.QHBoxLayout(parent_widget)
-        layout.setContentsMargins(4, 4, 4, 4)
+        # Alinha a margem esquerda da página de Mapas com a margem dos grupos do Ribbon.
+        layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
 
         # ============================================================
@@ -987,6 +988,8 @@ class MainWindow(QtWidgets.QMainWindow):
         vl_left = QtWidgets.QVBoxLayout(left_panel)
         vl_left.setContentsMargins(8, 8, 8, 8)
         vl_left.setSpacing(8)
+        vl_left.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
+        vl_left.setAlignment(QtCore.Qt.AlignTop)
 
         self.lbl_mapcalc_title = QtWidgets.QLabel("<b>Cálculo de Mapas</b>")
         self.lbl_mapcalc_title.setStyleSheet("font-size: 12px;")
@@ -1033,12 +1036,17 @@ class MainWindow(QtWidgets.QMainWindow):
         l_models.addLayout(h_model_btns)
 
         vl_left.addWidget(gb_models)
+        self._compact_groupbox(gb_models)
 
         # ------------------------------------------------------------
         # Stack de configuração contextual
         # ------------------------------------------------------------
         self.mapcalc_config_stack = QtWidgets.QStackedWidget()
-        vl_left.addWidget(self.mapcalc_config_stack, 1)
+        self.mapcalc_config_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
+        vl_left.addWidget(self.mapcalc_config_stack)
 
         self._build_mapcalc_vertical_page()
         self._build_mapcalc_property_page()
@@ -1062,6 +1070,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l_diag.addWidget(self.lbl_uncert_max_real)
 
         vl_left.addWidget(gb_diag)
+        self._compact_groupbox(gb_diag)
 
         # Cálculo automático: o botão permanece como fallback interno, mas fica oculto.
         self.btn_run_mapcalc = QtWidgets.QPushButton("Calcular")
@@ -1121,12 +1130,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # ============================================================
         self.uncert_right_panel = QtWidgets.QFrame()
         self.uncert_right_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.uncert_right_panel.setFixedWidth(300)
+        # Painel direito mais estreito, mas com altura expansível para a tabela de fácies.
+        self.uncert_right_panel.setMinimumWidth(300)
 
         vl_right = QtWidgets.QVBoxLayout(self.uncert_right_panel)
         vl_right.setContentsMargins(8, 8, 8, 8)
 
         self.mapcalc_right_tabs = QtWidgets.QTabWidget()
+        self.mapcalc_right_tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
         # Aba dedicada de fácies-alvo para Cálculo de Mapas
         self.mapcalc_facies_page = QtWidgets.QWidget()
@@ -1160,6 +1174,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tbl_mapcalc_target_facies.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_mapcalc_target_facies.itemChanged.connect(self._on_mapcalc_target_facies_item_changed)
         self.tbl_mapcalc_target_facies.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.tbl_mapcalc_target_facies.horizontalHeader().setStretchLastSection(True)
+        self.tbl_mapcalc_target_facies.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
         l_facies.addWidget(self.tbl_mapcalc_target_facies, 1)
 
         self.mapcalc_right_tabs.addTab(self.mapcalc_facies_page, "Fácies-alvo")
@@ -1175,9 +1194,49 @@ class MainWindow(QtWidgets.QMainWindow):
 
         vl_right.addWidget(self.mapcalc_right_tabs, 1)
 
-        layout.addWidget(left_panel)
+        # Scroll geral do painel esquerdo:
+        # - conteúdo compacto no topo;
+        # - sem esticar verticalmente os grupos;
+        # - largura interna próxima da largura externa, sem faixa cinza grande.
+        self.mapcalc_left_scroll = QtWidgets.QScrollArea()
+        self.mapcalc_left_scroll.setWidgetResizable(False)
+        self.mapcalc_left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.mapcalc_left_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.mapcalc_left_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.mapcalc_left_scroll.setFixedWidth(378)
+        self.mapcalc_left_scroll.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+
+        left_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed,
+            QtWidgets.QSizePolicy.Maximum
+        )
+        left_panel.setFixedWidth(360)
+
+        self.mapcalc_left_scroll.setWidget(left_panel)
+
+        # Painel direito:
+        # - volta a uma largura menor;
+        # - altura acompanha a página;
+        # - sem mínimo/máximo de altura, para a tabela de fácies ocupar o espaço disponível.
+        self.mapcalc_right_scroll = QtWidgets.QScrollArea()
+        self.mapcalc_right_scroll.setWidgetResizable(True)
+        self.mapcalc_right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.mapcalc_right_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.mapcalc_right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.mapcalc_right_scroll.setFixedWidth(320)
+        self.mapcalc_right_scroll.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+
+        self.uncert_right_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
+        self.uncert_right_panel.setMinimumWidth(300)
+
+        self.mapcalc_right_scroll.setWidget(self.uncert_right_panel)
+
+        layout.addWidget(self.mapcalc_left_scroll)
         layout.addWidget(self.uncert_result_stack, 1)
-        layout.addWidget(self.uncert_right_panel)
+        layout.addWidget(self.mapcalc_right_scroll)
 
         # Estado
         self.uncert_view_state = None
@@ -1189,7 +1248,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mapcalc_selected_metric = {
             "scalar": "__total_column_thickness__",
             "title": "Espessura total da coluna (m)",
-            "label": "Espessura",
+            "label": "Espessura total do modelo",
+            "formula": "Ttot(i,j) = Σ_k h_ijk",
+            "description": "Soma da espessura estratigráfica de todas as células da coluna.",
         }
         self.mapcalc_selected_stat = "std"
         self.mapcalc_selected_scope = "column"
@@ -1222,47 +1283,608 @@ class MainWindow(QtWidgets.QMainWindow):
         return b
 
 
+    def _make_mapcalc_info_box(self, min_height=72, max_height=105):
+        """Caixa simples de explicação.
+
+        As fórmulas foram removidas da UI porque o Qt não renderiza LaTeX/equation
+        com a mesma qualidade do PDF. A caixa mantém rolagem própria para textos
+        maiores, sem criar scroll geral na lateral.
+        """
+        box = QtWidgets.QTextEdit()
+        box.setReadOnly(True)
+        box.setAcceptRichText(False)
+        box.setMinimumHeight(int(min_height))
+        box.setMaximumHeight(int(max_height))
+        box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        box.setStyleSheet("QTextEdit { background: #fafafa; color: #333; border: 1px solid #bbb; }")
+        return box
+    
+    def _compact_groupbox(self, gb):
+        """
+        Mantém o QGroupBox compacto no topo da lateral.
+
+        Não usamos altura fixa aqui, porque alguns grupos mudam dinamicamente
+        quando o usuário troca a categoria ou o grupo de descritores.
+        """
+        gb.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
+        gb.setMaximumHeight(16777215)
+        return gb
+
+    def _prepare_mapcalc_page_widget(self, page):
+        """
+        Faz a página contextual ficar compacta no topo do QStackedWidget.
+        """
+        if page is None:
+            return
+        page.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
+        lay = page.layout()
+        if lay is not None:
+            lay.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
+            lay.setAlignment(QtCore.Qt.AlignTop)
+
+    def _sync_mapcalc_stack_height(self):
+        """
+        Ajusta a altura do stack lateral para a página atual.
+
+        Isso evita o efeito em que o QStackedWidget usa a altura da maior
+        página e estica os grupos das páginas menores. Se o conteúdo total
+        passar da altura da tela, o QScrollArea externo mostra a rolagem geral.
+        """
+        try:
+            if not hasattr(self, "mapcalc_config_stack"):
+                return
+            page = self.mapcalc_config_stack.currentWidget()
+            if page is None:
+                return
+
+            page.adjustSize()
+            h = max(1, int(page.sizeHint().height()))
+            self.mapcalc_config_stack.setMinimumHeight(h)
+            self.mapcalc_config_stack.setMaximumHeight(h)
+            self.mapcalc_config_stack.setSizePolicy(
+                QtWidgets.QSizePolicy.Preferred,
+                QtWidgets.QSizePolicy.Fixed
+            )
+
+            # Mantém larguras fixas e só ajusta a altura natural do conteúdo esquerdo.
+            # Não usamos adjustSize() no painel direito, pois ele deve acompanhar a altura da página.
+            if hasattr(self, "mapcalc_left_scroll"):
+                w = self.mapcalc_left_scroll.widget()
+                if w is not None:
+                    w.setFixedWidth(360)
+                    w.setFixedHeight(max(1, int(w.sizeHint().height())))
+                    self.mapcalc_left_scroll.setWidgetResizable(False)
+
+            if hasattr(self, "mapcalc_right_scroll"):
+                self.mapcalc_right_scroll.setWidgetResizable(True)
+        except Exception:
+            pass
+
+    def _mapcalc_vertical_metric_groups(self):
+        """
+        Metadados dos descritores verticais por coluna, organizados pelos títulos do documento.
+
+        Observação:
+        - scalar é o nome do campo calculado em cell_data.
+        - A espessura total da coluna usa o campo especial __total_column_thickness__.
+        - As demais métricas usam o prefixo vert_ criado por compute_vertical_metrics_for_grid().
+        """
+        return {
+            "espessura": {
+                "title": "Espessura",
+                "description": "Mapas de espessura por coluna, com ou sem condicionamento pela fácies-alvo.",
+                "items": [
+                    {
+                        "label": "Espessura total do modelo",
+                        "short": "T total",
+                        "scalar": "__total_column_thickness__",
+                        "title": "Espessura total da coluna (m)",
+                        "formula": "Ttot(i,j) = Σ_k h_ijk",
+                        "description": "Soma da espessura estratigráfica de todas as células da coluna. Não depende da fácies-alvo.",
+                    },
+                    {
+                        "label": "Espessura da fácies-alvo",
+                        "short": "T alvo",
+                        "scalar": "vert_Ttot_reservoir",
+                        "title": "Espessura total da fácies-alvo (m)",
+                        "formula": "Ttarget(i,j) = Σ_k h_ijk · I(f_ijk ∈ S)",
+                        "description": "Soma da espessura das células pertencentes ao conjunto de fácies-alvo S.",
+                    },
+                    {
+                        "label": "Espessura do envelope",
+                        "short": "Envelope",
+                        "scalar": "vert_Tenv_reservoir",
+                        "title": "Espessura do envelope vertical da fácies-alvo (m)",
+                        "formula": "Tenv(i,j) = Σ_k h_ijk entre a primeira e a última ocorrência da fácies-alvo",
+                        "description": "Espessura do intervalo vertical entre a primeira e a última ocorrência da fácies-alvo na coluna.",
+                    },
+                ],
+            },
+            "proporcao": {
+                "title": "Proporção",
+                "description": "Mapas de proporção vertical da fácies-alvo na coluna e no envelope.",
+                "items": [
+                    {
+                        "label": "Proporção na coluna",
+                        "short": "P coluna",
+                        "scalar": "vert_NTG_col_reservoir",
+                        "title": "Proporção de fácies-alvo na coluna",
+                        "formula": "Pcol(i,j) = Ttarget(i,j) / Ttot(i,j)",
+                        "description": "Fração da espessura total da coluna ocupada pela fácies-alvo.",
+                    },
+                    {
+                        "label": "Proporção no envelope",
+                        "short": "P envelope",
+                        "scalar": "vert_NTG_env_reservoir",
+                        "title": "Proporção de fácies-alvo no envelope",
+                        "formula": "Penv(i,j) = Ttarget(i,j) / Tenv(i,j)",
+                        "description": "Fração do envelope vertical ocupada pela fácies-alvo.",
+                    },
+                ],
+            },
+            "sequencias": {
+                "title": "Sequências Contínuas",
+                "description": "Descritores dos pacotes verticais contínuos da fácies-alvo.",
+                "items": [
+                    {
+                        "label": "Número de sequências contínuas",
+                        "short": "Nº pacotes",
+                        "scalar": "vert_n_packages_reservoir",
+                        "title": "Número de sequências contínuas da fácies-alvo",
+                        "formula": "Npack = número de sequências contínuas da fácies-alvo",
+                        "description": "Conta quantos pacotes contínuos da fácies-alvo aparecem na coluna. Valores maiores indicam maior fragmentação vertical.",
+                    },
+                    {
+                        "label": "Maior sequência contínua",
+                        "short": "Maior pacote",
+                        "scalar": "vert_Tpack_max_reservoir",
+                        "title": "Espessura da maior sequência contínua (m)",
+                        "formula": "Tpack,max = max{Tpack}",
+                        "description": "Espessura do pacote contínuo mais espesso da fácies-alvo.",
+                    },
+                    {
+                        "label": "Espessura média das sequências",
+                        "short": "Tpack média",
+                        "scalar": "vert_Tpack_mean_reservoir",
+                        "title": "Espessura média das sequências contínuas (m)",
+                        "formula": "Tpack,mean = Ttarget / Npack",
+                        "description": "Espessura média dos pacotes contínuos da fácies-alvo.",
+                    },
+                    {
+                        "label": "Dominância do maior pacote",
+                        "short": "Dominância",
+                        "scalar": "vert_Cdom_reservoir",
+                        "title": "Dominância da maior sequência contínua",
+                        "formula": "Cdom = Tpack,max / Ttarget",
+                        "description": "Mede quanto da espessura total da fácies-alvo está concentrada no maior pacote.",
+                    },
+                ],
+            },
+            "conectividade": {
+                "title": "Conectividade",
+                "description": "Índices simplificados de conectividade vertical e concentração da fácies-alvo.",
+                "items": [
+                    {
+                        "label": "ICV no envelope",
+                        "short": "ICV",
+                        "scalar": "vert_ICV_reservoir",
+                        "title": "Índice de conectividade vertical no envelope",
+                        "formula": "ICV = Tpack,max / Tenv",
+                        "description": "Mede quanto do envelope vertical é ocupado pelo maior pacote contínuo.",
+                    },
+                    {
+                        "label": "ICV na coluna",
+                        "short": "ICV coluna",
+                        "scalar": "vert_ICV_col_reservoir",
+                        "title": "Índice de conectividade vertical na coluna",
+                        "formula": "ICVcol = Tpack,max / Ttot",
+                        "description": "Mede quanto da coluna inteira é ocupado pelo maior pacote contínuo.",
+                    },
+                    {
+                        "label": "Qualidade vertical",
+                        "short": "Qv",
+                        "scalar": "vert_Qv_reservoir",
+                        "title": "Qualidade vertical (Qv)",
+                        "formula": "Qv = Pcol · ICV",
+                        "description": "Combina presença da fácies-alvo na coluna com concentração da continuidade principal no envelope.",
+                    },
+                ],
+            },
+            "gaps": {
+                "title": "Gaps",
+                "description": "Interrupções internas entre pacotes contínuos dentro do envelope da fácies-alvo.",
+                "items": [
+                    {
+                        "label": "Soma dos gaps",
+                        "short": "Soma gaps",
+                        "scalar": "vert_Tgap_sum_reservoir",
+                        "title": "Soma dos gaps verticais (m)",
+                        "formula": "Tgap,sum = Σ_k Tgap,k",
+                        "description": "Soma das espessuras dos intervalos sem fácies-alvo entre a primeira e a última ocorrência.",
+                    },
+                    {
+                        "label": "Maior gap",
+                        "short": "Maior gap",
+                        "scalar": "vert_Tgap_max_reservoir",
+                        "title": "Maior gap vertical (m)",
+                        "formula": "Tgap,max = max{Tgap}",
+                        "description": "Representa a maior descontinuidade interna dentro do envelope da fácies-alvo.",
+                    },
+                    {
+                        "label": "Fração de gaps no envelope",
+                        "short": "G envelope",
+                        "scalar": "vert_Gap_env_reservoir",
+                        "title": "Fração de gaps no envelope",
+                        "formula": "Genv = Tgap,sum / Tenv",
+                        "description": "Fração do envelope ocupada por interrupções sem a fácies-alvo.",
+                    },
+                ],
+            },
+            "trocas": {
+                "title": "Trocas",
+                "description": "Alternâncias verticais entre fácies-alvo e não-alvo ao longo da coluna.",
+                "items": [
+                    {
+                        "label": "Número de trocas",
+                        "short": "Nº trocas",
+                        "scalar": "vert_Nswitch_reservoir",
+                        "title": "Número de trocas verticais",
+                        "formula": "Nswitch = Σ_k δswitch,k",
+                        "description": "Conta transições entre alvo e não-alvo na sequência vertical da coluna.",
+                    },
+                    {
+                        "label": "Densidade de trocas na coluna",
+                        "short": "D troca col.",
+                        "scalar": "vert_Dswitch_col_reservoir",
+                        "title": "Densidade de trocas na coluna",
+                        "formula": "Dswitch,col = Nswitch / Ttot",
+                        "description": "Número de trocas normalizado pela espessura total da coluna.",
+                    },
+                    {
+                        "label": "Densidade de trocas no envelope",
+                        "short": "D troca env.",
+                        "scalar": "vert_Dswitch_env_reservoir",
+                        "title": "Densidade de trocas no envelope",
+                        "formula": "Dswitch,env = Nswitch / Tenv",
+                        "description": "Número de trocas normalizado pela espessura do envelope da fácies-alvo.",
+                    },
+                    {
+                        "label": "Troca ponderada por espessura",
+                        "short": "W troca",
+                        "scalar": "vert_Wswitch_reservoir",
+                        "title": "Troca ponderada por espessura",
+                        "formula": "Wswitch = Σ_k δswitch,k · (h_k + h_{k+1}) / 2",
+                        "description": "Cada troca recebe o peso da espessura média das duas células adjacentes.",
+                    },
+                    {
+                        "label": "Troca ponderada normalizada",
+                        "short": "W troca col.",
+                        "scalar": "vert_WswitchN_col_reservoir",
+                        "title": "Troca ponderada normalizada na coluna",
+                        "formula": "Wswitch,col = Wswitch / Ttot",
+                        "description": "Troca ponderada normalizada pela espessura total da coluna.",
+                    },
+                ],
+            },
+            "permanencias": {
+                "title": "Permanências",
+                "description": "Continuidade vertical entre células adjacentes pertencentes à fácies-alvo.",
+                "items": [
+                    {
+                        "label": "Número de permanências",
+                        "short": "Nº perman.",
+                        "scalar": "vert_Npersist_reservoir",
+                        "title": "Número de permanências verticais",
+                        "formula": "Npersist = Σ_k δpersist,k",
+                        "description": "Conta adjacências verticais em que a fácies-alvo permanece entre células consecutivas.",
+                    },
+                    {
+                        "label": "Permanência relativa",
+                        "short": "R perman.",
+                        "scalar": "vert_Rpersist_reservoir",
+                        "title": "Permanência relativa",
+                        "formula": "Rpersist = Npersist / (ntarget - 1), se ntarget > 1; 0 caso contrário",
+                        "description": "Proporção de permanências em relação ao máximo possível entre células-alvo.",
+                    },
+                    {
+                        "label": "Permanência ponderada",
+                        "short": "W perman.",
+                        "scalar": "vert_Wpersist_reservoir",
+                        "title": "Permanência ponderada por espessura",
+                        "formula": "Wpersist = Σ_k δpersist,k · (h_k + h_{k+1}) / 2",
+                        "description": "Cada permanência recebe o peso da espessura média das duas células adjacentes.",
+                    },
+                    {
+                        "label": "Permanência ponderada normalizada",
+                        "short": "W perman. norm.",
+                        "scalar": "vert_WpersistN_reservoir",
+                        "title": "Permanência ponderada normalizada",
+                        "formula": "Wpersist,col = Wpersist / Ttot",
+                        "description": "Permanência ponderada normalizada pela espessura total da coluna.",
+                    },
+                ],
+            },
+        }
+
+    def _get_mapcalc_metric_meta_by_scalar(self, scalar_name):
+        scalar_name = str(scalar_name or "")
+        for group in self._mapcalc_vertical_metric_groups().values():
+            for meta in group.get("items", []):
+                if str(meta.get("scalar")) == scalar_name:
+                    return dict(meta)
+        return None
+
+    def _clear_layout_widgets(self, layout):
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout_widgets(item.layout())
+
+    def _mapcalc_escape_html(self, value):
+        """Mantido por compatibilidade; as caixas de explicação agora usam texto puro."""
+        import html
+        return html.escape(str(value if value is not None else "-"))
+
+    def _format_metric_info_text(self, meta, group_title=None):
+        """Texto simples para as caixas de explicação dos descritores."""
+        if not isinstance(meta, dict):
+            return "Selecione uma métrica."
+
+        lines = []
+        if group_title:
+            lines.append(f"Grupo: {group_title}")
+        lines.append(f"Métrica: {meta.get('label', '-')}")
+        lines.append("")
+        lines.append(f"Descrição: {meta.get('description', '-')}")
+        scalar = meta.get("scalar", None)
+        if scalar:
+            lines.append("")
+            lines.append(f"Campo calculado: {scalar}")
+        return "\n".join(lines)
+
+    def _update_mapcalc_vertical_info_box(self, meta=None, group_title=None):
+        if meta is None:
+            meta = getattr(self, "mapcalc_selected_metric", None)
+        if not isinstance(meta, dict):
+            return
+        if group_title is None:
+            for g in self._mapcalc_vertical_metric_groups().values():
+                if any(it.get("scalar") == meta.get("scalar") for it in g.get("items", [])):
+                    group_title = g.get("title")
+                    break
+
+        text = self._format_metric_info_text(meta, group_title)
+        for attr in ("txt_mapcalc_vertical_info", "txt_mapcalc_ensemble_metric_info"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setPlainText(text)
+
+    def _set_mapcalc_metric_group(self, group_key, panel="vertical"):
+        groups = self._mapcalc_vertical_metric_groups()
+        if group_key not in groups:
+            group_key = next(iter(groups.keys()))
+        if panel == "ensemble":
+            self.mapcalc_ensemble_group_key = group_key
+            target_layout = getattr(self, "mapcalc_ensemble_metric_items_layout", None)
+            button_group = getattr(self, "mapcalc_ensemble_metric_buttons", None)
+        else:
+            self.mapcalc_vertical_group_key = group_key
+            target_layout = getattr(self, "mapcalc_vertical_metric_items_layout", None)
+            button_group = getattr(self, "mapcalc_metric_buttons", None)
+        self._populate_mapcalc_metric_items(group_key, target_layout, button_group)
+
+    def _populate_mapcalc_metric_items(self, group_key, layout, button_group):
+        groups = self._mapcalc_vertical_metric_groups()
+        group = groups.get(group_key) or next(iter(groups.values()))
+        items = list(group.get("items", []))
+        if layout is None:
+            return
+        self._clear_layout_widgets(layout)
+        if button_group is None:
+            button_group = QtWidgets.QButtonGroup(self)
+            button_group.setExclusive(True)
+        else:
+            try:
+                for b in list(button_group.buttons()):
+                    button_group.removeButton(b)
+            except Exception:
+                pass
+        for idx, meta in enumerate(items):
+            b = QtWidgets.QPushButton(meta.get("short") or meta.get("label") or "Métrica")
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.setToolTip(meta.get("description", meta.get("label", "")))
+            b.clicked.connect(lambda checked=False, m=dict(meta), gt=group.get("title"): self.set_mapcalc_vertical_metric_from_meta(m, gt))
+            button_group.addButton(b)
+            layout.addWidget(b, idx // 2, idx % 2)
+            current = getattr(self, "mapcalc_selected_metric", {}) or {}
+            if current.get("scalar") == meta.get("scalar"):
+                b.setChecked(True)
+        # Se a métrica atual não estiver no grupo, seleciona a primeira do grupo.
+        current_scalar = (getattr(self, "mapcalc_selected_metric", {}) or {}).get("scalar")
+        if items and not any(m.get("scalar") == current_scalar for m in items):
+            first_button = button_group.buttons()[0] if button_group.buttons() else None
+            if first_button is not None:
+                first_button.setChecked(True)
+            self.set_mapcalc_vertical_metric_from_meta(dict(items[0]), group.get("title"), schedule=False)
+        else:
+            self._update_mapcalc_vertical_info_box(group_title=group.get("title"))
+
+        try:
+            QtCore.QTimer.singleShot(0, self._sync_mapcalc_stack_height)
+        except Exception:
+            pass
+
+    def set_mapcalc_vertical_metric_from_meta(self, meta, group_title=None, schedule=True):
+        if not isinstance(meta, dict):
+            return
+        self.mapcalc_selected_metric = {
+            "scalar": meta.get("scalar"),
+            "title": meta.get("title", meta.get("label", "Métrica vertical")),
+            "label": meta.get("label", meta.get("title", "Métrica vertical")),
+            "formula": meta.get("formula", ""),
+            "description": meta.get("description", ""),
+        }
+        self._update_mapcalc_vertical_info_box(meta, group_title)
+        if schedule:
+            self._schedule_mapcalc_auto_update()
+
+    def _mapcalc_property_operation_meta(self, operation=None):
+        operation = str(operation or getattr(self, "mapcalc_selected_operation", "weighted_mean"))
+        metas = {
+            "weighted_mean": {
+                "title": "Média ponderada por espessura",
+                "formula": "p̄_h(i,j) = Σ_k h_ijk · p_ijk / Σ_k h_ijk",
+                "description": "Calcula o valor médio da propriedade na coluna, ponderando cada célula pela espessura.",
+            },
+            "equivalent": {
+                "title": "Espessura equivalente",
+                "formula": "Tp(i,j) = Σ_k h_ijk · p_ijk",
+                "description": "Transforma uma propriedade fracionária entre 0 e 1 em espessura equivalente por coluna.",
+            },
+            "mean": {
+                "title": "Média aritmética vertical",
+                "formula": "p̄(i,j) = mean_k(p_ijk)",
+                "description": "Média simples da propriedade ao longo das células da coluna.",
+            },
+            "sum": {
+                "title": "Soma vertical",
+                "formula": "S_p(i,j) = Σ_k p_ijk",
+                "description": "Soma dos valores da propriedade ao longo da coluna.",
+            },
+            "max": {
+                "title": "Máximo vertical",
+                "formula": "p_max(i,j) = max_k(p_ijk)",
+                "description": "Maior valor da propriedade encontrado na coluna.",
+            },
+        }
+        return metas.get(operation, metas["weighted_mean"])
+
+    def _update_mapcalc_property_info_box(self):
+        box = getattr(self, "txt_mapcalc_property_info", None)
+        if box is None:
+            return
+        meta = self._mapcalc_property_operation_meta()
+        prop = getattr(self, "mapcalc_selected_property", None) or "-"
+        text = (
+            f"Operação: {meta['title']}\n\n"
+            f"Descrição: {meta['description']}\n\n"
+            f"Propriedade selecionada: {prop}"
+        )
+        box.setPlainText(text)
+
+    def _mapcalc_stat_meta(self, stat=None):
+        stat = str(stat or getattr(self, "mapcalc_selected_stat", "mean"))
+        metas = {
+            "mean": {
+                "title": "Média do ensemble",
+                "formula": "μ_D(i,j) = (1/M) · Σ_m D^(m)(i,j)",
+                "description": "Mapa médio do ensemble. Representa tendência central, não incerteza por si só.",
+            },
+            "std": {
+                "title": "Desvio padrão do ensemble",
+                "formula": "σ_D(i,j) = sqrt((1/M) · Σ_m (D^(m)(i,j) - μ_D(i,j))²)",
+                "description": "Mede a dispersão dos modelos em torno da média, na mesma unidade da métrica.",
+            },
+            "var": {
+                "title": "Variância do ensemble",
+                "formula": "σ²_D(i,j) = (1/M) · Σ_m (D^(m)(i,j) - μ_D(i,j))²",
+                "description": "Mede a dispersão quadrática entre modelos.",
+            },
+            "range": {
+                "title": "Amplitude do ensemble",
+                "formula": "R_D(i,j) = max_m D^(m)(i,j) - min_m D^(m)(i,j)",
+                "description": "Diferença entre o maior e o menor valor entre os modelos selecionados.",
+            },
+        }
+        return metas.get(stat, metas["mean"])
+
+    def _update_mapcalc_ensemble_info_box(self):
+        box = getattr(self, "txt_mapcalc_ensemble_info", None)
+        if box is None:
+            return
+        stat = self._mapcalc_stat_meta()
+        metric = getattr(self, "mapcalc_selected_metric", None) or {}
+        text = (
+            f"Estatística: {stat['title']}\n\n"
+            f"Descrição: {stat['description']}\n\n"
+            f"Métrica vertical: {metric.get('label', '-')}"
+        )
+        box.setPlainText(text)
+
+    def _update_mapcalc_uncertainty_info_box(self):
+        box = getattr(self, "txt_mapcalc_uncertainty_info", None)
+        if box is None:
+            return
+        text = (
+            "Método: Entropia de fácies\n\n"
+            "Descrição: mede a discordância categórica entre modelos em cada célula. "
+            "Valores baixos indicam concordância entre cenários; valores altos indicam maior diversidade de fácies na mesma célula.\n\n"
+            "Interpretação: quanto maior a entropia, maior a variação categórica de fácies entre os modelos selecionados."
+        )
+        box.setPlainText(text)
+
+
+
+
     def _build_mapcalc_vertical_page(self):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(8)
 
-        gb_metric = QtWidgets.QGroupBox("Métrica vertical")
-        grid = QtWidgets.QGridLayout(gb_metric)
-        grid.setSpacing(6)
+        # Grupo principal: Espessura, Proporção, Sequências, etc.
+        gb_group = QtWidgets.QGroupBox("Grupo de descritores")
+        grid_group = QtWidgets.QGridLayout(gb_group)
+        grid_group.setSpacing(6)
 
-        self.mapcalc_metric_buttons = QtWidgets.QButtonGroup(self)
-        self.mapcalc_metric_buttons.setExclusive(True)
+        self.mapcalc_metric_group_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_metric_group_buttons.setExclusive(True)
 
-        metrics = [
-            ("Espessura", "__total_column_thickness__", "Espessura total da coluna (m)"),
-            ("T alvo", "vert_Ttot_reservoir", "Espessura total da fácies-alvo (m)"),
-            ("Proporção", "vert_NTG_col_reservoir", "Proporção de fácies na coluna"),
-            ("Envelope", "vert_Tenv_reservoir", "Espessura do envelope vertical"),
-            ("Maior pacote", "vert_Tpack_max_reservoir", "Espessura do maior pacote"),
-            ("Nº pacotes", "vert_n_packages_reservoir", "Número de pacotes"),
-            ("ICV", "vert_ICV_reservoir", "Índice de conectividade vertical"),
-            ("Qv", "vert_Qv_reservoir", "Índice Qv"),
-            ("Gaps", "vert_Tgap_sum_reservoir", "Soma dos gaps verticais"),
-            ("Trocas", "vert_Nswitch_reservoir", "Número de trocas verticais"),
-            ("Permanência", "vert_Npersist_reservoir", "Número de permanências"),
-        ]
-
-        for idx, (label, scalar, title) in enumerate(metrics):
-            b = QtWidgets.QPushButton(label)
+        groups = self._mapcalc_vertical_metric_groups()
+        for idx, (key, group) in enumerate(groups.items()):
+            b = QtWidgets.QPushButton(group.get("title", key))
             b.setCheckable(True)
-            b.setMinimumHeight(28)
-            b.setToolTip(title)
-            b.clicked.connect(lambda checked=False, s=scalar, t=title, l=label: self.set_mapcalc_vertical_metric(s, t, l))
-            self.mapcalc_metric_buttons.addButton(b)
-            grid.addWidget(b, idx // 3, idx % 3)
-
+            b.setMinimumHeight(30)
+            b.setToolTip(group.get("description", ""))
+            b.clicked.connect(lambda checked=False, k=key: self._set_mapcalc_metric_group(k, panel="vertical"))
+            self.mapcalc_metric_group_buttons.addButton(b)
+            grid_group.addWidget(b, idx // 2, idx % 2)
             if idx == 0:
                 b.setChecked(True)
-                self.mapcalc_selected_metric = {"scalar": scalar, "title": title, "label": label}
+                self.mapcalc_vertical_group_key = key
 
+        lay.addWidget(gb_group)
+        self._compact_groupbox(gb_group)
+
+        # Itens do grupo selecionado
+        gb_metric = QtWidgets.QGroupBox("Métrica vertical")
+        self.mapcalc_vertical_metric_items_layout = QtWidgets.QGridLayout(gb_metric)
+        self.mapcalc_vertical_metric_items_layout.setSpacing(6)
+        self.mapcalc_metric_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_metric_buttons.setExclusive(True)
         lay.addWidget(gb_metric)
+        self._compact_groupbox(gb_metric)
+
+        # Explicação
+        gb_info = QtWidgets.QGroupBox("Explicação")
+        l_info = QtWidgets.QVBoxLayout(gb_info)
+        self.txt_mapcalc_vertical_info = self._make_mapcalc_info_box(min_height=90, max_height=120)
+        l_info.addWidget(self.txt_mapcalc_vertical_info)
+        lay.addWidget(gb_info)
+        self._compact_groupbox(gb_info)
 
         gb_target = QtWidgets.QGroupBox("Fácies-alvo")
         l_target = QtWidgets.QVBoxLayout(gb_target)
@@ -1274,9 +1896,15 @@ class MainWindow(QtWidgets.QMainWindow):
         hint.setStyleSheet("color: #555;")
         l_target.addWidget(hint)
         lay.addWidget(gb_target)
+        self._compact_groupbox(gb_target)
 
-        lay.addStretch(1)
+        self._prepare_mapcalc_page_widget(page)
         self.mapcalc_config_stack.addWidget(page)
+
+        # Popula o primeiro grupo depois que os widgets existem.
+        first_key = next(iter(groups.keys())) if groups else "espessura"
+        self._set_mapcalc_metric_group(first_key, panel="vertical")
+
 
     def _build_mapcalc_property_page(self):
         page = QtWidgets.QWidget()
@@ -1292,18 +1920,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mapcalc_operation_buttons.setExclusive(True)
 
         ops = [
-            ("Média ponderada", "weighted_mean", "Σ(h·p)/Σh"),
-            ("Esp. equivalente", "equivalent", "Σ(h·p)"),
-            ("Média vertical", "mean", "mean(p)"),
-            ("Soma vertical", "sum", "Σp"),
-            ("Máximo vertical", "max", "max(p)"),
+            ("Média ponderada", "weighted_mean"),
+            ("Esp. equivalente", "equivalent"),
+            ("Média vertical", "mean"),
+            ("Soma vertical", "sum"),
+            ("Máximo vertical", "max"),
         ]
 
-        for idx, (label, key, tip) in enumerate(ops):
+        for idx, (label, key) in enumerate(ops):
+            meta = self._mapcalc_property_operation_meta(key)
             b = QtWidgets.QPushButton(label)
             b.setCheckable(True)
             b.setMinimumHeight(28)
-            b.setToolTip(tip)
+            b.setToolTip(meta["title"])
             b.clicked.connect(lambda checked=False, k=key: self.set_mapcalc_property_operation(k))
             self.mapcalc_operation_buttons.addButton(b)
             grid_op.addWidget(b, idx // 2, idx % 2)
@@ -1312,6 +1941,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 b.setChecked(True)
 
         lay.addWidget(gb_op)
+
+        gb_info = QtWidgets.QGroupBox("Explicação")
+        l_info = QtWidgets.QVBoxLayout(gb_info)
+        self.txt_mapcalc_property_info = self._make_mapcalc_info_box(min_height=90, max_height=120)
+        l_info.addWidget(self.txt_mapcalc_property_info)
+        lay.addWidget(gb_info)
 
         gb_prop = QtWidgets.QGroupBox("Propriedade")
         l_prop = QtWidgets.QVBoxLayout(gb_prop)
@@ -1322,11 +1957,23 @@ class MainWindow(QtWidgets.QMainWindow):
         l_prop.addWidget(self.txt_mapcalc_prop_filter)
 
         self.lst_mapcalc_properties = QtWidgets.QListWidget()
+        self.lst_mapcalc_properties.setMinimumHeight(130)
+        self.lst_mapcalc_properties.setMaximumHeight(210)
+        self.lst_mapcalc_properties.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed
+        )
         self.lst_mapcalc_properties.itemSelectionChanged.connect(self._on_mapcalc_property_selected)
-        l_prop.addWidget(self.lst_mapcalc_properties, 1)
+        l_prop.addWidget(self.lst_mapcalc_properties)
 
-        lay.addWidget(gb_prop, 1)
+        lay.addWidget(gb_prop)
+        self._compact_groupbox(gb_op)
+        self._compact_groupbox(gb_info)
+        self._compact_groupbox(gb_prop)
+        self._prepare_mapcalc_page_widget(page)
         self.mapcalc_config_stack.addWidget(page)
+        self._update_mapcalc_property_info_box()
+
 
     def _build_mapcalc_ensemble_page(self):
         page = QtWidgets.QWidget()
@@ -1334,38 +1981,33 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(8)
 
-        gb_metric = QtWidgets.QGroupBox("Métrica vertical alvo")
-        grid_metric = QtWidgets.QGridLayout(gb_metric)
-        grid_metric.setSpacing(6)
+        gb_group = QtWidgets.QGroupBox("Grupo de descritores")
+        grid_group = QtWidgets.QGridLayout(gb_group)
+        grid_group.setSpacing(6)
 
-        self.mapcalc_ensemble_metric_buttons = QtWidgets.QButtonGroup(self)
-        self.mapcalc_ensemble_metric_buttons.setExclusive(True)
+        self.mapcalc_ensemble_metric_group_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_ensemble_metric_group_buttons.setExclusive(True)
 
-        metrics = [
-            ("Espessura", "__total_column_thickness__", "Espessura total da coluna (m)"),
-            ("T alvo", "vert_Ttot_reservoir", "Espessura total da fácies-alvo (m)"),
-            ("Proporção", "vert_NTG_col_reservoir", "Proporção de fácies na coluna"),
-            ("Envelope", "vert_Tenv_reservoir", "Espessura do envelope vertical"),
-            ("Maior pacote", "vert_Tpack_max_reservoir", "Espessura do maior pacote"),
-            ("Nº pacotes", "vert_n_packages_reservoir", "Número de pacotes"),
-            ("ICV", "vert_ICV_reservoir", "Índice de conectividade vertical"),
-            ("Qv", "vert_Qv_reservoir", "Índice Qv"),
-            ("Gaps", "vert_Tgap_sum_reservoir", "Soma dos gaps verticais"),
-            ("Trocas", "vert_Nswitch_reservoir", "Número de trocas verticais"),
-            ("Permanência", "vert_Npersist_reservoir", "Número de permanências"),
-        ]
-
-        for idx, (label, scalar, title) in enumerate(metrics):
-            b = QtWidgets.QPushButton(label)
+        groups = self._mapcalc_vertical_metric_groups()
+        for idx, (key, group) in enumerate(groups.items()):
+            b = QtWidgets.QPushButton(group.get("title", key))
             b.setCheckable(True)
-            b.setMinimumHeight(28)
-            b.setToolTip(title)
-            b.clicked.connect(lambda checked=False, s=scalar, t=title, l=label: self.set_mapcalc_vertical_metric(s, t, l))
-            self.mapcalc_ensemble_metric_buttons.addButton(b)
-            grid_metric.addWidget(b, idx // 3, idx % 3)
+            b.setMinimumHeight(30)
+            b.setToolTip(group.get("description", ""))
+            b.clicked.connect(lambda checked=False, k=key: self._set_mapcalc_metric_group(k, panel="ensemble"))
+            self.mapcalc_ensemble_metric_group_buttons.addButton(b)
+            grid_group.addWidget(b, idx // 2, idx % 2)
             if idx == 0:
                 b.setChecked(True)
+                self.mapcalc_ensemble_group_key = key
 
+        lay.addWidget(gb_group)
+
+        gb_metric = QtWidgets.QGroupBox("Métrica vertical alvo")
+        self.mapcalc_ensemble_metric_items_layout = QtWidgets.QGridLayout(gb_metric)
+        self.mapcalc_ensemble_metric_items_layout.setSpacing(6)
+        self.mapcalc_ensemble_metric_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_ensemble_metric_buttons.setExclusive(True)
         lay.addWidget(gb_metric)
 
         gb_stat = QtWidgets.QGroupBox("Estatística")
@@ -1383,9 +2025,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
 
         for idx, (label, key) in enumerate(stats):
+            meta = self._mapcalc_stat_meta(key)
             b = QtWidgets.QPushButton(label)
             b.setCheckable(True)
             b.setMinimumHeight(28)
+            b.setToolTip(meta["title"])
             b.clicked.connect(lambda checked=False, k=key: self.set_mapcalc_stat(k))
             self.mapcalc_stat_buttons.addButton(b)
             grid_stat.addWidget(b, idx // 2, idx % 2)
@@ -1417,8 +2061,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 b.setChecked(True)
 
         lay.addWidget(gb_scope)
-        lay.addStretch(1)
+
+        gb_info = QtWidgets.QGroupBox("Explicação")
+        l_info = QtWidgets.QVBoxLayout(gb_info)
+        self.txt_mapcalc_ensemble_metric_info = self._make_mapcalc_info_box(min_height=80, max_height=105)
+        self.txt_mapcalc_ensemble_info = self._make_mapcalc_info_box(min_height=80, max_height=105)
+        l_info.addWidget(self.txt_mapcalc_ensemble_metric_info)
+        l_info.addWidget(self.txt_mapcalc_ensemble_info)
+        lay.addWidget(gb_info)
+
+        self._compact_groupbox(gb_group)
+        self._compact_groupbox(gb_metric)
+        self._compact_groupbox(gb_stat)
+        self._compact_groupbox(gb_scope)
+        self._compact_groupbox(gb_info)
+        self._prepare_mapcalc_page_widget(page)
         self.mapcalc_config_stack.addWidget(page)
+
+        first_key = next(iter(groups.keys())) if groups else "espessura"
+        self._set_mapcalc_metric_group(first_key, panel="ensemble")
+        self._update_mapcalc_ensemble_info_box()
+
 
     def _build_mapcalc_uncertainty_page(self):
         page = QtWidgets.QWidget()
@@ -1426,40 +2089,51 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(8)
 
-        gb_unc = QtWidgets.QGroupBox("Tipo de incerteza / discordância")
+        gb_unc = QtWidgets.QGroupBox("Incerteza / discordância")
         l_unc = QtWidgets.QVBoxLayout(gb_unc)
 
         info = QtWidgets.QLabel(
-            "Nesta etapa, a opção principal é Entropia de Fácies, que mede discordância categórica entre modelos.\n\n"
-            "Para desvio padrão, variância e amplitude de métricas ou propriedades, use a aba Ensemble."
+            "Nesta etapa, a incerteza está focada na Entropia de Fácies, que mede a discordância categórica entre modelos célula a célula."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #555;")
         l_unc.addWidget(info)
 
-        btn_entropy = QtWidgets.QPushButton("Entropia de fácies")
-        btn_entropy.setCheckable(True)
-        btn_entropy.setMinimumHeight(30)
-        btn_entropy.clicked.connect(lambda: self.set_mapcalc_uncertainty_target("facies_entropy"))
-        btn_entropy.setChecked(True)
-
-        self.mapcalc_uncert_buttons = QtWidgets.QButtonGroup(self)
-        self.mapcalc_uncert_buttons.setExclusive(True)
-        self.mapcalc_uncert_buttons.addButton(btn_entropy)
-        l_unc.addWidget(btn_entropy)
+        self.txt_mapcalc_uncertainty_info = self._make_mapcalc_info_box(min_height=95, max_height=115)
+        l_unc.addWidget(self.txt_mapcalc_uncertainty_info)
 
         self.mapcalc_uncertainty_target = "facies_entropy"
         lay.addWidget(gb_unc)
+        self._compact_groupbox(gb_unc)
 
         gb_scope = QtWidgets.QGroupBox("Saída")
         l_scope = QtWidgets.QVBoxLayout(gb_scope)
-        self.lbl_mapcalc_uncert_scope = QtWidgets.QLabel("Resultado: campo 3D de entropia célula a célula.")
+        l_scope.setContentsMargins(8, 8, 8, 8)
+
+        self.lbl_mapcalc_uncert_scope = QtWidgets.QLabel(
+            "Resultado: campo 3D de entropia célula a célula."
+        )
         self.lbl_mapcalc_uncert_scope.setWordWrap(True)
+        self.lbl_mapcalc_uncert_scope.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
+
         l_scope.addWidget(self.lbl_mapcalc_uncert_scope)
+
+        gb_scope.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
+        gb_scope.setMaximumHeight(85)
+
         lay.addWidget(gb_scope)
 
-        lay.addStretch(1)
+        self._compact_groupbox(gb_scope)
+        self._prepare_mapcalc_page_widget(page)
         self.mapcalc_config_stack.addWidget(page)
+        self._update_mapcalc_uncertainty_info_box()
+
     def _build_mapcalc_difference_page(self):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
@@ -1468,16 +2142,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         info = QtWidgets.QLabel(
             "Diferença entre modelos será implementada depois.\n\n"
-            "Exemplos:\n"
-            "• Modelo A - Modelo Base\n"
-            "• |A - B|\n"
-            "• Diferença percentual\n"
-            "• Distância ao mapa médio do ensemble"
         )
         info.setWordWrap(True)
         lay.addWidget(info)
-        lay.addStretch(1)
+        page.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Maximum
+        )
 
+        self._prepare_mapcalc_page_widget(page)
         self.mapcalc_config_stack.addWidget(page)
 
     def show_mapcalc_page(self, mode_key="vertical"):
@@ -1527,8 +2200,33 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         self.set_mapcalc_mode(mode_key)
+        try:
+            QtCore.QTimer.singleShot(0, self._normalize_mapcalc_window_size)
+            QtCore.QTimer.singleShot(120, self._normalize_mapcalc_window_size)
+        except Exception:
+            pass
         # Calcula uma vez ao abrir a aba Mapas, mas sem modal de erro se algo ainda não estiver pronto.
         self._schedule_mapcalc_auto_update(350)
+
+
+    def _normalize_mapcalc_window_size(self):
+        """Evita que a aba Mapas force a janela para fora da tela.
+
+        Os painéis laterais agora são roláveis; esta rotina apenas remove
+        mínimos herdados e reaplica a maximização quando necessário.
+        """
+        try:
+            self.setMinimumSize(0, 0)
+            if hasattr(self, "uncertainty_page"):
+                self.uncertainty_page.setMinimumSize(0, 0)
+            if hasattr(self, "mapcalc_left_scroll"):
+                self.mapcalc_left_scroll.setMinimumHeight(0)
+            if hasattr(self, "mapcalc_right_scroll"):
+                self.mapcalc_right_scroll.setMinimumHeight(0)
+            if self.isMaximized():
+                self.showMaximized()
+        except Exception:
+            pass
 
 
     def set_mapcalc_mode(self, mode_key):
@@ -1576,9 +2274,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     "label": "Espessura",
                 }
             self.lbl_mapcalc_title.setText("<b>Mapa Vertical por Coluna</b>")
-            self.lbl_mapcalc_help.setText("Calcule espessura, proporção, ICV, Qv, pacotes, gaps e trocas por coluna.")
+            self.lbl_mapcalc_help.setText("Calcule métricas por coluna do modelo.")
             self.btn_run_mapcalc.setText("Calcular Mapa Vertical")
             self._set_uncert_result_mode("column")
+            self._update_mapcalc_vertical_info_box()
             try:
                 if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_facies_page"):
                     self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_facies_page)
@@ -1590,44 +2289,70 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_run_mapcalc.setText("Calcular Propriedade")
             self._set_uncert_result_mode("column")
             self._refresh_mapcalc_property_list()
+            self._update_mapcalc_property_info_box()
         elif self.mapcalc_mode == "ensemble":
             self.lbl_mapcalc_title.setText("<b>Estatística do Ensemble</b>")
             self.lbl_mapcalc_help.setText("Escolha a métrica vertical, os modelos e a estatística do ensemble.")
             self.btn_run_mapcalc.setText("Calcular Estatística")
             self._set_uncert_result_mode(getattr(self, "mapcalc_selected_scope", "column"))
+            self._update_mapcalc_vertical_info_box()
+            self._update_mapcalc_ensemble_info_box()
         elif self.mapcalc_mode == "uncertainty":
             self.lbl_mapcalc_title.setText("<b>Incerteza / Discordância</b>")
             self.lbl_mapcalc_help.setText("Entropia de fácies entre modelos: discordância categórica célula a célula.")
             self.btn_run_mapcalc.setText("Calcular Incerteza")
             self._set_uncert_result_mode("cell")
+            self._update_mapcalc_uncertainty_info_box()
         elif self.mapcalc_mode == "difference":
             self.lbl_mapcalc_title.setText("<b>Diferença entre Modelos</b>")
             self.lbl_mapcalc_help.setText("Mapas de diferença serão implementados na próxima etapa.")
             self.btn_run_mapcalc.setText("Calcular Diferença")
             self._set_uncert_result_mode("column")
 
+        try:
+            QtCore.QTimer.singleShot(0, self._sync_mapcalc_stack_height)
+        except Exception:
+            pass
+
         self._update_mapcalc_model_status_label()
         self._schedule_mapcalc_auto_update()
 
+
     def set_mapcalc_vertical_metric(self, scalar, title, label=None):
-        self.mapcalc_selected_metric = {"scalar": scalar, "title": title, "label": label or title}
-        self._schedule_mapcalc_auto_update()
+        meta = self._get_mapcalc_metric_meta_by_scalar(scalar)
+        if meta is None:
+            meta = {
+                "scalar": scalar,
+                "title": title,
+                "label": label or title,
+                "formula": "-",
+                "description": title or label or "Métrica vertical",
+            }
+        self.set_mapcalc_vertical_metric_from_meta(meta, schedule=True)
+
 
     def set_mapcalc_property_operation(self, operation):
         self.mapcalc_selected_operation = str(operation or "weighted_mean")
+        self._update_mapcalc_property_info_box()
         self._schedule_mapcalc_auto_update()
+
 
     def set_mapcalc_stat(self, stat):
         self.mapcalc_selected_stat = str(stat or "std")
+        self._update_mapcalc_ensemble_info_box()
         self._schedule_mapcalc_auto_update()
+
 
     def set_mapcalc_scope(self, scope):
         self.mapcalc_selected_scope = str(scope or "column")
         self._set_uncert_result_mode(self.mapcalc_selected_scope)
+        self._update_mapcalc_ensemble_info_box()
         self._schedule_mapcalc_auto_update()
+
 
     def set_mapcalc_uncertainty_target(self, target):
         self.mapcalc_uncertainty_target = str(target or "facies_entropy")
+        self._update_mapcalc_uncertainty_info_box()
         self._schedule_mapcalc_auto_update()
 
     def _ensure_mapcalc_auto_timer(self):
@@ -2216,6 +2941,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         if hasattr(self, "uncert_right_panel"):
             self.uncert_right_panel.setVisible(True)
+        if hasattr(self, "mapcalc_right_scroll"):
+            self.mapcalc_right_scroll.setVisible(True)
 
     def _clear_uncert_summary_table(self):
         if hasattr(self, "tbl_uncert_summary"):
@@ -3148,6 +3875,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # para fácies-alvo mesmo quando o resultado central é 2D.
         if hasattr(self, "uncert_right_panel"):
             self.uncert_right_panel.setVisible(True)
+        if hasattr(self, "mapcalc_right_scroll"):
+            self.mapcalc_right_scroll.setVisible(True)
 
 
     def _clear_uncert_summary_table(self):
@@ -3968,11 +4697,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_mapcalc_property_selected(self):
         if not hasattr(self, "lst_mapcalc_properties"):
             return
+
         item = self.lst_mapcalc_properties.currentItem()
         if item is None:
             self.mapcalc_selected_property = None
+            self._update_mapcalc_property_info_box()
             return
+
         self.mapcalc_selected_property = str(item.text())
+        self._update_mapcalc_property_info_box()
         self._schedule_mapcalc_auto_update()
 
     def open_mapcalc_target_facies_dialog(self):
