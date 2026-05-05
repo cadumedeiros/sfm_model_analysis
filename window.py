@@ -640,7 +640,8 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    
+        self.showMaximized()
+
     def open_selected_well_reports(self):
         from PyQt5 import QtCore
 
@@ -680,7 +681,9 @@ class MainWindow(QtWidgets.QMainWindow):
  
     def setup_ui(self, nx, ny, nz):
         self.resize(1600, 900)
-        self.showMaximized()
+        # A janela é maximizada ao final da montagem da UI.
+        # Chamar showMaximized() aqui, antes dos docks/ribbon/plotters,
+        # pode deixar a primeira abertura “cortada” em alguns ambientes Qt/Windows.
 
         menubar = self.menuBar()
 
@@ -952,19 +955,16 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def setup_uncertainty_tab(self, parent_widget):
         """
-        Layout da aba Incerteza.
+        Página geral de Cálculo de Mapas.
 
-        Estrutura:
-            Painel esquerdo: configuração
-            Centro: stack com 3 saídas possíveis
-                0 -> visualização 3D, para incerteza célula a célula
-                1 -> mapa 2D, para incerteza por coluna
-                2 -> tabela grande, para resumo por modelo / ensemble
-            Painel direito: geometria/cortes, visível apenas no modo 3D
+        A categoria principal é controlada pelo Ribbon. O painel lateral é contextual:
+        - modelos no topo;
+        - parâmetros específicos da tarefa no meio;
+        - resultado/diagnóstico e botão de cálculo embaixo.
         """
         from load_data import nx, ny, nz
 
-        # 1. Limpeza para evitar sobreposição se a aba for recriada
+        # Limpa layout anterior
         if parent_widget.layout():
             old = parent_widget.layout()
             while old.count():
@@ -978,66 +978,83 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(6)
 
         # ============================================================
-        # PAINEL ESQUERDO: CONFIGURAÇÃO
+        # PAINEL ESQUERDO
         # ============================================================
         left_panel = QtWidgets.QFrame()
         left_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        left_panel.setFixedWidth(320)
+        left_panel.setFixedWidth(360)
+
         vl_left = QtWidgets.QVBoxLayout(left_panel)
         vl_left.setContentsMargins(8, 8, 8, 8)
-        vl_left.setSpacing(6)
+        vl_left.setSpacing(8)
 
-        vl_left.addWidget(QtWidgets.QLabel("<b>Configuração</b>"))
+        self.lbl_mapcalc_title = QtWidgets.QLabel("<b>Cálculo de Mapas</b>")
+        self.lbl_mapcalc_title.setStyleSheet("font-size: 12px;")
+        vl_left.addWidget(self.lbl_mapcalc_title)
 
-        vl_left.addWidget(QtWidgets.QLabel("Propriedade / descritor:"))
-        self.cmb_uncert_prop = QtWidgets.QComboBox()
-        self.cmb_uncert_prop.addItem(
-            "Fácies (Entropia)",
-            {"kind": "facies", "scalar": None, "reduction": "entropy"}
+        self.lbl_mapcalc_help = QtWidgets.QLabel(
+            "Escolha o tipo de mapa no Ribbon. Use a lista abaixo para escolher o(s) modelo(s)."
         )
-        self.cmb_uncert_prop.currentIndexChanged.connect(self.on_uncert_settings_changed)
-        vl_left.addWidget(self.cmb_uncert_prop)
+        self.lbl_mapcalc_help.setWordWrap(True)
+        self.lbl_mapcalc_help.setMaximumHeight(58)
+        self.lbl_mapcalc_help.setStyleSheet("color: #555;")
+        vl_left.addWidget(self.lbl_mapcalc_help)
 
-        vl_left.addWidget(QtWidgets.QLabel("Escala da incerteza:"))
-        self.cmb_uncert_scope = QtWidgets.QComboBox()
-        self.cmb_uncert_scope.addItem("Célula a célula", "cell")
-        self.cmb_uncert_scope.addItem("Por coluna", "column")
-        self.cmb_uncert_scope.addItem("Resumo por modelo / ensemble", "model")
-        self.cmb_uncert_scope.currentIndexChanged.connect(self.on_uncert_settings_changed)
-        vl_left.addWidget(self.cmb_uncert_scope)
+        # ------------------------------------------------------------
+        # Modelos — substitui o combo Usar Base/Usar Explorer
+        # ------------------------------------------------------------
+        gb_models = QtWidgets.QGroupBox("Modelos")
+        l_models = QtWidgets.QVBoxLayout(gb_models)
+        l_models.setContentsMargins(6, 6, 6, 6)
+        l_models.setSpacing(4)
 
-        vl_left.addWidget(QtWidgets.QLabel("Estatística entre cenários:"))
-        self.cmb_uncert_metric = QtWidgets.QComboBox()
-        self.cmb_uncert_metric.addItem("Média", "mean")
-        self.cmb_uncert_metric.addItem("Desvio padrão", "std")
-        self.cmb_uncert_metric.addItem("Variância", "var")
-        self.cmb_uncert_metric.addItem("Amplitude", "range")
-        self.cmb_uncert_metric.currentIndexChanged.connect(self.on_uncert_settings_changed)
-        vl_left.addWidget(self.cmb_uncert_metric)
+        self.lbl_mapcalc_models_hint = QtWidgets.QLabel(
+            "Mapa individual: usa o modelo selecionado. Ensemble/Incerteza: usa os modelos marcados."
+        )
+        self.lbl_mapcalc_models_hint.setWordWrap(True)
+        self.lbl_mapcalc_models_hint.setStyleSheet("color: #555;")
+        self.lbl_mapcalc_models_hint.setMaximumHeight(44)
+        l_models.addWidget(self.lbl_mapcalc_models_hint)
 
-        vl_left.addWidget(QtWidgets.QLabel("Modelos:"))
-        self.lst_uncert_models = QtWidgets.QListWidget()
-        self.lst_uncert_models.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        vl_left.addWidget(self.lst_uncert_models, 1)
+        self.lst_mapcalc_models = QtWidgets.QListWidget()
+        self.lst_mapcalc_models.setMaximumHeight(150)
+        self.lst_mapcalc_models.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.lst_mapcalc_models.itemChanged.connect(self._on_mapcalc_model_item_changed)
+        self.lst_mapcalc_models.itemSelectionChanged.connect(self._on_mapcalc_model_selection_changed)
+        l_models.addWidget(self.lst_mapcalc_models)
 
-        h_sel = QtWidgets.QHBoxLayout()
-        b_all = QtWidgets.QPushButton("Todos")
-        b_all.clicked.connect(self._uncert_sel_all)
-        b_none = QtWidgets.QPushButton("Nenhum")
-        b_none.clicked.connect(self._uncert_sel_none)
-        h_sel.addWidget(b_all)
-        h_sel.addWidget(b_none)
-        vl_left.addLayout(h_sel)
+        h_model_btns = QtWidgets.QHBoxLayout()
+        self.btn_mapcalc_all_models = QtWidgets.QPushButton("Todos")
+        self.btn_mapcalc_all_models.clicked.connect(lambda: self._set_all_mapcalc_models_checked(True))
+        self.btn_mapcalc_no_models = QtWidgets.QPushButton("Nenhum")
+        self.btn_mapcalc_no_models.clicked.connect(lambda: self._set_all_mapcalc_models_checked(False))
+        h_model_btns.addWidget(self.btn_mapcalc_all_models)
+        h_model_btns.addWidget(self.btn_mapcalc_no_models)
+        l_models.addLayout(h_model_btns)
 
-        vl_left.addSpacing(8)
+        vl_left.addWidget(gb_models)
 
-        # Diagnóstico
-        gb_diag = QtWidgets.QGroupBox("Diagnóstico")
+        # ------------------------------------------------------------
+        # Stack de configuração contextual
+        # ------------------------------------------------------------
+        self.mapcalc_config_stack = QtWidgets.QStackedWidget()
+        vl_left.addWidget(self.mapcalc_config_stack, 1)
+
+        self._build_mapcalc_vertical_page()
+        self._build_mapcalc_property_page()
+        self._build_mapcalc_ensemble_page()
+        self._build_mapcalc_uncertainty_page()
+        self._build_mapcalc_difference_page()
+
+        # ------------------------------------------------------------
+        # Diagnóstico / Resultado
+        # ------------------------------------------------------------
+        gb_diag = QtWidgets.QGroupBox("Resultado")
         l_diag = QtWidgets.QVBoxLayout(gb_diag)
 
-        self.lbl_uncert_n = QtWidgets.QLabel("Modelos (N): -")
-        self.lbl_uncert_max_theo = QtWidgets.QLabel("Máx. Teórico: -")
-        self.lbl_uncert_max_real = QtWidgets.QLabel("Máx. Encontrado: -")
+        self.lbl_uncert_n = QtWidgets.QLabel("Entrada: -")
+        self.lbl_uncert_max_theo = QtWidgets.QLabel("Info: -")
+        self.lbl_uncert_max_real = QtWidgets.QLabel("Resultado: -")
         self.lbl_uncert_max_real.setStyleSheet("font-weight: bold; font-size: 13px;")
 
         l_diag.addWidget(self.lbl_uncert_n)
@@ -1046,22 +1063,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         vl_left.addWidget(gb_diag)
 
-        self.chk_abs_scale = QtWidgets.QCheckBox("Usar Escala Absoluta")
-        self.chk_abs_scale.stateChanged.connect(self.on_uncert_settings_changed)
-        vl_left.addWidget(self.chk_abs_scale)
-
-        btn_calc = QtWidgets.QPushButton("Calcular Incerteza")
-        btn_calc.setFixedHeight(40)
-        btn_calc.setStyleSheet("background-color: #d0f0c0; font-weight: bold;")
-        btn_calc.clicked.connect(self.calculate_uncertainty)
-        vl_left.addWidget(btn_calc)
+        # Cálculo automático: o botão permanece como fallback interno, mas fica oculto.
+        self.btn_run_mapcalc = QtWidgets.QPushButton("Calcular")
+        self.btn_run_mapcalc.setFixedHeight(40)
+        self.btn_run_mapcalc.setStyleSheet("background-color: #d0f0c0; font-weight: bold;")
+        self.btn_run_mapcalc.clicked.connect(self.run_map_calculation)
+        self.btn_run_mapcalc.hide()
+        vl_left.addWidget(self.btn_run_mapcalc)
 
         # ============================================================
-        # CENTRO: RESULTADOS DINÂMICOS
+        # CENTRO: RESULTADOS
         # ============================================================
         self.uncert_result_stack = QtWidgets.QStackedWidget()
 
-        # Página 0: resultado 3D
+        # Página 0: 3D
         self.uncert_page_3d = QtWidgets.QWidget()
         l_3d = QtWidgets.QVBoxLayout(self.uncert_page_3d)
         l_3d.setContentsMargins(0, 0, 0, 0)
@@ -1069,7 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l_3d.addWidget(uncert_widget, 1)
         self.uncert_result_stack.addWidget(self.uncert_page_3d)
 
-        # Página 1: resultado 2D por coluna
+        # Página 1: 2D
         self.uncert_page_2d = QtWidgets.QWidget()
         l_2d = QtWidgets.QVBoxLayout(self.uncert_page_2d)
         l_2d.setContentsMargins(0, 0, 0, 0)
@@ -1077,21 +1092,18 @@ class MainWindow(QtWidgets.QMainWindow):
         l_2d.addWidget(uncert_2d_widget, 1)
         self.uncert_result_stack.addWidget(self.uncert_page_2d)
 
-        # Página 2: resumo por modelo / ensemble
+        # Página 2: tabela
         self.uncert_page_table = QtWidgets.QWidget()
         l_table = QtWidgets.QVBoxLayout(self.uncert_page_table)
         l_table.setContentsMargins(8, 8, 8, 8)
-        l_table.setSpacing(6)
 
-        lbl_table = QtWidgets.QLabel("<b>Resumo por modelo / ensemble</b>")
-        l_table.addWidget(lbl_table)
+        self.lbl_uncert_table_title = QtWidgets.QLabel("<b>Resumo</b>")
+        l_table.addWidget(self.lbl_uncert_table_title)
 
         self.txt_uncert_summary = QtWidgets.QTextEdit()
         self.txt_uncert_summary.setReadOnly(True)
-        self.txt_uncert_summary.setMaximumHeight(95)
-        self.txt_uncert_summary.setPlainText(
-            "Escolha uma propriedade/descritor, selecione os modelos e clique em Calcular Incerteza."
-        )
+        self.txt_uncert_summary.setMaximumHeight(110)
+        self.txt_uncert_summary.setPlainText("Configure o cálculo e clique em Calcular.")
         l_table.addWidget(self.txt_uncert_summary)
 
         self.tbl_uncert_summary = QtWidgets.QTableWidget()
@@ -1105,109 +1117,2037 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uncert_result_stack.addWidget(self.uncert_page_table)
 
         # ============================================================
-        # PAINEL DIREITO: GEOMETRIA / CORTES
+        # DIREITA: FÁCIES-ALVO / GEOMETRIA
         # ============================================================
         self.uncert_right_panel = QtWidgets.QFrame()
         self.uncert_right_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.uncert_right_panel.setFixedWidth(280)
+        self.uncert_right_panel.setFixedWidth(300)
 
         vl_right = QtWidgets.QVBoxLayout(self.uncert_right_panel)
         vl_right.setContentsMargins(8, 8, 8, 8)
 
-        gb_geo = QtWidgets.QGroupBox("Geometria & Cortes")
-        l_geo = QtWidgets.QVBoxLayout(gb_geo)
+        self.mapcalc_right_tabs = QtWidgets.QTabWidget()
 
+        # Aba dedicada de fácies-alvo para Cálculo de Mapas
+        self.mapcalc_facies_page = QtWidgets.QWidget()
+        l_facies = QtWidgets.QVBoxLayout(self.mapcalc_facies_page)
+        l_facies.setContentsMargins(6, 6, 6, 6)
+        l_facies.setSpacing(6)
+
+        info_facies = QtWidgets.QLabel(
+            "Selecione aqui as fácies-alvo usadas nos mapas verticais. "
+            "A tabela reúne as fácies presentes nos modelos carregados."
+        )
+        info_facies.setWordWrap(True)
+        info_facies.setStyleSheet("color: #555;")
+        l_facies.addWidget(info_facies)
+
+        h_facies_btns = QtWidgets.QHBoxLayout()
+        self.btn_mapcalc_facies_all = QtWidgets.QPushButton("Todas")
+        self.btn_mapcalc_facies_none = QtWidgets.QPushButton("Nenhuma")
+        self.btn_mapcalc_facies_all.clicked.connect(lambda: self._set_all_mapcalc_target_facies(True))
+        self.btn_mapcalc_facies_none.clicked.connect(lambda: self._set_all_mapcalc_target_facies(False))
+        h_facies_btns.addWidget(self.btn_mapcalc_facies_all)
+        h_facies_btns.addWidget(self.btn_mapcalc_facies_none)
+        l_facies.addLayout(h_facies_btns)
+
+        self.tbl_mapcalc_target_facies = QtWidgets.QTableWidget()
+        self.tbl_mapcalc_target_facies.setColumnCount(3)
+        self.tbl_mapcalc_target_facies.setHorizontalHeaderLabels(["Cor", "ID", "Alvo"])
+        self.tbl_mapcalc_target_facies.verticalHeader().setVisible(False)
+        self.tbl_mapcalc_target_facies.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_mapcalc_target_facies.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_mapcalc_target_facies.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_mapcalc_target_facies.itemChanged.connect(self._on_mapcalc_target_facies_item_changed)
+        self.tbl_mapcalc_target_facies.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        l_facies.addWidget(self.tbl_mapcalc_target_facies, 1)
+
+        self.mapcalc_right_tabs.addTab(self.mapcalc_facies_page, "Fácies-alvo")
+
+        # Aba de geometria/cortes para resultados 3D
+        self.mapcalc_geometry_page = QtWidgets.QWidget()
+        l_geo_page = QtWidgets.QVBoxLayout(self.mapcalc_geometry_page)
+        l_geo_page.setContentsMargins(6, 6, 6, 6)
         self.uncert_slicer = GridSlicerWidget(nx, ny, nz, self.on_uncert_slice_changed)
-        l_geo.addWidget(self.uncert_slicer)
+        l_geo_page.addWidget(self.uncert_slicer)
+        l_geo_page.addStretch(1)
+        self.mapcalc_right_tabs.addTab(self.mapcalc_geometry_page, "Geometria")
 
-        vl_right.addWidget(gb_geo)
-        vl_right.addStretch(1)
+        vl_right.addWidget(self.mapcalc_right_tabs, 1)
 
-        # ============================================================
-        # MONTA LAYOUT FINAL
-        # ============================================================
         layout.addWidget(left_panel)
         layout.addWidget(self.uncert_result_stack, 1)
         layout.addWidget(self.uncert_right_panel)
 
+        # Estado
         self.uncert_view_state = None
         self._uncert_has_result = False
+        self.mapcalc_mode = "vertical"
+        self.mapcalc_model_key = "base"
+        self.mapcalc_selected_property = None
+        self.mapcalc_selected_operation = "weighted_mean"
+        self.mapcalc_selected_metric = {
+            "scalar": "__total_column_thickness__",
+            "title": "Espessura total da coluna (m)",
+            "label": "Espessura",
+        }
+        self.mapcalc_selected_stat = "std"
+        self.mapcalc_selected_scope = "column"
+        self._updating_mapcalc_models = False
+        self._updating_mapcalc_facies = False
+        self._mapcalc_ready = False
+        self._ensure_mapcalc_auto_timer()
 
-        # Estado inicial: fácies/entropia célula a célula em 3D
-        self._set_uncert_result_mode("cell")
+        self._refresh_mapcalc_models_panel()
+        self._refresh_mapcalc_property_list()
+        self._refresh_mapcalc_target_facies_table()
+        self._update_mapcalc_target_facies_label()
+        self.set_mapcalc_mode("vertical")
+        self._mapcalc_ready = True
+        # Não calcula automaticamente durante a construção da página.
+        # O primeiro cálculo automático acontece quando o usuário muda modelo, métrica ou fácies,
+        # ou quando a aba Mapas é aberta explicitamente.
+
+    def _make_mapcalc_card_button(self, text, icon=None, checkable=True):
+        b = QtWidgets.QToolButton()
+        b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        if icon is not None:
+            b.setIcon(icon)
+        b.setIconSize(QtCore.QSize(26, 26))
+        b.setText(text)
+        b.setCheckable(checkable)
+        b.setAutoRaise(True)
+        b.setMinimumWidth(74)
+        b.setMinimumHeight(58)
+        return b
+
+
+    def _build_mapcalc_vertical_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+
+        gb_metric = QtWidgets.QGroupBox("Métrica vertical")
+        grid = QtWidgets.QGridLayout(gb_metric)
+        grid.setSpacing(6)
+
+        self.mapcalc_metric_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_metric_buttons.setExclusive(True)
+
+        metrics = [
+            ("Espessura", "__total_column_thickness__", "Espessura total da coluna (m)"),
+            ("T alvo", "vert_Ttot_reservoir", "Espessura total da fácies-alvo (m)"),
+            ("Proporção", "vert_NTG_col_reservoir", "Proporção de fácies na coluna"),
+            ("Envelope", "vert_Tenv_reservoir", "Espessura do envelope vertical"),
+            ("Maior pacote", "vert_Tpack_max_reservoir", "Espessura do maior pacote"),
+            ("Nº pacotes", "vert_n_packages_reservoir", "Número de pacotes"),
+            ("ICV", "vert_ICV_reservoir", "Índice de conectividade vertical"),
+            ("Qv", "vert_Qv_reservoir", "Índice Qv"),
+            ("Gaps", "vert_Tgap_sum_reservoir", "Soma dos gaps verticais"),
+            ("Trocas", "vert_Nswitch_reservoir", "Número de trocas verticais"),
+            ("Permanência", "vert_Npersist_reservoir", "Número de permanências"),
+        ]
+
+        for idx, (label, scalar, title) in enumerate(metrics):
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.setToolTip(title)
+            b.clicked.connect(lambda checked=False, s=scalar, t=title, l=label: self.set_mapcalc_vertical_metric(s, t, l))
+            self.mapcalc_metric_buttons.addButton(b)
+            grid.addWidget(b, idx // 3, idx % 3)
+
+            if idx == 0:
+                b.setChecked(True)
+                self.mapcalc_selected_metric = {"scalar": scalar, "title": title, "label": label}
+
+        lay.addWidget(gb_metric)
+
+        gb_target = QtWidgets.QGroupBox("Fácies-alvo")
+        l_target = QtWidgets.QVBoxLayout(gb_target)
+        self.lbl_mapcalc_target_facies = QtWidgets.QLabel("Fácies selecionadas: -")
+        self.lbl_mapcalc_target_facies.setWordWrap(True)
+        l_target.addWidget(self.lbl_mapcalc_target_facies)
+        hint = QtWidgets.QLabel("Use a tabela à direita para marcar/desmarcar as fácies-alvo.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555;")
+        l_target.addWidget(hint)
+        lay.addWidget(gb_target)
+
+        lay.addStretch(1)
+        self.mapcalc_config_stack.addWidget(page)
+
+    def _build_mapcalc_property_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+
+        gb_op = QtWidgets.QGroupBox("Operação")
+        grid_op = QtWidgets.QGridLayout(gb_op)
+        grid_op.setSpacing(6)
+
+        self.mapcalc_operation_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_operation_buttons.setExclusive(True)
+
+        ops = [
+            ("Média ponderada", "weighted_mean", "Σ(h·p)/Σh"),
+            ("Esp. equivalente", "equivalent", "Σ(h·p)"),
+            ("Média vertical", "mean", "mean(p)"),
+            ("Soma vertical", "sum", "Σp"),
+            ("Máximo vertical", "max", "max(p)"),
+        ]
+
+        for idx, (label, key, tip) in enumerate(ops):
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda checked=False, k=key: self.set_mapcalc_property_operation(k))
+            self.mapcalc_operation_buttons.addButton(b)
+            grid_op.addWidget(b, idx // 2, idx % 2)
+
+            if idx == 0:
+                b.setChecked(True)
+
+        lay.addWidget(gb_op)
+
+        gb_prop = QtWidgets.QGroupBox("Propriedade")
+        l_prop = QtWidgets.QVBoxLayout(gb_prop)
+
+        self.txt_mapcalc_prop_filter = QtWidgets.QLineEdit()
+        self.txt_mapcalc_prop_filter.setPlaceholderText("Pesquisar propriedade...")
+        self.txt_mapcalc_prop_filter.textChanged.connect(self._refresh_mapcalc_property_list)
+        l_prop.addWidget(self.txt_mapcalc_prop_filter)
+
+        self.lst_mapcalc_properties = QtWidgets.QListWidget()
+        self.lst_mapcalc_properties.itemSelectionChanged.connect(self._on_mapcalc_property_selected)
+        l_prop.addWidget(self.lst_mapcalc_properties, 1)
+
+        lay.addWidget(gb_prop, 1)
+        self.mapcalc_config_stack.addWidget(page)
+
+    def _build_mapcalc_ensemble_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+
+        gb_metric = QtWidgets.QGroupBox("Métrica vertical alvo")
+        grid_metric = QtWidgets.QGridLayout(gb_metric)
+        grid_metric.setSpacing(6)
+
+        self.mapcalc_ensemble_metric_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_ensemble_metric_buttons.setExclusive(True)
+
+        metrics = [
+            ("Espessura", "__total_column_thickness__", "Espessura total da coluna (m)"),
+            ("T alvo", "vert_Ttot_reservoir", "Espessura total da fácies-alvo (m)"),
+            ("Proporção", "vert_NTG_col_reservoir", "Proporção de fácies na coluna"),
+            ("Envelope", "vert_Tenv_reservoir", "Espessura do envelope vertical"),
+            ("Maior pacote", "vert_Tpack_max_reservoir", "Espessura do maior pacote"),
+            ("Nº pacotes", "vert_n_packages_reservoir", "Número de pacotes"),
+            ("ICV", "vert_ICV_reservoir", "Índice de conectividade vertical"),
+            ("Qv", "vert_Qv_reservoir", "Índice Qv"),
+            ("Gaps", "vert_Tgap_sum_reservoir", "Soma dos gaps verticais"),
+            ("Trocas", "vert_Nswitch_reservoir", "Número de trocas verticais"),
+            ("Permanência", "vert_Npersist_reservoir", "Número de permanências"),
+        ]
+
+        for idx, (label, scalar, title) in enumerate(metrics):
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.setToolTip(title)
+            b.clicked.connect(lambda checked=False, s=scalar, t=title, l=label: self.set_mapcalc_vertical_metric(s, t, l))
+            self.mapcalc_ensemble_metric_buttons.addButton(b)
+            grid_metric.addWidget(b, idx // 3, idx % 3)
+            if idx == 0:
+                b.setChecked(True)
+
+        lay.addWidget(gb_metric)
+
+        gb_stat = QtWidgets.QGroupBox("Estatística")
+        grid_stat = QtWidgets.QGridLayout(gb_stat)
+        grid_stat.setSpacing(6)
+
+        self.mapcalc_stat_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_stat_buttons.setExclusive(True)
+
+        stats = [
+            ("Média", "mean"),
+            ("Desvio padrão", "std"),
+            ("Variância", "var"),
+            ("Amplitude", "range"),
+        ]
+
+        for idx, (label, key) in enumerate(stats):
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.clicked.connect(lambda checked=False, k=key: self.set_mapcalc_stat(k))
+            self.mapcalc_stat_buttons.addButton(b)
+            grid_stat.addWidget(b, idx // 2, idx % 2)
+            if idx == 0:
+                b.setChecked(True)
+
+        lay.addWidget(gb_stat)
+
+        gb_scope = QtWidgets.QGroupBox("Saída")
+        grid_scope = QtWidgets.QGridLayout(gb_scope)
+        grid_scope.setSpacing(6)
+
+        self.mapcalc_scope_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_scope_buttons.setExclusive(True)
+
+        scopes = [
+            ("Coluna 2D", "column"),
+            ("Resumo / Tabela", "model"),
+        ]
+
+        for idx, (label, key) in enumerate(scopes):
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(28)
+            b.clicked.connect(lambda checked=False, k=key: self.set_mapcalc_scope(k))
+            self.mapcalc_scope_buttons.addButton(b)
+            grid_scope.addWidget(b, 0, idx)
+            if key == "column":
+                b.setChecked(True)
+
+        lay.addWidget(gb_scope)
+        lay.addStretch(1)
+        self.mapcalc_config_stack.addWidget(page)
+
+    def _build_mapcalc_uncertainty_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+
+        gb_unc = QtWidgets.QGroupBox("Tipo de incerteza / discordância")
+        l_unc = QtWidgets.QVBoxLayout(gb_unc)
+
+        info = QtWidgets.QLabel(
+            "Nesta etapa, a opção principal é Entropia de Fácies, que mede discordância categórica entre modelos.\n\n"
+            "Para desvio padrão, variância e amplitude de métricas ou propriedades, use a aba Ensemble."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #555;")
+        l_unc.addWidget(info)
+
+        btn_entropy = QtWidgets.QPushButton("Entropia de fácies")
+        btn_entropy.setCheckable(True)
+        btn_entropy.setMinimumHeight(30)
+        btn_entropy.clicked.connect(lambda: self.set_mapcalc_uncertainty_target("facies_entropy"))
+        btn_entropy.setChecked(True)
+
+        self.mapcalc_uncert_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_uncert_buttons.setExclusive(True)
+        self.mapcalc_uncert_buttons.addButton(btn_entropy)
+        l_unc.addWidget(btn_entropy)
+
+        self.mapcalc_uncertainty_target = "facies_entropy"
+        lay.addWidget(gb_unc)
+
+        gb_scope = QtWidgets.QGroupBox("Saída")
+        l_scope = QtWidgets.QVBoxLayout(gb_scope)
+        self.lbl_mapcalc_uncert_scope = QtWidgets.QLabel("Resultado: campo 3D de entropia célula a célula.")
+        self.lbl_mapcalc_uncert_scope.setWordWrap(True)
+        l_scope.addWidget(self.lbl_mapcalc_uncert_scope)
+        lay.addWidget(gb_scope)
+
+        lay.addStretch(1)
+        self.mapcalc_config_stack.addWidget(page)
+    def _build_mapcalc_difference_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Diferença entre modelos será implementada depois.\n\n"
+            "Exemplos:\n"
+            "• Modelo A - Modelo Base\n"
+            "• |A - B|\n"
+            "• Diferença percentual\n"
+            "• Distância ao mapa médio do ensemble"
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        lay.addStretch(1)
+
+        self.mapcalc_config_stack.addWidget(page)
+
+    def show_mapcalc_page(self, mode_key="vertical"):
+        """Abre a página de Cálculo de Mapas, fecha docks externos e ativa um modo."""
+        # A aba Mapas tem seus próprios painéis laterais; os docks do modo Visualizar confundem aqui.
+        try:
+            if hasattr(self, "dock_explorer"):
+                self.dock_explorer.hide()
+            if hasattr(self, "dock_props"):
+                self.dock_props.hide()
+            if hasattr(self, "dock_map2d_summary"):
+                self.dock_map2d_summary.hide()
+        except Exception:
+            pass
+
+        # Usa a perspectiva interna de mapas/cálculo sem passar pela UI antiga de incerteza.
+        try:
+            self.switch_perspective("uncertainty")
+        except Exception:
+            if hasattr(self, "central_stack") and hasattr(self, "uncertainty_page"):
+                self.central_stack.setCurrentWidget(self.uncertainty_page)
+
+        try:
+            if hasattr(self, "central_stack") and hasattr(self, "uncertainty_page"):
+                self.central_stack.setCurrentWidget(self.uncertainty_page)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "ribbon_tabs"):
+                for i in range(self.ribbon_tabs.count()):
+                    if self.ribbon_tabs.tabText(i) == "Mapas":
+                        if self.ribbon_tabs.currentIndex() != i:
+                            self.ribbon_tabs.blockSignals(True)
+                            self.ribbon_tabs.setCurrentIndex(i)
+                            self.ribbon_tabs.blockSignals(False)
+                        break
+        except Exception:
+            pass
+
+        try:
+            self._refresh_mapcalc_models_panel()
+            self._refresh_mapcalc_target_facies_table()
+            self._update_mapcalc_target_facies_label()
+            self._update_mapcalc_model_status_label()
+        except Exception:
+            pass
+
+        self.set_mapcalc_mode(mode_key)
+        # Calcula uma vez ao abrir a aba Mapas, mas sem modal de erro se algo ainda não estiver pronto.
+        self._schedule_mapcalc_auto_update(350)
+
+
+    def set_mapcalc_mode(self, mode_key):
+        """Troca o painel contextual do Cálculo de Mapas."""
+        self.mapcalc_mode = str(mode_key or "vertical")
+
+        idx_map = {"vertical": 0, "property": 1, "ensemble": 2, "uncertainty": 3, "difference": 4}
+        idx = idx_map.get(self.mapcalc_mode, 0)
+        if hasattr(self, "mapcalc_config_stack"):
+            self.mapcalc_config_stack.setCurrentIndex(idx)
+
+        ribbon_btn_map = {
+            "vertical": getattr(self, "btn_mapcalc_vertical", None),
+            "property": getattr(self, "btn_mapcalc_property", None),
+            "ensemble": getattr(self, "btn_mapcalc_ensemble", None),
+            "uncertainty": getattr(self, "btn_mapcalc_uncert", None),
+            "difference": getattr(self, "btn_mapcalc_diff", None),
+        }
+        rb = ribbon_btn_map.get(self.mapcalc_mode)
+        if rb is not None:
+            rb.setChecked(True)
+
+        is_multi = self.mapcalc_mode in ("ensemble", "uncertainty")
+        for attr in ("btn_mapcalc_all_models", "btn_mapcalc_no_models"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setVisible(is_multi)
+
+        if hasattr(self, "lbl_mapcalc_models_hint"):
+            self.lbl_mapcalc_models_hint.setText("Marque os modelos que entram no cálculo." if is_multi else "Selecione o modelo usado neste mapa.")
+
+        if hasattr(self, "mapcalc_right_tabs"):
+            if self.mapcalc_mode in ("vertical", "ensemble"):
+                self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_facies_page)
+            elif self.mapcalc_mode == "uncertainty":
+                self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_geometry_page)
+            else:
+                self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_facies_page)
+
+        if self.mapcalc_mode == "vertical":
+            if not isinstance(getattr(self, "mapcalc_selected_metric", None), dict):
+                self.mapcalc_selected_metric = {
+                    "scalar": "__total_column_thickness__",
+                    "title": "Espessura total da coluna (m)",
+                    "label": "Espessura",
+                }
+            self.lbl_mapcalc_title.setText("<b>Mapa Vertical por Coluna</b>")
+            self.lbl_mapcalc_help.setText("Calcule espessura, proporção, ICV, Qv, pacotes, gaps e trocas por coluna.")
+            self.btn_run_mapcalc.setText("Calcular Mapa Vertical")
+            self._set_uncert_result_mode("column")
+            try:
+                if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_facies_page"):
+                    self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_facies_page)
+            except Exception:
+                pass
+        elif self.mapcalc_mode == "property":
+            self.lbl_mapcalc_title.setText("<b>Propriedade por Coluna</b>")
+            self.lbl_mapcalc_help.setText("Transforme uma propriedade por célula em mapa por coluna.")
+            self.btn_run_mapcalc.setText("Calcular Propriedade")
+            self._set_uncert_result_mode("column")
+            self._refresh_mapcalc_property_list()
+        elif self.mapcalc_mode == "ensemble":
+            self.lbl_mapcalc_title.setText("<b>Estatística do Ensemble</b>")
+            self.lbl_mapcalc_help.setText("Escolha a métrica vertical, os modelos e a estatística do ensemble.")
+            self.btn_run_mapcalc.setText("Calcular Estatística")
+            self._set_uncert_result_mode(getattr(self, "mapcalc_selected_scope", "column"))
+        elif self.mapcalc_mode == "uncertainty":
+            self.lbl_mapcalc_title.setText("<b>Incerteza / Discordância</b>")
+            self.lbl_mapcalc_help.setText("Entropia de fácies entre modelos: discordância categórica célula a célula.")
+            self.btn_run_mapcalc.setText("Calcular Incerteza")
+            self._set_uncert_result_mode("cell")
+        elif self.mapcalc_mode == "difference":
+            self.lbl_mapcalc_title.setText("<b>Diferença entre Modelos</b>")
+            self.lbl_mapcalc_help.setText("Mapas de diferença serão implementados na próxima etapa.")
+            self.btn_run_mapcalc.setText("Calcular Diferença")
+            self._set_uncert_result_mode("column")
+
+        self._update_mapcalc_model_status_label()
+        self._schedule_mapcalc_auto_update()
+
+    def set_mapcalc_vertical_metric(self, scalar, title, label=None):
+        self.mapcalc_selected_metric = {"scalar": scalar, "title": title, "label": label or title}
+        self._schedule_mapcalc_auto_update()
+
+    def set_mapcalc_property_operation(self, operation):
+        self.mapcalc_selected_operation = str(operation or "weighted_mean")
+        self._schedule_mapcalc_auto_update()
+
+    def set_mapcalc_stat(self, stat):
+        self.mapcalc_selected_stat = str(stat or "std")
+        self._schedule_mapcalc_auto_update()
+
+    def set_mapcalc_scope(self, scope):
+        self.mapcalc_selected_scope = str(scope or "column")
+        self._set_uncert_result_mode(self.mapcalc_selected_scope)
+        self._schedule_mapcalc_auto_update()
+
+    def set_mapcalc_uncertainty_target(self, target):
+        self.mapcalc_uncertainty_target = str(target or "facies_entropy")
+        self._schedule_mapcalc_auto_update()
+
+    def _ensure_mapcalc_auto_timer(self):
+        if hasattr(self, "_mapcalc_auto_timer"):
+            return
+        self._mapcalc_auto_timer = QtCore.QTimer(self)
+        self._mapcalc_auto_timer.setSingleShot(True)
+        self._mapcalc_auto_timer.timeout.connect(self._run_mapcalc_auto_update)
+
+    def _schedule_mapcalc_auto_update(self, delay_ms=250):
+        if not getattr(self, "_mapcalc_ready", False):
+            return
+        if not hasattr(self, "central_stack") or not hasattr(self, "uncertainty_page"):
+            return
+        try:
+            if self.central_stack.currentWidget() is not self.uncertainty_page:
+                return
+        except Exception:
+            return
+        self._ensure_mapcalc_auto_timer()
+        self._mapcalc_auto_timer.start(int(delay_ms))
+
+    def _run_mapcalc_auto_update(self):
+        if not getattr(self, "_mapcalc_ready", False):
+            return
+        self._mapcalc_auto_running = True
+        try:
+            self.run_map_calculation()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                self.statusBar().showMessage(f"Erro no cálculo automático de mapas: {e}", 6000)
+            except Exception:
+                pass
+        finally:
+            self._mapcalc_auto_running = False
+
+    def _get_all_loaded_facies_ids_for_mapcalc(self):
+        ids = set()
+        for _k, m in getattr(self, "models", {}).items():
+            arr = m.get("facies") if isinstance(m, dict) else None
+            if arr is None:
+                continue
+            try:
+                vals = np.unique(np.asarray(arr).ravel())
+                for v in vals:
+                    if np.isfinite(v):
+                        ids.add(int(v))
+            except Exception:
+                pass
+        if not ids:
+            try:
+                ids.update(int(f) for f, _ in (self.facies_reference or []))
+            except Exception:
+                pass
+        return sorted(ids)
+
+    def _refresh_mapcalc_target_facies_table(self):
+        if not hasattr(self, "tbl_mapcalc_target_facies"):
+            return
+        current = set(int(x) for x in (self.state.get("reservoir_facies", set()) or set()))
+        ids = self._get_all_loaded_facies_ids_for_mapcalc()
+        colors = getattr(self, "facies_colors_dict", {}) or getattr(self, "facies_colors", {}) or {}
+        self._updating_mapcalc_facies = True
+        try:
+            self.tbl_mapcalc_target_facies.clearContents()
+            self.tbl_mapcalc_target_facies.setRowCount(len(ids))
+            for row, fid in enumerate(ids):
+                rgba = colors.get(int(fid), (0.8, 0.8, 0.8, 1.0))
+                try:
+                    r, g, b = [int(float(c) * 255) for c in rgba[:3]]
+                except Exception:
+                    r, g, b = 200, 200, 200
+                item_color = QtWidgets.QTableWidgetItem("")
+                item_color.setBackground(QBrush(QColor(r, g, b)))
+                item_color.setFlags(QtCore.Qt.ItemIsEnabled)
+                self.tbl_mapcalc_target_facies.setItem(row, 0, item_color)
+
+                item_id = QtWidgets.QTableWidgetItem(str(int(fid)))
+                item_id.setData(QtCore.Qt.UserRole, int(fid))
+                item_id.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                self.tbl_mapcalc_target_facies.setItem(row, 1, item_id)
+
+                item_chk = QtWidgets.QTableWidgetItem("")
+                item_chk.setData(QtCore.Qt.UserRole, int(fid))
+                item_chk.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsSelectable)
+                item_chk.setCheckState(QtCore.Qt.Checked if int(fid) in current else QtCore.Qt.Unchecked)
+                self.tbl_mapcalc_target_facies.setItem(row, 2, item_chk)
+            self.tbl_mapcalc_target_facies.resizeColumnsToContents()
+        finally:
+            self._updating_mapcalc_facies = False
+
+    def _on_mapcalc_target_facies_item_changed(self, item):
+        if getattr(self, "_updating_mapcalc_facies", False):
+            return
+        if item is None or item.column() != 2:
+            return
+        selected = set()
+        for row in range(self.tbl_mapcalc_target_facies.rowCount()):
+            chk = self.tbl_mapcalc_target_facies.item(row, 2)
+            id_item = self.tbl_mapcalc_target_facies.item(row, 1)
+            if chk is not None and id_item is not None and chk.checkState() == QtCore.Qt.Checked:
+                try:
+                    selected.add(int(id_item.data(QtCore.Qt.UserRole)))
+                except Exception:
+                    try:
+                        selected.add(int(id_item.text()))
+                    except Exception:
+                        pass
+        self.state["reservoir_facies"] = set(selected)
+        self.state["reservoir_facies_raw"] = set(selected)
+        try:
+            self.state_reservoir_raw = set(selected)
+        except Exception:
+            pass
+        self._update_mapcalc_target_facies_label()
+        self._schedule_mapcalc_auto_update()
+
+    def _set_all_mapcalc_target_facies(self, checked=True):
+        if not hasattr(self, "tbl_mapcalc_target_facies"):
+            return
+        self._updating_mapcalc_facies = True
+        try:
+            for row in range(self.tbl_mapcalc_target_facies.rowCount()):
+                item = self.tbl_mapcalc_target_facies.item(row, 2)
+                if item is not None:
+                    item.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+        finally:
+            self._updating_mapcalc_facies = False
+        selected = set()
+        if checked:
+            for row in range(self.tbl_mapcalc_target_facies.rowCount()):
+                id_item = self.tbl_mapcalc_target_facies.item(row, 1)
+                if id_item is not None:
+                    try:
+                        selected.add(int(id_item.data(QtCore.Qt.UserRole)))
+                    except Exception:
+                        pass
+        self.state["reservoir_facies"] = set(selected)
+        self.state["reservoir_facies_raw"] = set(selected)
+        self._update_mapcalc_target_facies_label()
+        self._schedule_mapcalc_auto_update()
+
+    def _refresh_mapcalc_models_panel(self):
+        """Atualiza a lista lateral de modelos da página de Cálculo de Mapas."""
+        if not hasattr(self, "lst_mapcalc_models"):
+            return
+
+        current_key = getattr(self, "mapcalc_model_key", "base")
+        checked_keys = set(self._get_checked_mapcalc_model_keys()) if hasattr(self, "lst_mapcalc_models") else set()
+        if not checked_keys:
+            checked_keys = {"base"}
+
+        self._updating_mapcalc_models = True
+        try:
+            self.lst_mapcalc_models.clear()
+
+            for k, v in self.models.items():
+                if k == "compare":
+                    continue
+
+                if k == "base":
+                    name = "Modelo Base"
+                else:
+                    name = v.get("name", str(k))
+
+                if k != "base" and v.get("grid") is None and v.get("facies") is None:
+                    continue
+
+                it = QtWidgets.QListWidgetItem(str(name))
+                it.setData(QtCore.Qt.UserRole, str(k))
+                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
+                it.setCheckState(QtCore.Qt.Checked if str(k) in checked_keys else QtCore.Qt.Unchecked)
+                self.lst_mapcalc_models.addItem(it)
+
+                if str(k) == str(current_key):
+                    self.lst_mapcalc_models.setCurrentItem(it)
+
+            if self.lst_mapcalc_models.currentItem() is None and self.lst_mapcalc_models.count() > 0:
+                self.lst_mapcalc_models.setCurrentRow(0)
+                current_item = self.lst_mapcalc_models.currentItem()
+                if current_item is not None:
+                    self.mapcalc_model_key = current_item.data(QtCore.Qt.UserRole)
+
+        finally:
+            self._updating_mapcalc_models = False
+
+        self._update_mapcalc_model_status_label()
+
+
+    def _on_mapcalc_model_selection_changed(self):
+        if getattr(self, "_updating_mapcalc_models", False):
+            return
+
+        item = self.lst_mapcalc_models.currentItem() if hasattr(self, "lst_mapcalc_models") else None
+        if item is None:
+            return
+
+        key = item.data(QtCore.Qt.UserRole)
+        if key is not None:
+            self.mapcalc_model_key = str(key)
+            if self.mapcalc_mode not in ("ensemble", "uncertainty"):
+                # Em mapas de um modelo, a seleção também marca o modelo ativo.
+                self._updating_mapcalc_models = True
+                try:
+                    for i in range(self.lst_mapcalc_models.count()):
+                        it = self.lst_mapcalc_models.item(i)
+                        it.setCheckState(QtCore.Qt.Checked if it is item else QtCore.Qt.Unchecked)
+                finally:
+                    self._updating_mapcalc_models = False
+
+        self._update_mapcalc_model_status_label()
+        self._schedule_mapcalc_auto_update()
+
+
+    def _on_mapcalc_model_item_changed(self, item):
+        if getattr(self, "_updating_mapcalc_models", False):
+            return
+
+        if self.mapcalc_mode not in ("ensemble", "uncertainty") and item.checkState() == QtCore.Qt.Checked:
+            self._updating_mapcalc_models = True
+            try:
+                for i in range(self.lst_mapcalc_models.count()):
+                    it = self.lst_mapcalc_models.item(i)
+                    if it is not item:
+                        it.setCheckState(QtCore.Qt.Unchecked)
+                self.lst_mapcalc_models.setCurrentItem(item)
+                key = item.data(QtCore.Qt.UserRole)
+                if key is not None:
+                    self.mapcalc_model_key = str(key)
+            finally:
+                self._updating_mapcalc_models = False
+
+        self._update_mapcalc_model_status_label()
+        self._schedule_mapcalc_auto_update()
+
+
+    def _set_all_mapcalc_models_checked(self, checked=True):
+        if not hasattr(self, "lst_mapcalc_models"):
+            return
+
+        self._updating_mapcalc_models = True
+        try:
+            for i in range(self.lst_mapcalc_models.count()):
+                self.lst_mapcalc_models.item(i).setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+        finally:
+            self._updating_mapcalc_models = False
+
+        if not checked and self.lst_mapcalc_models.count() > 0 and self.mapcalc_mode not in ("ensemble", "uncertainty"):
+            it = self.lst_mapcalc_models.item(0)
+            it.setCheckState(QtCore.Qt.Checked)
+            self.lst_mapcalc_models.setCurrentItem(it)
+            self.mapcalc_model_key = str(it.data(QtCore.Qt.UserRole))
+
+        self._update_mapcalc_model_status_label()
+        self._schedule_mapcalc_auto_update()
+
+
+    def _get_checked_mapcalc_model_keys(self):
+        keys = []
+        if not hasattr(self, "lst_mapcalc_models"):
+            return keys
+
+        for i in range(self.lst_mapcalc_models.count()):
+            it = self.lst_mapcalc_models.item(i)
+            if it.checkState() == QtCore.Qt.Checked:
+                key = it.data(QtCore.Qt.UserRole)
+                if key is not None:
+                    keys.append(str(key))
+        return keys
+
+
+    def _sync_mapcalc_model_selection_from_panel(self, single=False):
+        """Atualiza mapcalc_model_key ou lista de ensemble a partir do painel lateral."""
+        if single:
+            item = self.lst_mapcalc_models.currentItem() if hasattr(self, "lst_mapcalc_models") else None
+            if item is not None:
+                key = item.data(QtCore.Qt.UserRole)
+                if key is not None:
+                    self.mapcalc_model_key = str(key)
+            return [getattr(self, "mapcalc_model_key", "base")]
+
+        keys = self._get_checked_mapcalc_model_keys()
+        if not keys:
+            # fallback seguro: usa o modelo atual
+            keys = [getattr(self, "mapcalc_model_key", "base")]
+        self._set_uncert_models_from_keys(keys)
+        return keys
+
+
+    def _update_mapcalc_model_status_label(self):
+        if not hasattr(self, "lbl_uncert_n"):
+            return
+
+        if getattr(self, "mapcalc_mode", "vertical") in ("ensemble", "uncertainty"):
+            n = len(self._get_checked_mapcalc_model_keys())
+            self.lbl_uncert_n.setText(f"Entrada: {n} modelo(s) marcado(s)")
+        else:
+            key = getattr(self, "mapcalc_model_key", "base")
+            name = self.models.get(key, {}).get("name", "Modelo Base" if key == "base" else key)
+            self.lbl_uncert_n.setText(f"Entrada: {name}")
+
+
+    def _get_selected_model_keys_from_explorer(self):
+        """Compatibilidade: tenta ler os modelos selecionados no Project Explorer principal."""
+        keys = []
+        if not hasattr(self, "project_tree"):
+            return keys
+
+        for it in self.project_tree.selectedItems():
+            key = it.data(0, QtCore.Qt.UserRole + 1)
+            if key is None and it.parent() is not None:
+                key = it.parent().data(0, QtCore.Qt.UserRole + 1)
+            if key is None:
+                continue
+            key = str(key)
+            if key in self.models and key not in keys:
+                keys.append(key)
+        return keys
+
+
+    def set_mapcalc_single_model(self, model_key):
+        model_key = str(model_key or "base")
+        if model_key not in self.models:
+            model_key = "base"
+        self.mapcalc_model_key = model_key
+
+        if hasattr(self, "lst_mapcalc_models"):
+            self._updating_mapcalc_models = True
+            try:
+                for i in range(self.lst_mapcalc_models.count()):
+                    it = self.lst_mapcalc_models.item(i)
+                    k = str(it.data(QtCore.Qt.UserRole))
+                    is_current = (k == model_key)
+                    it.setCheckState(QtCore.Qt.Checked if is_current else QtCore.Qt.Unchecked)
+                    if is_current:
+                        self.lst_mapcalc_models.setCurrentItem(it)
+            finally:
+                self._updating_mapcalc_models = False
+
+        self._update_mapcalc_model_status_label()
+
+
+    def set_mapcalc_single_model_from_explorer(self):
+        keys = self._get_selected_model_keys_from_explorer()
+        if keys:
+            self.set_mapcalc_single_model(keys[0])
+        else:
+            self._sync_mapcalc_model_selection_from_panel(single=True)
+
+
+    def set_mapcalc_ensemble_from_explorer(self):
+        keys = self._get_selected_model_keys_from_explorer()
+        if not keys:
+            keys = self._get_checked_mapcalc_model_keys()
+        self._set_uncert_models_from_keys(keys)
+        self._update_mapcalc_model_status_label()
+
+
+    def set_mapcalc_ensemble_all(self):
+        keys = []
+        for k, v in self.models.items():
+            if k == "compare":
+                continue
+            if k == "base" or v.get("grid") is not None or v.get("facies") is not None:
+                keys.append(str(k))
+
+        if hasattr(self, "lst_mapcalc_models"):
+            self._updating_mapcalc_models = True
+            try:
+                for i in range(self.lst_mapcalc_models.count()):
+                    it = self.lst_mapcalc_models.item(i)
+                    it.setCheckState(QtCore.Qt.Checked if str(it.data(QtCore.Qt.UserRole)) in keys else QtCore.Qt.Unchecked)
+            finally:
+                self._updating_mapcalc_models = False
+
+        self._set_uncert_models_from_keys(keys)
+        self._update_mapcalc_model_status_label()
+
+
+    def _set_uncert_models_from_keys(self, keys):
+        """Mantém compatibilidade com calculate_uncertainty(), que usa lst_uncert_models."""
+        if not hasattr(self, "lst_uncert_models"):
+            self.lst_uncert_models = QtWidgets.QListWidget()
+            self.lst_uncert_models.hide()
+
+        self.lst_uncert_models.clear()
+        key_set = {str(k) for k in (keys or [])}
+
+        for k, v in self.models.items():
+            if k == "compare":
+                continue
+            name = "Modelo Base" if k == "base" else v.get("name", str(k))
+            it = QtWidgets.QListWidgetItem(str(name))
+            it.setData(QtCore.Qt.UserRole, str(k))
+            it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked if str(k) in key_set else QtCore.Qt.Unchecked)
+            self.lst_uncert_models.addItem(it)
 
     # --- Callbacks necessários para a interface acima não dar erro ---
     
     def on_uncert_settings_changed(self, state=None):
         """
-        Atualiza a forma de exibição da aba Incerteza.
+        Atualiza a interface de Cálculo de Mapas.
 
-        Regra:
-            - fácies/entropia sempre usa célula a célula em 3D;
-            - escala por célula usa página 3D;
-            - escala por coluna usa página 2D;
-            - resumo por modelo usa página de tabela.
+        Nesta tela, não recalculamos automaticamente ao trocar combos.
+        O usuário configura e depois clica em 'Calcular Mapa'.
         """
+        self._apply_mapcalc_category_ui()
+
+        # Marca que a configuração mudou, mas não recalcula automaticamente.
+        self._uncert_has_result = False
+    
+    def _on_mapcalc_category_changed(self):
+        """
+        Atualiza a tela quando o usuário troca a categoria do cálculo.
+        """
+        self._uncert_has_result = False
+
+        self._refresh_mapcalc_model_combo()
+        self._refresh_mapcalc_property_combo()
+        self._apply_mapcalc_category_ui()
+        self._clear_uncert_summary_table()
+
+        if hasattr(self, "lbl_uncert_n"):
+            self.lbl_uncert_n.setText("Modelos (N): -")
+        if hasattr(self, "lbl_uncert_max_theo"):
+            self.lbl_uncert_max_theo.setText("Info: -")
+        if hasattr(self, "lbl_uncert_max_real"):
+            self.lbl_uncert_max_real.setText("Resultado: -")
+
+
+    def _apply_mapcalc_category_ui(self):
+        """
+        Mostra/esconde campos conforme a categoria selecionada.
+
+        Categorias:
+            vertical    -> um modelo + métrica vertical
+            property    -> um modelo + propriedade + operação vertical
+            ensemble    -> vários modelos + estatística
+            uncertainty -> vários modelos + discordância/incerteza
+            difference  -> reservado
+        """
+        if not hasattr(self, "cmb_mapcalc_category"):
+            return
+
+        cat = self.cmb_mapcalc_category.currentData()
+
+        is_vertical = cat == "vertical"
+        is_property = cat == "property"
+        is_ensemble = cat == "ensemble"
+        is_uncertainty = cat == "uncertainty"
+        is_difference = cat == "difference"
+
+        is_single_model = is_vertical or is_property
+        is_ensemble_like = is_ensemble or is_uncertainty
+
+        # ------------------------------------------------------------
+        # Campo: modelo único
+        # ------------------------------------------------------------
+        self.lbl_mapcalc_model.setVisible(is_single_model)
+        self.cmb_mapcalc_model.setVisible(is_single_model)
+
+        # ------------------------------------------------------------
+        # Campo: propriedade/descritor
+        # ------------------------------------------------------------
+        self.lbl_uncert_prop.setVisible(not is_difference)
+        self.cmb_uncert_prop.setVisible(not is_difference)
+
+        # ------------------------------------------------------------
+        # Campo: operação vertical
+        # ------------------------------------------------------------
+        self.lbl_mapcalc_operation.setVisible(is_property)
+        self.cmb_mapcalc_operation.setVisible(is_property)
+
+        # ------------------------------------------------------------
+        # Campo: escala
+        # ------------------------------------------------------------
+        self.lbl_uncert_scope.setVisible(is_ensemble_like)
+        self.cmb_uncert_scope.setVisible(is_ensemble_like)
+
+        # ------------------------------------------------------------
+        # Campo: estatística
+        # ------------------------------------------------------------
+        self.lbl_uncert_metric.setVisible(is_ensemble_like)
+        self.cmb_uncert_metric.setVisible(is_ensemble_like)
+
+        # ------------------------------------------------------------
+        # Lista de modelos
+        # ------------------------------------------------------------
+        self.lbl_uncert_models.setVisible(is_ensemble_like)
+        self.lst_uncert_models.setVisible(is_ensemble_like)
+
+        # Botões Todos/Nenhum
+        try:
+            for i in range(self._mapcalc_model_buttons_layout.count()):
+                item = self._mapcalc_model_buttons_layout.itemAt(i)
+                if item and item.widget():
+                    item.widget().setVisible(is_ensemble_like)
+        except Exception:
+            pass
+
+        # ------------------------------------------------------------
+        # Escala absoluta: somente entropia de fácies
+        # ------------------------------------------------------------
         data = self.cmb_uncert_prop.currentData() if hasattr(self, "cmb_uncert_prop") else None
-        if not isinstance(data, dict):
-            data = {"kind": "facies", "scalar": None, "reduction": "entropy"}
+        is_entropy = isinstance(data, dict) and data.get("kind") == "facies"
+        self.chk_abs_scale.setVisible(bool(is_entropy and is_uncertainty))
 
-        kind = data.get("kind", "facies")
+        # ------------------------------------------------------------
+        # Textos, botão e página central
+        # ------------------------------------------------------------
+        if is_vertical:
+            self.lbl_mapcalc_help.setText(
+                "Gere mapas verticais por coluna para um único modelo. "
+                "Use para espessura total, proporção, ICV, Qv, pacotes, gaps, trocas e permanências."
+            )
+            self.lbl_uncert_prop.setText("Métrica vertical:")
+            self.btn_run_mapcalc.setText("Calcular Mapa Vertical")
+            self._set_uncert_result_mode("column")
 
-        scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
+        elif is_property:
+            self.lbl_mapcalc_help.setText(
+                "Gere mapas por coluna a partir de propriedades por célula. "
+                "Use para média ponderada por espessura, espessura equivalente, soma vertical ou média vertical."
+            )
+            self.lbl_uncert_prop.setText("Propriedade:")
+            self.btn_run_mapcalc.setText("Calcular Propriedade")
+            self._set_uncert_result_mode("column")
 
-        # Fácies categórica só faz sentido como entropia célula a célula
-        if kind == "facies":
-            scope = "cell"
+        elif is_ensemble:
+            self.lbl_mapcalc_help.setText(
+                "Calcule estatísticas entre modelos. "
+                "A média representa o mapa médio do ensemble; desvio, variância e amplitude representam variabilidade."
+            )
+            self.lbl_uncert_prop.setText("Mapa / propriedade / descritor:")
+            self.btn_run_mapcalc.setText("Calcular Estatística")
 
-            if hasattr(self, "cmb_uncert_scope"):
-                idx_cell = self.cmb_uncert_scope.findData("cell")
-                if idx_cell >= 0 and self.cmb_uncert_scope.currentIndex() != idx_cell:
-                    self.cmb_uncert_scope.blockSignals(True)
-                    self.cmb_uncert_scope.setCurrentIndex(idx_cell)
-                    self.cmb_uncert_scope.blockSignals(False)
+            scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
+            self._set_uncert_result_mode(scope)
 
-        self._set_uncert_result_mode(scope)
+        elif is_uncertainty:
+            self.lbl_mapcalc_help.setText(
+                "Calcule mapas de discordância ou incerteza. "
+                "Para fácies, use entropia. Para propriedades contínuas, use desvio padrão, variância ou amplitude."
+            )
+            self.lbl_uncert_prop.setText("Alvo da discordância:")
+            self.btn_run_mapcalc.setText("Calcular Discordância")
 
-        # Recalcula automaticamente apenas depois que já existe um resultado.
-        # Isso evita avisos durante a montagem inicial da interface.
-        if getattr(self, "_uncert_has_result", False):
-            self.calculate_uncertainty()
+            # Evita chamar média de incerteza.
+            if hasattr(self, "cmb_uncert_metric") and self.cmb_uncert_metric.currentData() == "mean":
+                idx_std = self.cmb_uncert_metric.findData("std")
+                if idx_std >= 0:
+                    self.cmb_uncert_metric.blockSignals(True)
+                    self.cmb_uncert_metric.setCurrentIndex(idx_std)
+                    self.cmb_uncert_metric.blockSignals(False)
+
+            scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
+            self._set_uncert_result_mode(scope)
+
+        elif is_difference:
+            self.lbl_mapcalc_help.setText(
+                "A categoria Diferença entre modelos será implementada depois. "
+                "Ela será usada para mapas como modelo - base, diferença absoluta e diferença percentual."
+            )
+            self.btn_run_mapcalc.setText("Calcular Diferença")
+            self._set_uncert_result_mode("column")
+
 
     def _set_uncert_result_mode(self, scope):
+        """Escolhe qual página central deve aparecer, mantendo o painel direito visível na aba Mapas."""
+        if not hasattr(self, "uncert_result_stack"):
+            return
+        scope = str(scope or "cell").lower()
+        if scope == "model":
+            self.uncert_result_stack.setCurrentIndex(2)
+        elif scope == "column":
+            self.uncert_result_stack.setCurrentIndex(1)
+        else:
+            self.uncert_result_stack.setCurrentIndex(0)
+            try:
+                if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_geometry_page"):
+                    self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_geometry_page)
+            except Exception:
+                pass
+        if hasattr(self, "uncert_right_panel"):
+            self.uncert_right_panel.setVisible(True)
+
+    def _clear_uncert_summary_table(self):
+        if hasattr(self, "tbl_uncert_summary"):
+            self.tbl_uncert_summary.clear()
+            self.tbl_uncert_summary.setRowCount(0)
+            self.tbl_uncert_summary.setColumnCount(0)
+
+        if hasattr(self, "txt_uncert_summary"):
+            self.txt_uncert_summary.clear()
+
+
+    def _fill_uncert_summary_table(self, df):
+        if not hasattr(self, "tbl_uncert_summary"):
+            return
+
+        self.tbl_uncert_summary.setSortingEnabled(False)
+        self.tbl_uncert_summary.clear()
+
+        if df is None or df.empty:
+            self.tbl_uncert_summary.setRowCount(0)
+            self.tbl_uncert_summary.setColumnCount(0)
+            self.tbl_uncert_summary.setSortingEnabled(True)
+            return
+
+        self.tbl_uncert_summary.setRowCount(len(df))
+        self.tbl_uncert_summary.setColumnCount(len(df.columns))
+        self.tbl_uncert_summary.setHorizontalHeaderLabels([str(c) for c in df.columns])
+
+        for r in range(len(df)):
+            for c, col in enumerate(df.columns):
+                val = df.iloc[r, c]
+
+                if isinstance(val, (float, np.floating)):
+                    txt = f"{float(val):.6g}"
+                else:
+                    txt = str(val)
+
+                item = QtWidgets.QTableWidgetItem(txt)
+
+                if isinstance(val, (int, float, np.integer, np.floating)):
+                    item.setData(QtCore.Qt.UserRole, float(val))
+
+                self.tbl_uncert_summary.setItem(r, c, item)
+
+        self.tbl_uncert_summary.resizeColumnsToContents()
+        self.tbl_uncert_summary.horizontalHeader().setStretchLastSection(True)
+        self.tbl_uncert_summary.setSortingEnabled(True)
+
+
+    def _draw_uncertainty_2d_map(self, grid_template, array_2d, title, clim=None, cmap="jet"):
         """
-        Escolhe qual página central da aba Incerteza deve aparecer.
+        Desenha um mapa 2D de resultado por coluna.
         """
+        import numpy as np
+        import pyvista as pv
+
+        if not hasattr(self, "uncert_plotter_2d"):
+            return
+
+        plotter = self.uncert_plotter_2d
+        plotter.clear()
+
+        try:
+            plotter.remove_scalar_bar()
+        except Exception:
+            pass
+
+        if grid_template is None or array_2d is None:
+            plotter.render()
+            return
+
+        dims = self._infer_grid_cell_dims(grid_template)
+        if not dims:
+            plotter.render()
+            return
+
+        nx_, ny_, nz_ = dims
+
+        arr2d = np.asarray(array_2d, dtype=float)
+
+        if arr2d.shape != (nx_, ny_):
+            try:
+                arr2d = arr2d.reshape((nx_, ny_), order="F")
+            except Exception:
+                plotter.render()
+                return
+
+        x_min, x_max, y_min, y_max, _, z_max = grid_template.bounds
+
+        xs = np.linspace(x_min, x_max, nx_ + 1)
+        ys = np.linspace(y_max, y_min, ny_ + 1)
+        xs, ys = np.meshgrid(xs, ys, indexing="ij")
+        zs = np.full_like(xs, z_max, dtype=float)
+
+        surf = pv.StructuredGrid(xs, ys, zs)
+
+        scalar_name = "mapcalc_2d"
+        surf.cell_data[scalar_name] = arr2d.ravel(order="F")
+
+        finite = arr2d[np.isfinite(arr2d)]
+
+        if clim is None:
+            if finite.size:
+                vmin = float(np.nanmin(finite))
+                vmax = float(np.nanmax(finite))
+                if vmin >= 0.0:
+                    vmin = 0.0
+                if vmax <= vmin:
+                    vmax = vmin + 1e-6
+                clim = (vmin, vmax)
+            else:
+                clim = (0.0, 1.0)
+
+        plotter.add_mesh(
+            surf,
+            scalars=scalar_name,
+            cmap=cmap or "jet",
+            show_edges=True,
+            edge_color="black",
+            line_width=0.5,
+            nan_color="white",
+            show_scalar_bar=False,
+            clim=clim,
+        )
+
+        plotter.view_xy()
+        plotter.enable_parallel_projection()
+        plotter.enable_image_style()
+        plotter.set_background("white")
+        plotter.add_axes()
+
+        plotter.show_bounds(
+            grid="front",
+            location="outer",
+            ticks="outside",
+            color="gray",
+            minor_ticks=True,
+            n_xlabels=4,
+            n_ylabels=4,
+            font_size=8,
+            fmt="%.0f",
+            xtitle="X",
+            ytitle="Y",
+        )
+
+        plotter.add_scalar_bar(
+            title=title,
+            n_labels=5,
+            fmt="%.3g",
+            title_font_size=14,
+            label_font_size=12,
+        )
+
+        try:
+            plotter.add_text(title, position="upper_left", font_size=10, color="black")
+        except Exception:
+            pass
+
+        plotter.render()
+
+
+    def _render_uncertainty_3d(self, vis_grid, scalar_name, result_map, title, clim):
+        """
+        Renderiza resultado célula a célula em 3D.
+        """
+        from visualize import run
+        import numpy as np
+
+        if vis_grid is None or result_map is None:
+            return
+
+        vis_grid.cell_data[scalar_name] = np.asarray(result_map, dtype=float)
+
+        uncert_state = {
+            "mode": "scalar",
+            "current_scalar_name": scalar_name,
+            "current_scalar_title": title,
+            "current_scalar_clim": clim,
+            "current_scalar_cmap": "jet",
+            "z_exag": float(self.state.get("z_exag", 1.0)),
+            "show_scalar_bar": True,
+        }
+
+        self.uncert_plotter.clear()
+
+        _, final_state = run(
+            mode="scalar",
+            z_exag=uncert_state["z_exag"],
+            show_scalar_bar=True,
+            external_plotter=self.uncert_plotter,
+            external_state=uncert_state,
+            target_grid=vis_grid,
+            target_facies=None,
+        )
+
+        self.uncert_view_state = final_state
+
+        try:
+            if hasattr(self.uncert_plotter, "scalar_bars"):
+                for k in list(self.uncert_plotter.scalar_bars.keys()):
+                    self.uncert_plotter.remove_scalar_bar(k)
+        except Exception:
+            pass
+
+        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
+
+        if mapper:
+            mapper.SetScalarRange(clim)
+            self.uncert_plotter.add_scalar_bar(
+                title=title,
+                mapper=mapper,
+                fmt="%.3g",
+                title_font_size=14,
+                label_font_size=12,
+            )
+
+        self.uncert_plotter.reset_camera()
+
+    def _get_mapcalc_model_grid_facies(self, model_key):
+        """
+        Retorna grid, facies e nome para um modelo.
+
+        Importante:
+        Não usar 'or' com arrays NumPy, porque isso gera:
+        ValueError: truth value of an array is ambiguous.
+        """
+        from load_data import grid as global_grid, facies as global_facies
+
+        if model_key is None:
+            model_key = "base"
+
+        model_key = str(model_key)
+
+        if model_key == "base":
+            m = self.models.get("base", {})
+
+            g = m.get("grid", None)
+            if g is None:
+                g = self.state.get("current_grid_source", None)
+            if g is None:
+                g = global_grid
+
+            f = m.get("facies", None)
+            if f is None:
+                f = self.state.get("current_facies", None)
+            if f is None:
+                f = global_facies
+
+            name = m.get("name", "Modelo Base")
+            if not name:
+                name = "Modelo Base"
+
+            return g, f, name
+
+        m = self.models.get(model_key, {})
+
+        g = m.get("grid", None)
+        f = m.get("facies", None)
+
+        name = m.get("name", model_key)
+        if not name:
+            name = model_key
+
+        return g, f, name
+
+
+    def _refresh_mapcalc_model_combo(self):
+        """
+        Atualiza o combo de modelo único usado nos cálculos de um modelo.
+        """
+        if not hasattr(self, "cmb_mapcalc_model"):
+            return
+
+        current = self.cmb_mapcalc_model.currentData()
+
+        self.cmb_mapcalc_model.blockSignals(True)
+        try:
+            self.cmb_mapcalc_model.clear()
+
+            # Base
+            if "base" in self.models:
+                self.cmb_mapcalc_model.addItem("Modelo Base", "base")
+
+            # Demais modelos carregados
+            for k, v in self.models.items():
+                if k == "base":
+                    continue
+
+                name = v.get("name", None)
+
+                # ignora placeholders vazios
+                if not name and k == "compare":
+                    continue
+
+                if not name:
+                    name = str(k)
+
+                # precisa ter grid ou facies para ser útil
+                if v.get("grid", None) is None and v.get("facies", None) is None:
+                    continue
+
+                self.cmb_mapcalc_model.addItem(str(name), str(k))
+
+            if current is not None:
+                idx = self.cmb_mapcalc_model.findData(current)
+                if idx >= 0:
+                    self.cmb_mapcalc_model.setCurrentIndex(idx)
+
+        finally:
+            self.cmb_mapcalc_model.blockSignals(False)
+
+
+    def _refresh_mapcalc_property_combo(self):
+        """
+        Atualiza o combo principal de mapa/propriedade/descritor conforme a categoria.
+        """
+        if not hasattr(self, "cmb_uncert_prop"):
+            return
+
+        cat = self.cmb_mapcalc_category.currentData() if hasattr(self, "cmb_mapcalc_category") else "ensemble"
+        current_text = self.cmb_uncert_prop.currentText()
+
+        self.cmb_uncert_prop.blockSignals(True)
+        try:
+            self.cmb_uncert_prop.clear()
+
+            # ------------------------------------------------------------
+            # 1. Mapa vertical por coluna
+            # ------------------------------------------------------------
+            if cat == "vertical":
+                self.cmb_uncert_prop.addItem(
+                    "Espessura total da coluna",
+                    {
+                        "kind": "vertical_metric",
+                        "label": "Espessura total da coluna",
+                        "scalar": "__total_column_thickness__",
+                        "title": "Espessura total da coluna (m)",
+                        "reduction": "max",
+                    }
+                )
+
+                try:
+                    presets = get_vertical_metric_presets(prefix="vert_", include_filtered=False)
+                    for label, pair in presets.items():
+                        scalar, title = pair
+                        self.cmb_uncert_prop.addItem(
+                            label,
+                            {
+                                "kind": "vertical_metric",
+                                "label": label,
+                                "scalar": scalar,
+                                "title": title,
+                                "reduction": "max",
+                            }
+                        )
+                except Exception:
+                    pass
+
+            # ------------------------------------------------------------
+            # 2. Propriedade ponderada / equivalente
+            # ------------------------------------------------------------
+            elif cat == "property":
+                try:
+                    props = self._get_union_grid_property_names()
+                except Exception:
+                    props = []
+
+                for p in props:
+                    s = str(p)
+                    if s in ("Facies", "Reservoir", "Clusters", "LargestCluster"):
+                        continue
+                    if s.endswith("_index"):
+                        continue
+                    if s.startswith("vert_"):
+                        continue
+                    if "Ghost" in s:
+                        continue
+
+                    self.cmb_uncert_prop.addItem(
+                        s,
+                        {
+                            "kind": "scalar",
+                            "scalar": s,
+                            "reduction": "weighted_mean",
+                        }
+                    )
+
+            # ------------------------------------------------------------
+            # 3. Estatística do ensemble / incerteza-discordância
+            # ------------------------------------------------------------
+            else:
+                self.cmb_uncert_prop.addItem(
+                    "Fácies (Entropia)",
+                    {"kind": "facies", "scalar": None, "reduction": "entropy"}
+                )
+
+                try:
+                    props = self._get_union_grid_property_names()
+                except Exception:
+                    props = []
+
+                for p in props:
+                    s = str(p)
+                    if s in ("Facies", "Reservoir", "Clusters", "LargestCluster"):
+                        continue
+                    if s.endswith("_index"):
+                        continue
+                    if "Ghost" in s:
+                        continue
+
+                    self.cmb_uncert_prop.addItem(
+                        f"Propriedade: {s}",
+                        {"kind": "scalar", "scalar": s, "reduction": "weighted_mean"}
+                    )
+
+                try:
+                    presets = get_vertical_metric_presets(prefix="vert_", include_filtered=False)
+                    for label, pair in presets.items():
+                        scalar, title = pair
+                        self.cmb_uncert_prop.addItem(
+                            f"Métrica vertical: {label}",
+                            {"kind": "scalar", "scalar": scalar, "reduction": "max"}
+                        )
+                except Exception:
+                    pass
+
+            # tenta restaurar seleção anterior
+            for i in range(self.cmb_uncert_prop.count()):
+                if self.cmb_uncert_prop.itemText(i) == current_text:
+                    self.cmb_uncert_prop.setCurrentIndex(i)
+                    break
+
+        finally:
+            self.cmb_uncert_prop.blockSignals(False)
+
+        self._apply_mapcalc_category_ui()
+
+
+    def _refresh_uncert_property_combo(self):
+        """
+        Wrapper para compatibilidade com show_uncertainty_view().
+        Agora a página é Cálculo de Mapas.
+        """
+        self._refresh_mapcalc_property_combo()
+
+    def run_map_calculation(self):
+        """Executa o cálculo conforme o modo selecionado no Ribbon de Mapas."""
+        mode = getattr(self, "mapcalc_mode", "vertical")
+        if mode == "vertical":
+            self._run_mapcalc_vertical_single_model()
+            return
+        if mode == "property":
+            self._run_mapcalc_property_single_model()
+            return
+        if mode == "ensemble":
+            self._run_mapcalc_ensemble_vertical_metric()
+            return
+        if mode == "uncertainty":
+            self._sync_legacy_uncert_controls_from_mapcalc(mode="uncertainty")
+            self.calculate_uncertainty()
+            return
+        if mode == "difference":
+            self.statusBar().showMessage("Diferença entre modelos será implementada depois.", 5000)
+            return
+
+    def _run_mapcalc_ensemble_vertical_metric(self):
+        """Calcula estatística do ensemble para uma métrica vertical por coluna."""
+        from analysis import compute_vertical_metrics_for_grid, reduce_grid_scalar_to_column_map
+        import numpy as np
+        import pandas as pd
+
+        keys = self._get_checked_mapcalc_model_keys()
+        if not keys:
+            keys = [getattr(self, "mapcalc_model_key", "base")]
+
+        metric = getattr(self, "mapcalc_selected_metric", None)
+        if not isinstance(metric, dict):
+            self.statusBar().showMessage("Selecione uma métrica vertical para o ensemble.", 5000)
+            return
+
+        scalar_name = metric.get("scalar")
+        title = metric.get("title", scalar_name)
+        label = metric.get("label", scalar_name)
+        stat = getattr(self, "mapcalc_selected_stat", "mean")
+        scope = getattr(self, "mapcalc_selected_scope", "column")
+
+        maps = []
+        names = []
+        grids = []
+        rf = set(self.state.get("reservoir_facies", set()) or [])
+
+        for key in keys:
+            g, f, name = self._get_mapcalc_model_grid_facies(key)
+            if g is None:
+                continue
+            if scalar_name != "__total_column_thickness__":
+                if f is None:
+                    continue
+                try:
+                    compute_vertical_metrics_for_grid(
+                        g, f, rf, prefix="vert_",
+                        thin_lamination_threshold=0.30,
+                        include_filtered=True,
+                    )
+                except Exception as e:
+                    print(f"Falha ao calcular métrica vertical em {name}: {e}")
+                    continue
+
+            m2d = reduce_grid_scalar_to_column_map(g, scalar_name, reduction="max", clip_to_01=False)
+            if m2d is None:
+                continue
+            maps.append(np.asarray(m2d, dtype=float))
+            names.append(name)
+            grids.append(g)
+
+        if not maps:
+            self.statusBar().showMessage("Nenhum mapa válido foi gerado para o ensemble.", 5000)
+            return
+
+        stack = np.stack([m.reshape(-1, order="F") for m in maps], axis=0)
+        if stat == "mean":
+            out_flat = np.nanmean(stack, axis=0)
+            stat_label = "Média"
+        elif stat == "std":
+            out_flat = np.nanstd(stack, axis=0)
+            stat_label = "Desvio padrão"
+        elif stat == "var":
+            out_flat = np.nanvar(stack, axis=0)
+            stat_label = "Variância"
+        else:
+            out_flat = np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)
+            stat_label = "Amplitude"
+
+        result_2d = out_flat.reshape(maps[0].shape, order="F")
+
+        if scope == "model":
+            rows = []
+            for name, m in zip(names, maps):
+                vals = np.asarray(m, dtype=float)
+                finite = vals[np.isfinite(vals)]
+                if finite.size == 0:
+                    continue
+                rows.append({
+                    "modelo": name,
+                    "valor_medio_espacial": float(np.nanmean(finite)),
+                    "desvio_espacial": float(np.nanstd(finite)),
+                    "min_espacial": float(np.nanmin(finite)),
+                    "max_espacial": float(np.nanmax(finite)),
+                })
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                vals = df["valor_medio_espacial"].to_numpy(dtype=float)
+                ens_mean = float(np.nanmean(vals))
+                ens_std = float(np.nanstd(vals))
+                ens_var = float(np.nanvar(vals))
+                ens_range = float(np.nanmax(vals) - np.nanmin(vals))
+                df["desvio_abs_da_media_ensemble"] = np.abs(df["valor_medio_espacial"] - ens_mean)
+            else:
+                ens_mean = ens_std = ens_var = ens_range = 0.0
+            self._set_uncert_result_mode("model")
+            self._fill_uncert_summary_table(df)
+            if hasattr(self, "txt_uncert_summary"):
+                self.txt_uncert_summary.setPlainText(
+                    f"{stat_label} do ensemble\n"
+                    f"Métrica: {label}\n"
+                    f"Modelos: {len(names)}\n\n"
+                    f"Média ensemble: {ens_mean:.6g}\n"
+                    f"Desvio padrão: {ens_std:.6g}\n"
+                    f"Variância: {ens_var:.6g}\n"
+                    f"Amplitude: {ens_range:.6g}"
+                )
+            self.lbl_uncert_max_real.setText(f"{stat_label}: tabela")
+            return
+
+        finite = result_2d[np.isfinite(result_2d)]
+        if finite.size:
+            vmax = float(np.nanmax(finite))
+            vmin = float(np.nanmin(finite))
+            if vmin >= 0:
+                vmin = 0.0
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+            clim = (vmin, vmax)
+        else:
+            clim = (0.0, 1.0)
+
+        full_title = f"{stat_label} ensemble: {title}"
+        self._set_uncert_result_mode("column")
+        self._draw_uncertainty_2d_map(grids[0], result_2d, full_title, clim=clim, cmap=self.state.get("thickness_cmap", "jet"))
+        self.lbl_uncert_n.setText(f"Entrada: {len(names)} modelo(s)")
+        self.lbl_uncert_max_theo.setText(f"Métrica: {label}")
+        self.lbl_uncert_max_real.setText(f"Máx.: {float(np.nanmax(finite)):.6g}" if finite.size else "Resultado: -")
+        self._uncert_has_result = True
+
+    def _sync_legacy_uncert_controls_from_mapcalc(self, mode="ensemble"):
+        """
+        Prepara os widgets antigos usados por calculate_uncertainty().
+        """
+        # Garante lista de modelos a partir do painel lateral
+        keys = self._get_checked_mapcalc_model_keys() if hasattr(self, "lst_mapcalc_models") else []
+        if not keys:
+            keys = [getattr(self, "mapcalc_model_key", "base")]
+        self._set_uncert_models_from_keys(keys)
+
+        # Cria combos antigos se não existirem
+        if not hasattr(self, "cmb_uncert_scope"):
+            self.cmb_uncert_scope = QtWidgets.QComboBox()
+            self.cmb_uncert_scope.addItem("Célula a célula", "cell")
+            self.cmb_uncert_scope.addItem("Por coluna", "column")
+            self.cmb_uncert_scope.addItem("Resumo por modelo / ensemble", "model")
+            self.cmb_uncert_scope.hide()
+
+        if not hasattr(self, "cmb_uncert_metric"):
+            self.cmb_uncert_metric = QtWidgets.QComboBox()
+            self.cmb_uncert_metric.addItem("Média", "mean")
+            self.cmb_uncert_metric.addItem("Desvio padrão", "std")
+            self.cmb_uncert_metric.addItem("Variância", "var")
+            self.cmb_uncert_metric.addItem("Amplitude", "range")
+            self.cmb_uncert_metric.hide()
+
+        if not hasattr(self, "cmb_uncert_prop"):
+            self.cmb_uncert_prop = QtWidgets.QComboBox()
+            self.cmb_uncert_prop.hide()
+
+        # Escala
+        scope = getattr(self, "mapcalc_selected_scope", "column")
+        idx = self.cmb_uncert_scope.findData(scope)
+        if idx >= 0:
+            self.cmb_uncert_scope.setCurrentIndex(idx)
+
+        # Estatística
+        stat = getattr(self, "mapcalc_selected_stat", "std")
+        if mode == "uncertainty" and stat == "mean":
+            stat = "std"
+
+        idx = self.cmb_uncert_metric.findData(stat)
+        if idx >= 0:
+            self.cmb_uncert_metric.setCurrentIndex(idx)
+
+        # Propriedade/alvo
+        self.cmb_uncert_prop.clear()
+
+        if mode == "uncertainty":
+            target = getattr(self, "mapcalc_uncertainty_target", "facies_entropy")
+
+            if target == "facies_entropy":
+                self.cmb_uncert_prop.addItem(
+                    "Fácies (Entropia)",
+                    {"kind": "facies", "scalar": None, "reduction": "entropy"}
+                )
+            else:
+                prop = getattr(self, "mapcalc_selected_property", None)
+                if not prop:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Cálculo de Mapas",
+                        "Selecione uma propriedade no modo Propriedade antes de calcular incerteza de propriedade."
+                    )
+                    return
+
+                self.cmb_uncert_prop.addItem(
+                    f"Propriedade: {prop}",
+                    {"kind": "scalar", "scalar": prop, "reduction": "weighted_mean"}
+                )
+
+        else:
+            metric = getattr(self, "mapcalc_selected_metric", None)
+
+            if metric:
+                self.cmb_uncert_prop.addItem(
+                    f"Métrica vertical: {metric.get('label', metric.get('scalar'))}",
+                    {"kind": "scalar", "scalar": metric.get("scalar"), "reduction": "max"}
+                )
+            else:
+                self.cmb_uncert_prop.addItem(
+                    "Espessura total da coluna",
+                    {"kind": "scalar", "scalar": "__total_column_thickness__", "reduction": "max"}
+                )
+
+        self.cmb_uncert_prop.setCurrentIndex(0)
+
+    def _run_mapcalc_vertical_single_model(self):
+        """
+        Calcula/visualiza um mapa vertical por coluna para um único modelo.
+        """
+        from analysis import (
+            compute_vertical_metrics_for_grid,
+            reduce_grid_scalar_to_column_map,
+            expand_column_map_to_cell_data,
+        )
+        import numpy as np
+
+        model_key = getattr(self, "mapcalc_model_key", "base")
+        grid, facies_arr, model_name = self._get_mapcalc_model_grid_facies(model_key)
+
+        if grid is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                "Nenhum grid foi encontrado para o modelo selecionado."
+            )
+            return
+
+        metric = getattr(self, "mapcalc_selected_metric", None)
+        if not isinstance(metric, dict):
+            metric = {
+                "scalar": "__total_column_thickness__",
+                "title": "Espessura total da coluna (m)",
+                "label": "Espessura",
+            }
+            self.mapcalc_selected_metric = metric
+
+        scalar_name = metric.get("scalar")
+        label = metric.get("label", scalar_name)
+        title = metric.get("title", label)
+
+        if scalar_name != "__total_column_thickness__":
+            rf = set(self.state.get("reservoir_facies", set()) or [])
+            try:
+                compute_vertical_metrics_for_grid(
+                    grid,
+                    facies_arr,
+                    rf,
+                    prefix="vert_",
+                    thin_lamination_threshold=0.30,
+                    include_filtered=True,
+                )
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Cálculo de Mapas",
+                    f"Falha ao recalcular métricas verticais:\n{e}"
+                )
+                return
+
+        result_2d = reduce_grid_scalar_to_column_map(
+            grid,
+            scalar_name,
+            reduction="max",
+            clip_to_01=False,
+        )
+
+        if result_2d is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                f"Não foi possível gerar o mapa '{label}'."
+            )
+            return
+
+        # Salva também como cell_data replicado, útil para visualização 3D futura
+        try:
+            expand_column_map_to_cell_data(grid, result_2d, scalar_name)
+            extra = set(self.state.get("extra_sync_cell_data", set()) or set())
+            extra.add(str(scalar_name))
+            self.state["extra_sync_cell_data"] = extra
+        except Exception:
+            pass
+
+        finite = np.asarray(result_2d, dtype=float)
+        finite = finite[np.isfinite(finite)]
+
+        vmax = float(np.nanmax(finite)) if finite.size else 1.0
+        clim = (0.0, vmax if vmax > 0 else 1.0)
+
+        full_title = f"{title} | {model_name}"
+
+        self._set_uncert_result_mode("column")
+        self._draw_uncertainty_2d_map(
+            grid,
+            result_2d,
+            full_title,
+            clim=clim,
+            cmap=self.state.get("thickness_cmap", "jet"),
+        )
+
+        if hasattr(self, "lbl_uncert_n"):
+            self.lbl_uncert_n.setText(f"Entrada: {model_name}")
+            self.lbl_uncert_max_theo.setText(f"Mapa: {label}")
+            self.lbl_uncert_max_real.setText(f"Máx.: {vmax:.6g}")
+
+        self._uncert_has_result = True
+
+
+    def _run_mapcalc_property_single_model(self):
+        """
+        Calcula/visualiza mapa por coluna a partir de uma propriedade por célula.
+        """
+        from analysis import reduce_grid_scalar_to_column_map, expand_column_map_to_cell_data
+        import numpy as np
+        import re
+
+        model_key = getattr(self, "mapcalc_model_key", "base")
+        grid, facies_arr, model_name = self._get_mapcalc_model_grid_facies(model_key)
+
+        if grid is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                "Nenhum grid foi encontrado para o modelo selecionado."
+            )
+            return
+
+        scalar_name = getattr(self, "mapcalc_selected_property", None)
+        if not scalar_name:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                "Selecione uma propriedade na lista."
+            )
+            return
+
+        if scalar_name not in grid.cell_data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                f"A propriedade selecionada não existe no grid do modelo '{model_name}'.\n\n"
+                f"Propriedade: {scalar_name}"
+            )
+            return
+
+        operation = getattr(self, "mapcalc_selected_operation", "weighted_mean")
+
+        op_title = {
+            "weighted_mean": "Média ponderada por espessura",
+            "equivalent": "Espessura equivalente",
+            "mean": "Média aritmética vertical",
+            "sum": "Soma vertical",
+            "max": "Máximo vertical",
+        }.get(operation, "Mapa derivado")
+
+        prefix = {
+            "weighted_mean": "wmean_th",
+            "equivalent": "eq_th",
+            "mean": "vmean",
+            "sum": "vsum",
+            "max": "vmax",
+        }.get(operation, "derived")
+
+        safe = re.sub(r"[^0-9a-zA-Z_]+", "_", str(scalar_name)).strip("_")
+        out_name = f"{prefix}_{safe}"
+
+        try:
+            clip_to_01 = self._is_normalized_property(scalar_name)
+        except Exception:
+            clip_to_01 = False
+
+        result_2d = reduce_grid_scalar_to_column_map(
+            grid,
+            scalar_name,
+            reduction=operation,
+            clip_to_01=clip_to_01,
+        )
+
+        if result_2d is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cálculo de Mapas",
+                f"Não foi possível calcular '{op_title}' para '{scalar_name}'."
+            )
+            return
+
+        try:
+            expand_column_map_to_cell_data(grid, result_2d, out_name)
+            extra = set(self.state.get("extra_sync_cell_data", set()) or set())
+            extra.add(out_name)
+            self.state["extra_sync_cell_data"] = extra
+        except Exception:
+            pass
+
+        finite = np.asarray(result_2d, dtype=float)
+        finite = finite[np.isfinite(finite)]
+
+        if operation == "weighted_mean" and clip_to_01:
+            clim = (0.0, 1.0)
+            vmax = 1.0
+        elif finite.size:
+            vmin = float(np.nanmin(finite))
+            vmax = float(np.nanmax(finite))
+
+            if vmin >= 0.0:
+                vmin = 0.0
+
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+
+            clim = (vmin, vmax)
+        else:
+            vmax = 1.0
+            clim = (0.0, 1.0)
+
+        full_title = f"{op_title}: {scalar_name} | {model_name}"
+
+        self._set_uncert_result_mode("column")
+        self._draw_uncertainty_2d_map(
+            grid,
+            result_2d,
+            full_title,
+            clim=clim,
+            cmap=self.state.get("thickness_cmap", "jet"),
+        )
+
+        if hasattr(self, "lbl_uncert_n"):
+            self.lbl_uncert_n.setText(f"Entrada: {model_name}")
+            self.lbl_uncert_max_theo.setText(f"Mapa: {label}")
+            self.lbl_uncert_max_real.setText(f"Máx.: {vmax:.6g}")
+
+        self._uncert_has_result = True
+
+    def _set_uncert_result_mode(self, scope):
+        """Escolhe a página central e mantém o painel direito da aba Mapas visível."""
         scope = str(scope or "cell").lower()
 
         if not hasattr(self, "uncert_result_stack"):
             return
 
         if scope == "model":
-            # Tabela grande
             self.uncert_result_stack.setCurrentIndex(2)
-            if hasattr(self, "uncert_right_panel"):
-                self.uncert_right_panel.setVisible(False)
-
         elif scope == "column":
-            # Mapa 2D por coluna
             self.uncert_result_stack.setCurrentIndex(1)
-            if hasattr(self, "uncert_right_panel"):
-                self.uncert_right_panel.setVisible(False)
-
         else:
-            # Visualizador 3D
             self.uncert_result_stack.setCurrentIndex(0)
-            if hasattr(self, "uncert_right_panel"):
-                self.uncert_right_panel.setVisible(True)
+            try:
+                if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_geometry_page"):
+                    self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_geometry_page)
+            except Exception:
+                pass
 
-        # A escala absoluta só é útil para entropia de fácies.
-        try:
-            data = self.cmb_uncert_prop.currentData()
-            is_facies_entropy = isinstance(data, dict) and data.get("kind") == "facies"
-            self.chk_abs_scale.setVisible(bool(is_facies_entropy))
-        except Exception:
-            pass
+        # Diferente da antiga aba Incerteza, a aba Mapas precisa do painel direito
+        # para fácies-alvo mesmo quando o resultado central é 2D.
+        if hasattr(self, "uncert_right_panel"):
+            self.uncert_right_panel.setVisible(True)
 
 
     def _clear_uncert_summary_table(self):
@@ -1459,7 +3399,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_uncert_models.item(i).setCheckState(QtCore.Qt.Unchecked)
 
     def show_uncertainty_view(self):
-        """Ativa a perspectiva de Incerteza (Força bruta para fechar painéis)."""
+        """Ativa a página de Cálculo de Mapas."""
         
         # 1. FORÇA BRUTA: Fecha os painéis laterais imediatamente
         if hasattr(self, "dock_explorer"): 
@@ -1483,9 +3423,36 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setup_uncertainty_tab(self.uncertainty_page)
             self._uncert_tab_ready = True
 
-        # 6. Atualiza a lista de modelos
+        # 6. Atualiza listas da página Cálculo de Mapas
         self._refresh_uncert_model_list()
+        self._refresh_mapcalc_model_combo()
         self._refresh_uncert_property_combo()
+        self._apply_mapcalc_category_ui()
+
+        # Atualiza a página de Cálculo de Mapas
+        try:
+            self._refresh_mapcalc_models_panel()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_mapcalc_property_list()
+        except Exception:
+            pass
+        try:
+            self._refresh_mapcalc_target_facies_table()
+        except Exception:
+            pass
+
+        try:
+            self._update_mapcalc_target_facies_label()
+        except Exception:
+            pass
+
+        try:
+            self._update_mapcalc_model_status_label()
+        except Exception:
+            pass
     
     def _refresh_uncert_property_combo(self):
         """
@@ -1538,30 +3505,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cmb_uncert_prop.blockSignals(False)
         
     def _refresh_uncert_model_list(self):
-        """Atualiza a lista de modelos disponíveis na aba Incerteza."""
-        self.lst_uncert_models.clear()
-        
-        # Base
-        if "base" in self.models:
-            it = QtWidgets.QListWidgetItem("Modelo Base")
-            it.setData(QtCore.Qt.UserRole, "base")
-            it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.Checked)
-            self.lst_uncert_models.addItem(it)
-            
-        # Outros (Ignora 'base' e 'compare')
-        for k, v in self.models.items():
-            if k == "base": continue
-            if k == "compare": continue  # <--- CORREÇÃO: Ignora o placeholder de comparação
-            
-            # Garante que tem nome
-            name = v.get("name", str(k))
-            if not name: continue 
+        """
+        Atualiza a lista interna de modelos usada pelos cálculos antigos.
 
-            it = QtWidgets.QListWidgetItem(name)
-            it.setData(QtCore.Qt.UserRole, k)
+        Na UI nova de Cálculo de Mapas, a seleção visível de modelos fica em
+        lst_mapcalc_models. Mesmo assim, calculate_uncertainty() ainda espera
+        lst_uncert_models. Portanto esta lista é criada/atualizada como widget
+        oculto de compatibilidade.
+        """
+        if not hasattr(self, "lst_uncert_models"):
+            self.lst_uncert_models = QtWidgets.QListWidget()
+            self.lst_uncert_models.hide()
+
+        self.lst_uncert_models.clear()
+
+        # Se a nova lista lateral de modelos existir, usa a seleção dela como fonte.
+        checked_from_panel = set()
+        if hasattr(self, "lst_mapcalc_models"):
+            try:
+                for i in range(self.lst_mapcalc_models.count()):
+                    src = self.lst_mapcalc_models.item(i)
+                    key = src.data(QtCore.Qt.UserRole)
+                    if key is not None and src.checkState() == QtCore.Qt.Checked:
+                        checked_from_panel.add(str(key))
+            except Exception:
+                checked_from_panel = set()
+
+        for k, v in self.models.items():
+            if k == "compare":
+                continue
+
+            # inclui base; para os demais, exige grid ou fácies para evitar placeholders vazios
+            if k != "base" and v.get("grid", None) is None and v.get("facies", None) is None:
+                continue
+
+            name = "Modelo Base" if k == "base" else v.get("name", str(k))
+            if not name:
+                continue
+
+            it = QtWidgets.QListWidgetItem(str(name))
+            it.setData(QtCore.Qt.UserRole, str(k))
             it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.Checked)
+
+            if checked_from_panel:
+                checked = str(k) in checked_from_panel
+            else:
+                checked = True
+
+            it.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
             self.lst_uncert_models.addItem(it)
 
     def calculate_uncertainty(self):
@@ -1643,6 +3634,18 @@ class MainWindow(QtWidgets.QMainWindow):
         scope = self.cmb_uncert_scope.currentData() if hasattr(self, "cmb_uncert_scope") else "cell"
         metric = self.cmb_uncert_metric.currentData() if hasattr(self, "cmb_uncert_metric") else "std"
 
+        category = self.cmb_mapcalc_category.currentData() if hasattr(self, "cmb_mapcalc_category") else "ensemble"
+
+        # Em "Incerteza / discordância", a média não deve ser usada como métrica de incerteza.
+        if category == "uncertainty" and metric == "mean":
+            metric = "std"
+            if hasattr(self, "cmb_uncert_metric"):
+                idx_std = self.cmb_uncert_metric.findData("std")
+                if idx_std >= 0:
+                    self.cmb_uncert_metric.blockSignals(True)
+                    self.cmb_uncert_metric.setCurrentIndex(idx_std)
+                    self.cmb_uncert_metric.blockSignals(False)
+
         # Fácies só faz sentido como entropia neste fluxo
         if kind == "facies":
             scope = "cell"
@@ -1650,6 +3653,18 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self._clear_uncert_summary_table()
         self._set_uncert_result_mode(scope)
+
+        # Métricas verticais são descritores por coluna.
+        # Não devem ser analisadas como campo célula a célula.
+        if scalar_name is not None and str(scalar_name).startswith("vert_") and scope == "cell":
+            scope = "column"
+
+            if hasattr(self, "cmb_uncert_scope"):
+                idx_col = self.cmb_uncert_scope.findData("column")
+                if idx_col >= 0:
+                    self.cmb_uncert_scope.blockSignals(True)
+                    self.cmb_uncert_scope.setCurrentIndex(idx_col)
+                    self.cmb_uncert_scope.blockSignals(False)
 
         # ------------------------------------------------------------
         # 3. Grid de visualização
@@ -1907,6 +3922,81 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self._uncert_has_result = True
+
+    def _refresh_mapcalc_property_list(self):
+        if not hasattr(self, "lst_mapcalc_properties"):
+            return
+
+        text = ""
+        if hasattr(self, "txt_mapcalc_prop_filter"):
+            text = (self.txt_mapcalc_prop_filter.text() or "").strip().lower()
+
+        try:
+            props = self._get_union_grid_property_names()
+        except Exception:
+            props = []
+
+        self.lst_mapcalc_properties.blockSignals(True)
+        try:
+            self.lst_mapcalc_properties.clear()
+
+            for p in sorted([str(x) for x in props], key=str.lower):
+                if text and text not in p.lower():
+                    continue
+
+                if p in ("Facies", "facies", "Reservoir", "reservoir", "Clusters", "LargestCluster"):
+                    continue
+                if p in ("vtkOriginalCellIds", "vtkOriginalPointIds", "Texture Coordinates"):
+                    continue
+                if p.endswith("_index"):
+                    continue
+                if p.startswith("vert_"):
+                    continue
+                if "Ghost" in p:
+                    continue
+
+                self.lst_mapcalc_properties.addItem(p)
+
+            if self.lst_mapcalc_properties.count() > 0:
+                self.lst_mapcalc_properties.setCurrentRow(0)
+                self.mapcalc_selected_property = self.lst_mapcalc_properties.item(0).text()
+
+        finally:
+            self.lst_mapcalc_properties.blockSignals(False)
+
+
+    def _on_mapcalc_property_selected(self):
+        if not hasattr(self, "lst_mapcalc_properties"):
+            return
+        item = self.lst_mapcalc_properties.currentItem()
+        if item is None:
+            self.mapcalc_selected_property = None
+            return
+        self.mapcalc_selected_property = str(item.text())
+        self._schedule_mapcalc_auto_update()
+
+    def open_mapcalc_target_facies_dialog(self):
+        """Mostra a aba dedicada de fácies-alvo da página de Cálculo de Mapas."""
+        try:
+            self.show_mapcalc_page("vertical")
+            if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_facies_page"):
+                self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_facies_page)
+            if hasattr(self, "tbl_mapcalc_target_facies"):
+                self.tbl_mapcalc_target_facies.setFocus()
+        except Exception:
+            pass
+        self._update_mapcalc_target_facies_label()
+
+    def _update_mapcalc_target_facies_label(self):
+        selected = sorted([int(x) for x in self.state.get("reservoir_facies", set()) or set()])
+        if not selected:
+            txt = "Fácies selecionadas: nenhuma"
+        elif len(selected) <= 8:
+            txt = "Fácies selecionadas: " + ", ".join(map(str, selected))
+        else:
+            txt = f"Fácies selecionadas: {len(selected)} fácies"
+        if hasattr(self, "lbl_mapcalc_target_facies"):
+            self.lbl_mapcalc_target_facies.setText(txt)
 
     def _copy_table_to_clipboard(self, table_widget):
         """Copia o conteúdo de uma QTableWidget para o clipboard (formato CSV/Excel)."""
@@ -2709,7 +4799,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setup_toolbar_controls(self):
         """
-        Cria o Ribbon simplificado com a nova estrutura solicitada.
+        Ribbon reorganizado em:
+        - Home
+        - Visualizar
+        - Mapas
+        - Relatórios
+
+        Mantém o estilo atual: ícone + texto abaixo, grupos com moldura
+        e uso de standard icons do Qt.
         """
         # Remove toolbar antiga
         for tb in self.findChildren(QtWidgets.QToolBar):
@@ -2731,18 +4828,25 @@ class MainWindow(QtWidgets.QMainWindow):
             frame = QtWidgets.QFrame()
             frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
             frame.setFrameShadow(QtWidgets.QFrame.Plain)
+
             v = QtWidgets.QVBoxLayout(frame)
             v.setContentsMargins(8, 6, 8, 6)
             v.setSpacing(4)
+
             h = QtWidgets.QHBoxLayout()
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
+
             v.addLayout(h)
+
             lbl = QtWidgets.QLabel(title)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
-            f = lbl.font(); f.setBold(False); lbl.setFont(f)
+            f = lbl.font()
+            f.setBold(False)
+            lbl.setFont(f)
             lbl.setStyleSheet("color: rgba(0,0,0,160);")
             v.addWidget(lbl)
+
             return frame, h
 
         def make_tab():
@@ -2751,6 +4855,14 @@ class MainWindow(QtWidgets.QMainWindow):
             lay.setContentsMargins(8, 6, 8, 6)
             lay.setSpacing(10)
             return w, lay
+
+        def mk_tbtn(act):
+            b = QtWidgets.QToolButton()
+            b.setDefaultAction(act)
+            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            b.setIconSize(QtCore.QSize(28, 28))
+            b.setAutoRaise(True)
+            return b
 
         # ---------- widget principal ----------
         self.ribbon_tabs = QtWidgets.QTabWidget()
@@ -2764,22 +4876,75 @@ class MainWindow(QtWidgets.QMainWindow):
         vroot.setContentsMargins(0, 0, 0, 0)
         vroot.setSpacing(0)
         vroot.addWidget(self.ribbon_tabs)
+
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
         sep.setFrameShadow(QtWidgets.QFrame.Sunken)
         sep.setFixedHeight(1)
         vroot.addWidget(sep)
+
         self.setMenuWidget(self.ribbon_container)
 
-        # ==================== ABA HOME ====================
+        # =========================================================
+        # AÇÕES DE NAVEGAÇÃO DE PÁGINAS
+        # =========================================================
+        ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+        ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
+        icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
+        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp)
+        ico_calc = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
+
+        self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self)
+        self.act_view_3d.setCheckable(True)
+
+        self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self)
+        self.act_view_2d.setCheckable(True)
+
+        self.act_view_metrics = QtWidgets.QAction(icomet, "Métricas", self)
+        self.act_view_metrics.setCheckable(True)
+
+        self.act_view_ranking = QtWidgets.QAction(icorank, "Ranking", self)
+        self.act_view_ranking.setCheckable(True)
+
+        # Mantive o nome interno act_view_uncert para não quebrar o resto do código,
+        # mas visualmente agora ele representa "Cálculo de Mapas".
+        self.act_view_uncert = QtWidgets.QAction(ico_calc, "Cálculo\nde Mapas", self)
+        self.act_view_uncert.setCheckable(True)
+
+        grp_views = QtWidgets.QActionGroup(self)
+        grp_views.setExclusive(True)
+        grp_views.addAction(self.act_view_3d)
+        grp_views.addAction(self.act_view_2d)
+        grp_views.addAction(self.act_view_metrics)
+        grp_views.addAction(self.act_view_ranking)
+        grp_views.addAction(self.act_view_uncert)
+        self.act_view_3d.setChecked(True)
+
+        self.act_view_3d.triggered.connect(self.show_main_3d_view)
+        self.act_view_2d.triggered.connect(self.show_map2d_view)
+        self.act_view_metrics.triggered.connect(self.show_metrics_view)
+        self.act_view_ranking.triggered.connect(self.show_ranking_view)
+        self.act_view_uncert.triggered.connect(self.show_uncertainty_view)
+
+        # =========================================================
+        # ABA HOME
+        # =========================================================
         tab_home, home_lay = make_tab()
 
         # Dados
         g_dados, g_dados_row = make_group("Dados")
-        btn_modelo = make_tool_btn("Modelo", self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
+        btn_modelo = make_tool_btn(
+            "Modelo",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)
+        )
         btn_modelo.clicked.connect(self.open_compare_dialog)
-        btn_pocos = make_tool_btn("Poços", self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+
+        btn_pocos = make_tool_btn(
+            "Poços",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon)
+        )
         btn_pocos.clicked.connect(self.load_well_dialog)
+
         g_dados_row.addWidget(btn_modelo)
         g_dados_row.addWidget(btn_pocos)
 
@@ -2787,193 +4952,132 @@ class MainWindow(QtWidgets.QMainWindow):
         g_persp, g_persp_row = make_group("Perspectiva")
         self.act_persp_viz.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
         self.act_persp_comp.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        
-        btn_viz = QtWidgets.QToolButton(); btn_viz.setDefaultAction(self.act_persp_viz)
-        btn_viz.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); btn_viz.setIconSize(QtCore.QSize(28, 28)); btn_viz.setAutoRaise(True)
-        
-        btn_comp = QtWidgets.QToolButton(); btn_comp.setDefaultAction(self.act_persp_comp)
-        btn_comp.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon); btn_comp.setIconSize(QtCore.QSize(28, 28)); btn_comp.setAutoRaise(True)
-        
+
+        btn_viz = QtWidgets.QToolButton()
+        btn_viz.setDefaultAction(self.act_persp_viz)
+        btn_viz.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        btn_viz.setIconSize(QtCore.QSize(28, 28))
+        btn_viz.setAutoRaise(True)
+
+        btn_comp = QtWidgets.QToolButton()
+        btn_comp.setDefaultAction(self.act_persp_comp)
+        btn_comp.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        btn_comp.setIconSize(QtCore.QSize(28, 28))
+        btn_comp.setAutoRaise(True)
+
         g_persp_row.addWidget(btn_viz)
         g_persp_row.addWidget(btn_comp)
 
-        # Ferramentas
-        g_tools, g_tools_row = make_group("Ferramentas")
-        btn_snap = make_tool_btn("Snapshot", self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
+        # Saída
+        g_saida, g_saida_row = make_group("Saída")
+        btn_snap = make_tool_btn(
+            "Snapshot",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
         btn_snap.clicked.connect(self.take_snapshot)
-        g_tools_row.addWidget(btn_snap)
+        g_saida_row.addWidget(btn_snap)
 
-        home_lay.addWidget(g_dados); home_lay.addWidget(g_persp); home_lay.addWidget(g_tools); home_lay.addStretch(1)
+        home_lay.addWidget(g_dados)
+        home_lay.addWidget(g_persp)
+        home_lay.addWidget(g_saida)
+        home_lay.addStretch(1)
+
         self.ribbon_tabs.addTab(tab_home, "Home")
 
-        # ==================== ABA VIEW ====================
+        # =========================================================
+        # ABA VISUALIZAR
+        # =========================================================
         tab_view, view_lay = make_tab()
 
-        # Vista
-        g_vista, g_vista_row = make_group("Vista")
-        
-        ico3d = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
-        ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
-        icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
-        icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp)
-        icouncert = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxQuestion) # Ícone Incerteza
+        # Navegação
+        g_nav, g_nav_row = make_group("Navegação")
+        g_nav_row.addWidget(mk_tbtn(self.act_view_3d))
+        g_nav_row.addWidget(mk_tbtn(self.act_view_2d))
+        g_nav_row.addWidget(mk_tbtn(self.act_view_metrics))
+        # Se quiser mostrar ranking depois, descomente:
+        # g_nav_row.addWidget(mk_tbtn(self.act_view_ranking))
 
-        self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self); self.act_view_3d.setCheckable(True)
-        self.act_view_2d = QtWidgets.QAction(ico2d, "Mapas 2D", self); self.act_view_2d.setCheckable(True)
-        self.act_view_metrics = QtWidgets.QAction(icomet, "Métricas", self); self.act_view_metrics.setCheckable(True)
-        self.act_view_ranking = QtWidgets.QAction(icorank, "Ranking", self); self.act_view_ranking.setCheckable(True)
-        self.act_view_uncert = QtWidgets.QAction(icouncert, "Incerteza", self); self.act_view_uncert.setCheckable(True)
-
-        grp = QtWidgets.QActionGroup(self); grp.setExclusive(True)
-        grp.addAction(self.act_view_3d)
-        grp.addAction(self.act_view_2d)
-        grp.addAction(self.act_view_metrics)
-        grp.addAction(self.act_view_ranking)
-        grp.addAction(self.act_view_uncert) # Add ao grupo
-        self.act_view_3d.setChecked(True)
-
-        # Conecta aos métodos
-        self.act_view_3d.triggered.connect(self.show_main_3d_view)
-        self.act_view_2d.triggered.connect(self.show_map2d_view)
-        self.act_view_metrics.triggered.connect(self.show_metrics_view)
-        self.act_view_ranking.triggered.connect(self.show_ranking_view)
-        self.act_view_uncert.triggered.connect(self.show_uncertainty_view) # Novo Slot
-
-        # Botões
-        def mk_tbtn(act):
-            b = QtWidgets.QToolButton(); b.setDefaultAction(act)
-            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-            b.setIconSize(QtCore.QSize(28, 28)); b.setAutoRaise(True)
-            return b
-
-        g_vista_row.addWidget(mk_tbtn(self.act_view_3d))
-        g_vista_row.addWidget(mk_tbtn(self.act_view_2d))
-        g_vista_row.addWidget(mk_tbtn(self.act_view_metrics))
-        ## RANKING COMENTADO
-        # g_vista_row.addWidget(mk_tbtn(self.act_view_ranking))
-        g_vista_row.addWidget(mk_tbtn(self.act_view_uncert))
-
-        # Modo
-        g_modo, g_modo_row = make_group("Modo")
+        # Modo 3D
+        g_modo, g_modo_row = make_group("Modo 3D")
         self.btn_mode = QtWidgets.QToolButton(self)
         self.btn_mode.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.btn_mode.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
         self.btn_mode.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView))
         self.btn_mode.setIconSize(QtCore.QSize(28, 28))
         self.btn_mode.setAutoRaise(True)
-        
+
         menu_mode = QtWidgets.QMenu(self.btn_mode)
-        
-        # --- CORREÇÃO: Conecta o sinal no MENU, não no botão ---
         menu_mode.aboutToShow.connect(self.populate_mode_menu)
 
-        # Lista inicial (idêntica ao seu código original para garantir que inicie correto)
+        # Lista inicial simplificada — sem métricas por coluna e sem incerteza
         modes = [
-            ("Fácies (Global)", "facies"), 
-            ("Seletor de Fácies", "reservoir"), 
-            ("Clusters (conectividade)", "clusters"), 
-            ("Maior Cluster", "largest"), 
-            ("Métricas Por Coluna", "thickness_local"),
-            ("Entropia (Incerteza)", "entropy")
+            ("Fácies (Global)", "facies"),
+            ("Fácies-alvo", "reservoir"),
+            ("Clusters (conectividade)", "clusters"),
+            ("Maior Cluster", "largest"),
         ]
-        
         for text, data in modes:
             action = menu_mode.addAction(text)
             action.triggered.connect(lambda ch, t=text, d=data: self._update_mode_btn(t, d))
+
         self.btn_mode.setMenu(menu_mode)
         self._update_mode_btn("Fácies", "facies")
         g_modo_row.addWidget(self.btn_mode)
 
-        # Espessura
-        g_esp, g_esp_row = make_group("Métricas por Coluna")
-        self.btn_thick = QtWidgets.QToolButton(self)
-        self.btn_thick.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        self.btn_thick.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-        self.btn_thick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
-        self.btn_thick.setIconSize(QtCore.QSize(28, 28))
-        self.btn_thick.setAutoRaise(True)
-        menu_thick = QtWidgets.QMenu(self.btn_thick)
-        thickness_opts = ["Espessura total da coluna"] + list(get_vertical_metric_presets(prefix="vert_", include_filtered=False).keys())
-        for label in thickness_opts:
-            action = menu_thick.addAction(label)
-            action.triggered.connect(lambda ch, l=label: self._update_thick_btn(l))
-        self.btn_thick.setMenu(menu_thick)
-        g_esp_row.addWidget(self.btn_thick)
-
-        self.btn_thickness_filter = make_tool_btn("Filtrar\nFinas",
-            self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton),
-            checkable=True,
-        )
-        self.btn_thickness_filter.setToolTip("Ignora laminações finas nas métricas por coluna")
-        self.btn_thickness_filter.toggled.connect(self._on_toggle_thickness_filtered)
-        g_esp_row.addWidget(self.btn_thickness_filter)
-
-        self.state.setdefault("thickness_use_filtered", False)
-        self._update_thick_btn("Espessura total da coluna")
-
-        # --- NOVO GRUPO: ESTILO (CORES) ---
+        # Estilo
         g_style, g_style_row = make_group("Estilo")
-        
-        # Label pequena
+
         lbl_cmap = QtWidgets.QLabel("Paleta:")
-        
-        # ComboBox com as opções
         self.cmb_colormap = QtWidgets.QComboBox()
-        self.cmb_colormap.setToolTip("Altera a escala de cores para propriedades contínuas (Espessura, Porosidade, etc).")
+        self.cmb_colormap.setToolTip("Altera a escala de cores para propriedades contínuas.")
         self.cmb_colormap.setIconSize(QtCore.QSize(80, 14))
         self.cmb_colormap.setFixedWidth(92)
+
         self._init_colormap_combo(
             ["jet", "viridis", "magma", "cividis", "turbo", "plasma", "seismic", "coolwarm"],
             default_name="jet"
         )
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
-        
-        # Adiciona ao layout do grupo
+
         v_box_style = QtWidgets.QVBoxLayout()
         v_box_style.setSpacing(0)
-        v_box_style.setContentsMargins(0,0,0,0)
+        v_box_style.setContentsMargins(0, 0, 0, 0)
         v_box_style.addWidget(lbl_cmap)
         v_box_style.addWidget(self.cmb_colormap)
-        
         g_style_row.addLayout(v_box_style)
 
-        # Inspeção de Poços
-        g_wells, g_wells_row = make_group("Inspeção")
-        
-        # Combo Janela
+        # Inspeção
+        g_insp, g_insp_row = make_group("Inspeção")
+
         self.cmb_debug_win = QtWidgets.QComboBox()
         self.cmb_debug_win.addItems(["1x1", "3x3", "5x5", "7x7", "9x9"])
-        self.cmb_debug_win.setCurrentIndex(1) # Default 3x3
-        self.cmb_debug_win.setToolTip("Tamanho da Janela de Busca")
+        self.cmb_debug_win.setCurrentIndex(1)  # 3x3
+        self.cmb_debug_win.setToolTip("Tamanho da janela de busca")
         self.cmb_debug_win.setFixedWidth(60)
-        
-        # Botão Toggle
-        self.btn_debug_all = make_tool_btn("Destacar\nTodos", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView), checkable=True)
+
+        self.btn_debug_all = make_tool_btn(
+            "Destacar\nTodos",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView),
+            checkable=True
+        )
         self.btn_debug_all.clicked.connect(self.toggle_global_well_debug)
-        
-        # Conecta mudança do combo para atualizar em tempo real:
-        # 1. Se "Destacar Todos" estiver ligado (3D).
-        # 2. Se a visualização atual for "Ranking" (Recalcula tabela).
         self.cmb_debug_win.currentIndexChanged.connect(self._on_global_window_size_changed)
 
-        # Layout vertical para o combo
         v_box_combo = QtWidgets.QVBoxLayout()
         v_box_combo.setSpacing(0)
         v_box_combo.setContentsMargins(0, 0, 0, 0)
         v_box_combo.addWidget(QtWidgets.QLabel("Janela:"))
         v_box_combo.addWidget(self.cmb_debug_win)
-        
-        g_wells_row.addLayout(v_box_combo)
-        g_wells_row.addWidget(self.btn_debug_all)
 
-        # ==================== SELEÇÃO 3D (Célula / Coluna) ====================
-        # Ative um modo de seleção para clicar no grid 3D e inspecionar.
+        g_insp_row.addLayout(v_box_combo)
+        g_insp_row.addWidget(self.btn_debug_all)
+
         try:
             sep_sel = QtWidgets.QFrame()
             sep_sel.setFrameShape(QtWidgets.QFrame.VLine)
             sep_sel.setFrameShadow(QtWidgets.QFrame.Sunken)
             sep_sel.setFixedWidth(1)
-            g_wells_row.addWidget(sep_sel)
+            g_insp_row.addWidget(sep_sel)
         except Exception:
             pass
 
@@ -2982,14 +5086,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.style().standardIcon(QtWidgets.QStyle.SP_DialogYesButton),
             checkable=True,
         )
-        self.btn_pick_cell.setToolTip("Ativa modo de seleção de CÉLULA no 3D (clique em uma célula).")
+        self.btn_pick_cell.setToolTip("Ativa modo de seleção de célula no 3D.")
 
         self.btn_pick_column = make_tool_btn(
             "Selecionar\nColuna",
             self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp),
             checkable=True,
         )
-        self.btn_pick_column.setToolTip("Ativa modo de seleção de COLUNA (I,J) no 3D (clique em uma célula da coluna).")
+        self.btn_pick_column.setToolTip("Ativa modo de seleção de coluna no 3D.")
 
         self.btn_pick_clear = make_tool_btn(
             "Limpar\nSeleção",
@@ -3002,35 +5106,182 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_pick_column.clicked.connect(lambda checked: self.set_pick_mode("column" if checked else None))
         self.btn_pick_clear.clicked.connect(self.clear_pick_selection)
 
-        g_wells_row.addWidget(self.btn_pick_cell)
-        g_wells_row.addWidget(self.btn_pick_column)
-        g_wells_row.addWidget(self.btn_pick_clear)
+        g_insp_row.addWidget(self.btn_pick_cell)
+        g_insp_row.addWidget(self.btn_pick_column)
+        g_insp_row.addWidget(self.btn_pick_clear)
 
+        # Painéis
+        g_panels, g_panels_row = make_group("Painéis")
+        self.btn_toggle_explorer = make_tool_btn(
+            "Explorer",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon),
+            checkable=True
+        )
+        self.btn_toggle_props = make_tool_btn(
+            "Inspector",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
+            checkable=True
+        )
+        self.btn_toggle_explorer.setEnabled(False)
+        self.btn_toggle_props.setEnabled(False)
 
-        # --- GRUPO RELATÓRIOS (Movido para View) ---
+        g_panels_row.addWidget(self.btn_toggle_explorer)
+        g_panels_row.addWidget(self.btn_toggle_props)
+
+        view_lay.addWidget(g_nav)
+        view_lay.addWidget(g_modo)
+        view_lay.addWidget(g_style)
+        view_lay.addWidget(g_insp)
+        view_lay.addWidget(g_panels)
+        view_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_view, "Visualizar")
+
+        # =========================================================
+        # ABA MAPAS
+        # =========================================================
+        tab_maps, maps_lay = make_tab()
+
+        # ---------------------------------------------------------
+        # Grupo: Tipo de Mapa
+        # ---------------------------------------------------------
+        g_map_type, g_map_type_row = make_group("Tipo de Mapa")
+
+        def make_map_type_btn(text, icon, mode_key, tooltip=""):
+            btn = make_tool_btn(text, icon, checkable=True)
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(lambda checked=False, m=mode_key: self.show_mapcalc_page(m))
+            return btn
+
+        self.btn_mapcalc_vertical = make_map_type_btn(
+            "Mapa\nVertical",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+            "vertical",
+            "Espessura, proporção, ICV, Qv, pacotes, gaps, trocas e permanências."
+        )
+
+        self.btn_mapcalc_property = make_map_type_btn(
+            "Propriedade",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView),
+            "property",
+            "Média ponderada, espessura equivalente, soma e média vertical."
+        )
+
+        self.btn_mapcalc_ensemble = make_map_type_btn(
+            "Ensemble",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon),
+            "ensemble",
+            "Média, desvio padrão, variância e amplitude entre modelos."
+        )
+
+        self.btn_mapcalc_uncert = make_map_type_btn(
+            "Incerteza",
+            self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning),
+            "uncertainty",
+            "Entropia, discordância e dispersão entre cenários."
+        )
+
+        self.btn_mapcalc_diff = make_map_type_btn(
+            "Diferença",
+            self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight),
+            "difference",
+            "Diferença entre modelo-base e simulações."
+        )
+
+        self.mapcalc_type_buttons = QtWidgets.QButtonGroup(self)
+        self.mapcalc_type_buttons.setExclusive(True)
+        for b in [
+            self.btn_mapcalc_vertical,
+            self.btn_mapcalc_property,
+            self.btn_mapcalc_ensemble,
+            self.btn_mapcalc_uncert,
+            self.btn_mapcalc_diff,
+        ]:
+            self.mapcalc_type_buttons.addButton(b)
+            g_map_type_row.addWidget(b)
+
+        # ---------------------------------------------------------
+        # Grupo: Saída
+        # ---------------------------------------------------------
+        g_map_out, g_map_out_row = make_group("Saída")
+
+        btn_map_snapshot = make_tool_btn(
+            "Snapshot",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
+        btn_map_snapshot.clicked.connect(self.take_snapshot)
+        g_map_out_row.addWidget(btn_map_snapshot)
+
+        # ---------------------------------------------------------
+        # Grupo: Filtros
+        # ---------------------------------------------------------
+        g_map_filters, g_map_filters_row = make_group("Filtros")
+
+        btn_target_facies = make_tool_btn(
+            "Fácies\nAlvo",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView)
+        )
+        btn_target_facies.clicked.connect(self.open_mapcalc_target_facies_dialog)
+
+        self.btn_thickness_filter = make_tool_btn(
+            "Filtrar\nFinas",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton),
+            checkable=True,
+        )
+        self.btn_thickness_filter.setToolTip("Ignora laminações finas nas métricas verticais por coluna.")
+        self.btn_thickness_filter.toggled.connect(self._on_toggle_thickness_filtered)
+        self.state.setdefault("thickness_use_filtered", False)
+
+        g_map_filters_row.addWidget(btn_target_facies)
+        g_map_filters_row.addWidget(self.btn_thickness_filter)
+
+        maps_lay.addWidget(g_map_type)
+        maps_lay.addWidget(g_map_out)
+        maps_lay.addWidget(g_map_filters)
+        maps_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_maps, "Mapas")
+
+        # =========================================================
+        # ABA RELATÓRIOS
+        # =========================================================
+        tab_reports, rep_lay = make_tab()
+
         g_rep, g_rep_row = make_group("Relatórios")
-        
-        btn_rep_open = make_tool_btn("Abrir\nRelatório", self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
+
+        btn_rep_open = make_tool_btn(
+            "Abrir\nRelatório",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)
+        )
         btn_rep_open.clicked.connect(self.open_reports_dialog)
-        
-        btn_rep_selected = make_tool_btn("Poços\nSelecionados", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView))
+
+        btn_rep_selected = make_tool_btn(
+            "Poços\nSelecionados",
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
+        )
         btn_rep_selected.clicked.connect(self.open_selected_well_reports)
-        
+
         g_rep_row.addWidget(btn_rep_open)
         g_rep_row.addWidget(btn_rep_selected)
-        
-        # Janelas
-        g_windows, g_windows_row = make_group("Janelas")
-        self.btn_toggle_explorer = make_tool_btn("Explorer", self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon), checkable=True)
-        self.btn_toggle_props = make_tool_btn("Inspector", self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon), checkable=True)
-        self.btn_toggle_explorer.setEnabled(False); self.btn_toggle_props.setEnabled(False)
-        g_windows_row.addWidget(self.btn_toggle_explorer); g_windows_row.addWidget(self.btn_toggle_props)
 
-        view_lay.addWidget(g_vista); view_lay.addWidget(g_modo); view_lay.addWidget(g_esp); view_lay.addWidget(g_style);
-        view_lay.addWidget(g_wells); view_lay.addWidget(g_rep); view_lay.addWidget(g_windows) # Inserido g_rep
-        view_lay.addStretch(1)
-        
-        self.ribbon_tabs.addTab(tab_view, "View")
+        g_rep_out, g_rep_out_row = make_group("Saída")
+        btn_snap_rep = make_tool_btn(
+            "Snapshot",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
+        btn_snap_rep.clicked.connect(self.take_snapshot)
+        g_rep_out_row.addWidget(btn_snap_rep)
+
+        rep_lay.addWidget(g_rep)
+        rep_lay.addWidget(g_rep_out)
+        rep_lay.addStretch(1)
+
+        self.ribbon_tabs.addTab(tab_reports, "Relatórios")
+
+        try:
+            self.ribbon_tabs.currentChanged.connect(self._on_ribbon_tab_changed)
+        except Exception:
+            pass
 
 
     def _make_cmap_icon(self, cmap_name, w=160, h=28):
@@ -3129,6 +5380,17 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
 
+    def _on_ribbon_tab_changed(self, index):
+        """Mantém a aba do ribbon coerente com a página central."""
+        try:
+            name = self.ribbon_tabs.tabText(index)
+        except Exception:
+            return
+        if name == "Mapas":
+            self.show_mapcalc_page("vertical")
+        elif name == "Visualizar":
+            self.show_main_3d_view()
+
     def populate_mode_menu(self):
         """Reconstrói o menu de Modos/Propriedades baseado no grid atual."""
         menu = self.btn_mode.menu()
@@ -3136,10 +5398,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         modes_std = [
             ("Fácies (Global)", "facies"),
-            ("Seletor de Fácies", "reservoir"),
+            ("Fácies-alvo", "reservoir"),
             ("Clusters (Conectividade)", "clusters"),
             ("Maior Cluster", "largest"),
-            ("Métricas Por Coluna", "thickness_local")
         ]
 
         menu.addSection("Análise Estrutural")
@@ -3194,28 +5455,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 action = menu.addAction(f"{name}")
                 action.triggered.connect(lambda ch, n=name: self.change_scalar_view(n))
-
-        # Médias ponderadas por espessura
-        if all_cell_keys:
-            weighted_props = []
-            for name in sorted(all_cell_keys):
-                if name in exact_ignore:
-                    continue
-                if str(name).endswith("_index"):
-                    continue
-                if str(name).startswith("vert_"):
-                    continue
-                if str(name).startswith("wmean_th_"):
-                    continue
-                if "Ghost" in str(name):
-                    continue
-                weighted_props.append(str(name))
-
-            if weighted_props:
-                menu.addSection("Média ponderada por espessura")
-                for name in weighted_props:
-                    action = menu.addAction(f"Média ponderada: {name}")
-                    action.triggered.connect(lambda ch, n=name: self.change_weighted_mean_view(n))
 
         # Config
         menu.addSeparator()
