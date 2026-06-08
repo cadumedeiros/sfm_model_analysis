@@ -264,7 +264,7 @@ class Well:
             if arr.notna().any():
                 poly.point_data[str(col)] = arr.to_numpy(dtype=float)
 
-        return poly.tube(radius=100)
+        return poly.tube(radius=50)
 
     def get_markers_mesh(self, markers_list, z_exag=1.0):
         if self.data is None or not markers_list: return None, None
@@ -285,4 +285,4 @@ class Well:
                 labels.append(m['name'])
         
         if not pts: return None, None
-        return pv.PolyData(pts).glyph(geom=pv.Sphere(radius=150), scale=False), labels
+        return pv.PolyData(pts).glyph(geom=pv.Sphere(radius=80), scale=False), labels

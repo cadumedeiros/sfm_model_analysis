@@ -4980,7 +4980,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     actor_line = self.plotter.add_mesh(
                         mesh,
-                        color="saddlebrown",
+                        color="black",
                         line_width=3,
                         name=f"well_{well_name}",
                         reset_camera=False,
