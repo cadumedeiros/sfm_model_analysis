@@ -1,85 +1,99 @@
+"""Configuração da tabela mestre de descritores SFM.
 
-"""Starter configuration for the SFM master table.
-
-This file separates:
-1) input columns from calibration
-2) target descriptors to extract from each model
-3) summary statistics to save for map-based descriptors
-
-Edit freely as your software evolves.
+As colunas de parâmetros de calibração não são mais fixadas neste arquivo.
+Elas são preservadas dinamicamente a partir do dicionário ``parameters`` de
+cada modelo, evitando que novas curvas ou multiplicadores sejam descartados.
 """
 
-PARAMETER_COLUMNS = [
-    "Carbo_GrainsProdvsTime",
-    "Carbo_MudProdvsTime",
-    "Carbo_RudProdvsTime",
-    "LutitesProdvsTime",
-    "S1Supply0",
-    "S2Supply0",
-]
-
 IDENTIFICATION_COLUMNS = [
-    "Simulation_ID",
-    "Simulation",
-    "OutputPath",
-    "OF Value",
+    "simulation_id",
+    "simulation_name",
+    "study",
+    "output_path",
+    "of_value",
 ]
 
-# Core target-based descriptors (single facies or facies group)
+GROUPING_COLUMNS = [
+    "simulation_number",
+    "family",
+    "cluster",
+    "group_silhouette",
+    "group_distance_to_centroid",
+    "group_distance_percentile",
+    "representative_role",
+    "selected_for_visualization",
+    "grouping_match",
+]
+
+DEFAULT_INACTIVE_FACIES = (0,)
+
 GLOBAL_TARGET_DESCRIPTORS = [
+    "active_cells",
+    "active_grid_volume",
+    "target_cells",
     "target_volume",
-    "target_fraction_global",
-    "n_clusters",
-    "connected_fraction",
+    "target_cell_fraction",
+    "target_volume_fraction",
+    "n_bodies",
+    "largest_body_cells",
+    "largest_body_volume",
+    "connected_cell_fraction",
+    "connected_volume_fraction",
+    "effective_body_count",
+    "body_volume_p50",
+    "body_volume_p90",
     "percolation_x",
     "percolation_y",
     "percolation_z",
 ]
 
-# Column / map descriptors to summarize with statistics
+# Mapas 2D usados como núcleo da análise de descritores.
 VERTICAL_MAP_DESCRIPTORS = [
-    "Ttot",
+    "Tcolumn",
+    "Ttarget",
+    "Tenv",
     "target_fraction_col",
     "n_packages",
     "Tpack_max",
-    "ICV_env",
-    "Tgap_sum",
+    "gap_fraction_env",
 ]
 
-# Good second-layer descriptors
+# Mantidos disponíveis para análises complementares, sem entrar por padrão.
 VERTICAL_MAP_DESCRIPTORS_OPTIONAL = [
-    "Tenv",
-    "Tgap_max",
     "target_fraction_env",
-    "Qv",
-    "Qv_abs",
+    "Cdom",
+    "Tgap_max",
 ]
 
-# Whole facies-model descriptors
-FACIES_MODEL_DESCRIPTORS = [
-    "facies_entropy_global",
-    "facies_diversity_global",
-    "n_facies_per_column_mean",
-]
-
-# Local validation descriptors
-WELL_DESCRIPTORS = [
-    "well_score_mean",
-    "well_score_min",
-    "well_score_std",
-]
-
-# Default summary statistics for map-like descriptors
 MAP_SUMMARY_STATS = ["mean", "std", "p10", "p50", "p90"]
 
-def expanded_master_table_columns():
-    cols = []
-    cols.extend(IDENTIFICATION_COLUMNS)
-    cols.extend(PARAMETER_COLUMNS)
-    cols.extend(GLOBAL_TARGET_DESCRIPTORS)
-    cols.extend(FACIES_MODEL_DESCRIPTORS)
-    cols.extend(WELL_DESCRIPTORS)
-    for name in VERTICAL_MAP_DESCRIPTORS:
+VPC_SCALAR_DESCRIPTORS = [
+    "vpc_distance_to_base",
+]
+
+
+def expanded_master_table_columns(
+    parameter_columns=None,
+    facies_ids=None,
+    *,
+    include_optional=False,
+):
+    """Retorna a ordem recomendada das colunas conhecidas da tabela mestre."""
+    columns = list(IDENTIFICATION_COLUMNS)
+    columns.extend(GROUPING_COLUMNS)
+    columns.extend(list(parameter_columns or []))
+    columns.extend(GLOBAL_TARGET_DESCRIPTORS)
+
+    for facies_id in sorted(int(v) for v in (facies_ids or [])):
+        columns.append(f"facies_{facies_id}_volume_fraction")
+
+    map_names = list(VERTICAL_MAP_DESCRIPTORS)
+    if include_optional:
+        map_names.extend(VERTICAL_MAP_DESCRIPTORS_OPTIONAL)
+    for descriptor in map_names:
         for stat in MAP_SUMMARY_STATS:
-            cols.append(f"{name}_{stat}")
-    return cols
+            columns.append(f"{descriptor}_{stat}")
+
+    columns.extend(VPC_SCALAR_DESCRIPTORS)
+    columns.extend(["processing_status", "processing_message"])
+    return columns

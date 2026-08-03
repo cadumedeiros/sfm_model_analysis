@@ -37,10 +37,14 @@ def ensure_clusters(reservoir_facies):
 
     # maior cluster
     counts = np.bincount(labeled_3d.ravel())
-    counts[0] = 0
-    largest_label = counts.argmax()
+    if counts.size:
+        counts[0] = 0
+    largest_label = int(counts.argmax()) if counts.size and np.any(counts > 0) else 0
 
-    largest_mask_xyz = (labeled_3d == largest_label).transpose(2, 1, 0)
+    if largest_label > 0:
+        largest_mask_xyz = (labeled_3d == largest_label).transpose(2, 1, 0)
+    else:
+        largest_mask_xyz = np.zeros((nx, ny, nz), dtype=bool)
     largest_mask_1d = largest_mask_xyz.reshape(-1, order="F").astype(np.uint8)
     grid.cell_data["LargestCluster"] = largest_mask_1d
 

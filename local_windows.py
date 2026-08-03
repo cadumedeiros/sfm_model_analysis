@@ -1,6 +1,6 @@
 # local_windows.py
 import numpy as np
-from load_data import grid, facies, nx, ny, nz
+from load_data import grid, nx, ny, nz
 
 def compute_local_ntg(reservoir_mask: np.ndarray, window=(5, 5, 3)):
     """

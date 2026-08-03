@@ -7,7 +7,6 @@ import os
 import pandas as pd
 import json
 import re
-from scipy.ndimage import label, generate_binary_structure
 from matplotlib.colors import ListedColormap
 
 from visualize import run, get_2d_clim
@@ -17,11 +16,10 @@ from config import load_facies_colors, load_facies_reference, load_markers
 from analysis import (
     facies_distribution_array,
     reservoir_facies_distribution_array,
-    _get_cell_volumes,
-    _get_cell_z_coords,
     compute_vertical_metrics_for_grid,
     get_vertical_metric_presets,
     is_vertical_metric_normalized_name,
+    generate_detailed_metrics_df,
 )
 from wells import Well
 
@@ -466,51 +464,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Compat: open_compare_dialog (some builds call this from the menu)
     # ------------------------------------------------------------------
-    def open_compare_dialog(self):
-        """Abrir diálogo para carregar modelos adicionais (comparação)."""
-        # Prefer an existing dedicated dialog if present
-        fn = getattr(self, "open_compare_models_dialog", None)
-        if callable(fn):
-            return fn()
-
-        # Fallback: file picker + load_compare_model if available
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Selecionar Modelos", "grids", "GRDECL (*.grdecl)"
-        )
-        if not paths:
-            return
-
-        study_name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Novo Estudo",
-            "Nome do Estudo / Grupo de Calibração:",
-            text="Importação Recente",
-        )
-        if not ok or not study_name.strip():
-            study_name = "Importação Recente"
-
-        loader = getattr(self, "load_compare_model", None)
-        if not callable(loader):
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Função indisponível",
-                "load_compare_model não está disponível nesta versão do window.py.",
-            )
-            return
-
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            for path in paths:
-                loader(path, study_name=study_name)
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
 
     def __init__(self, mode="facies", z_exag=1.0, show_scalar_bar=True, reservoir_facies=None):
         super().__init__()
         self.setWindowTitle("Grid View Analysis")
 
         if reservoir_facies is None:
-            reservoir_facies = {0}
+            # Fácies 0 é tratada como célula inativa/sem deposição.
+            reservoir_facies = set()
 
         self.current_mode = mode
 
@@ -523,7 +484,12 @@ class MainWindow(QtWidgets.QMainWindow):
             initial_reservoir = {int(f) for f in reservoir_facies}
 
         self.models = {
-            "base": {"name": "Modelo Base", "facies": facies, "reservoir_facies": set(initial_reservoir)},
+            "base": {
+                "name": "Modelo Base",
+                "facies": facies,
+                "grid_shape": (nx, ny, nz),
+                "reservoir_facies": set(initial_reservoir),
+            },
             "compare": {"name": None, "facies": None, "reservoir_facies": set()},
         }
 
@@ -549,6 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "base": {"metrics": None, "perc": None, "df": None},
             "compare": {"metrics": None, "perc": None, "df": None}
         }
+        self.vpc_cache = {}
 
         self.wells = {}
         
@@ -920,6 +887,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.viz_container.addWidget(self.ranking_tab)
 
+        # Pag 4: Vertical Proportion Curves (VPC)
+        self.vpc_tab = QtWidgets.QWidget()
+        self.setup_vpc_tab(self.vpc_tab)
+        self.viz_container.addWidget(self.vpc_tab)
+
         self.central_stack.addWidget(self.viz_container)
 
         # --- PERSPECTIVA 2: COMPARAÇÃO (Mantida igual) ---
@@ -952,7 +924,147 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uncertainty_page = QtWidgets.QWidget()
         self.setup_uncertainty_tab(self.uncertainty_page)
         self.central_stack.addWidget(self.uncertainty_page)
-    
+
+    def setup_vpc_tab(self, parent_widget):
+        """Monta a página de visualização e comparação das VPCs."""
+        root = QtWidgets.QVBoxLayout(parent_widget)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        title = QtWidgets.QLabel("Vertical Proportion Curves (VPC)")
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        root.addWidget(title)
+
+        info = QtWidgets.QLabel(
+            "Proporção areal das fácies por camada. A área horizontal de cada "
+            "célula é calculada por volume/espessura estratigráfica."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #555;")
+        root.addWidget(info)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        controls_scroll = QtWidgets.QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setMinimumWidth(270)
+        controls_scroll.setMaximumWidth(390)
+        controls = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QVBoxLayout(controls)
+        controls_layout.setContentsMargins(4, 4, 4, 4)
+        controls_layout.setSpacing(8)
+
+        gb_models = QtWidgets.QGroupBox("Modelos")
+        gm = QtWidgets.QVBoxLayout(gb_models)
+        self.lst_vpc_models = QtWidgets.QListWidget()
+        self.lst_vpc_models.setMinimumHeight(125)
+        gm.addWidget(self.lst_vpc_models)
+        hm = QtWidgets.QHBoxLayout()
+        btn_models_all = QtWidgets.QPushButton("Todos")
+        btn_models_none = QtWidgets.QPushButton("Nenhum")
+        btn_models_all.clicked.connect(
+            lambda: self._set_vpc_list_check_state(self.lst_vpc_models, QtCore.Qt.Checked)
+        )
+        btn_models_none.clicked.connect(
+            lambda: self._set_vpc_list_check_state(self.lst_vpc_models, QtCore.Qt.Unchecked)
+        )
+        hm.addWidget(btn_models_all)
+        hm.addWidget(btn_models_none)
+        gm.addLayout(hm)
+        controls_layout.addWidget(gb_models)
+
+        gb_facies = QtWidgets.QGroupBox("Fácies exibidas")
+        gf = QtWidgets.QVBoxLayout(gb_facies)
+        self.lst_vpc_facies = QtWidgets.QListWidget()
+        self.lst_vpc_facies.setMinimumHeight(125)
+        gf.addWidget(self.lst_vpc_facies)
+        hf = QtWidgets.QHBoxLayout()
+        btn_facies_all = QtWidgets.QPushButton("Todas")
+        btn_facies_none = QtWidgets.QPushButton("Nenhuma")
+        btn_facies_all.clicked.connect(
+            lambda: self._set_vpc_list_check_state(self.lst_vpc_facies, QtCore.Qt.Checked)
+        )
+        btn_facies_none.clicked.connect(
+            lambda: self._set_vpc_list_check_state(self.lst_vpc_facies, QtCore.Qt.Unchecked)
+        )
+        hf.addWidget(btn_facies_all)
+        hf.addWidget(btn_facies_none)
+        gf.addLayout(hf)
+        controls_layout.addWidget(gb_facies)
+
+        gb_display = QtWidgets.QGroupBox("Comparação")
+        gd = QtWidgets.QFormLayout(gb_display)
+        self.cmb_vpc_display = QtWidgets.QComboBox()
+        self.cmb_vpc_display.addItem("Curvas por modelo", "models")
+        self.cmb_vpc_display.addItem("Mediana e envelope P10–P90", "envelope")
+        gd.addRow("Modo:", self.cmb_vpc_display)
+
+        self.cmb_vpc_reference = QtWidgets.QComboBox()
+        gd.addRow("Referência:", self.cmb_vpc_reference)
+
+        self.chk_vpc_k_top = QtWidgets.QCheckBox("Camada K=0 no topo")
+        self.chk_vpc_k_top.setChecked(True)
+        gd.addRow(self.chk_vpc_k_top)
+        controls_layout.addWidget(gb_display)
+
+        self.btn_vpc_update = QtWidgets.QPushButton("Atualizar VPC")
+        self.btn_vpc_update.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+        self.btn_vpc_update.clicked.connect(self.refresh_vpc_view)
+        controls_layout.addWidget(self.btn_vpc_update)
+
+        self.btn_vpc_export = QtWidgets.QPushButton("Exportar Tabela Mestre e VPC...")
+        self.btn_vpc_export.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
+        self.btn_vpc_export.clicked.connect(self.export_master_table_dialog)
+        controls_layout.addWidget(self.btn_vpc_export)
+
+        self.lbl_vpc_status = QtWidgets.QLabel("Selecione os modelos e clique em Atualizar VPC.")
+        self.lbl_vpc_status.setWordWrap(True)
+        self.lbl_vpc_status.setStyleSheet("color: #555;")
+        controls_layout.addWidget(self.lbl_vpc_status)
+        controls_layout.addStretch(1)
+        controls_scroll.setWidget(controls)
+        splitter.addWidget(controls_scroll)
+
+        result = QtWidgets.QWidget()
+        result_layout = QtWidgets.QVBoxLayout(result)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        result_layout.setSpacing(6)
+
+        self.vpc_canvas = None
+        self.vpc_figure = None
+        self.vpc_axes = None
+        try:
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+            from matplotlib.figure import Figure
+
+            self.vpc_figure = Figure(figsize=(8.0, 5.2), tight_layout=True)
+            self.vpc_axes = self.vpc_figure.add_subplot(111)
+            self.vpc_canvas = FigureCanvas(self.vpc_figure)
+            result_layout.addWidget(self.vpc_canvas, 4)
+        except Exception as exc:
+            fallback = QtWidgets.QLabel(f"Matplotlib indisponível para o gráfico VPC: {exc}")
+            fallback.setAlignment(QtCore.Qt.AlignCenter)
+            result_layout.addWidget(fallback, 4)
+
+        result_layout.addWidget(QtWidgets.QLabel("Distância VPC ao modelo de referência"))
+        self.tbl_vpc_distance = QtWidgets.QTableWidget()
+        self.tbl_vpc_distance.setColumnCount(3)
+        self.tbl_vpc_distance.setHorizontalHeaderLabels(["Modelo", "Referência", "RMSE VPC"])
+        self.tbl_vpc_distance.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_vpc_distance.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_vpc_distance.setMaximumHeight(180)
+        result_layout.addWidget(self.tbl_vpc_distance, 1)
+
+        splitter.addWidget(result)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, 1)
+
+        self.cmb_vpc_display.currentIndexChanged.connect(self.refresh_vpc_view)
+        self.cmb_vpc_reference.currentIndexChanged.connect(self.refresh_vpc_view)
+        self.chk_vpc_k_top.toggled.connect(self.refresh_vpc_view)
+        self.refresh_vpc_controls(preserve_selection=False)
+
     def setup_uncertainty_tab(self, parent_widget):
         """
         Página geral de Cálculo de Mapas.
@@ -2923,243 +3035,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_uncert_result_mode("column")
 
 
-    def _set_uncert_result_mode(self, scope):
-        """Escolhe qual página central deve aparecer, mantendo o painel direito visível na aba Mapas."""
-        if not hasattr(self, "uncert_result_stack"):
-            return
-        scope = str(scope or "cell").lower()
-        if scope == "model":
-            self.uncert_result_stack.setCurrentIndex(2)
-        elif scope == "column":
-            self.uncert_result_stack.setCurrentIndex(1)
-        else:
-            self.uncert_result_stack.setCurrentIndex(0)
-            try:
-                if hasattr(self, "mapcalc_right_tabs") and hasattr(self, "mapcalc_geometry_page"):
-                    self.mapcalc_right_tabs.setCurrentWidget(self.mapcalc_geometry_page)
-            except Exception:
-                pass
-        if hasattr(self, "uncert_right_panel"):
-            self.uncert_right_panel.setVisible(True)
-        if hasattr(self, "mapcalc_right_scroll"):
-            self.mapcalc_right_scroll.setVisible(True)
-
-    def _clear_uncert_summary_table(self):
-        if hasattr(self, "tbl_uncert_summary"):
-            self.tbl_uncert_summary.clear()
-            self.tbl_uncert_summary.setRowCount(0)
-            self.tbl_uncert_summary.setColumnCount(0)
-
-        if hasattr(self, "txt_uncert_summary"):
-            self.txt_uncert_summary.clear()
 
 
-    def _fill_uncert_summary_table(self, df):
-        if not hasattr(self, "tbl_uncert_summary"):
-            return
-
-        self.tbl_uncert_summary.setSortingEnabled(False)
-        self.tbl_uncert_summary.clear()
-
-        if df is None or df.empty:
-            self.tbl_uncert_summary.setRowCount(0)
-            self.tbl_uncert_summary.setColumnCount(0)
-            self.tbl_uncert_summary.setSortingEnabled(True)
-            return
-
-        self.tbl_uncert_summary.setRowCount(len(df))
-        self.tbl_uncert_summary.setColumnCount(len(df.columns))
-        self.tbl_uncert_summary.setHorizontalHeaderLabels([str(c) for c in df.columns])
-
-        for r in range(len(df)):
-            for c, col in enumerate(df.columns):
-                val = df.iloc[r, c]
-
-                if isinstance(val, (float, np.floating)):
-                    txt = f"{float(val):.6g}"
-                else:
-                    txt = str(val)
-
-                item = QtWidgets.QTableWidgetItem(txt)
-
-                if isinstance(val, (int, float, np.integer, np.floating)):
-                    item.setData(QtCore.Qt.UserRole, float(val))
-
-                self.tbl_uncert_summary.setItem(r, c, item)
-
-        self.tbl_uncert_summary.resizeColumnsToContents()
-        self.tbl_uncert_summary.horizontalHeader().setStretchLastSection(True)
-        self.tbl_uncert_summary.setSortingEnabled(True)
 
 
-    def _draw_uncertainty_2d_map(self, grid_template, array_2d, title, clim=None, cmap="jet"):
-        """
-        Desenha um mapa 2D de resultado por coluna.
-        """
-        import numpy as np
-        import pyvista as pv
-
-        if not hasattr(self, "uncert_plotter_2d"):
-            return
-
-        plotter = self.uncert_plotter_2d
-        plotter.clear()
-
-        try:
-            plotter.remove_scalar_bar()
-        except Exception:
-            pass
-
-        if grid_template is None or array_2d is None:
-            plotter.render()
-            return
-
-        dims = self._infer_grid_cell_dims(grid_template)
-        if not dims:
-            plotter.render()
-            return
-
-        nx_, ny_, nz_ = dims
-
-        arr2d = np.asarray(array_2d, dtype=float)
-
-        if arr2d.shape != (nx_, ny_):
-            try:
-                arr2d = arr2d.reshape((nx_, ny_), order="F")
-            except Exception:
-                plotter.render()
-                return
-
-        x_min, x_max, y_min, y_max, _, z_max = grid_template.bounds
-
-        xs = np.linspace(x_min, x_max, nx_ + 1)
-        ys = np.linspace(y_max, y_min, ny_ + 1)
-        xs, ys = np.meshgrid(xs, ys, indexing="ij")
-        zs = np.full_like(xs, z_max, dtype=float)
-
-        surf = pv.StructuredGrid(xs, ys, zs)
-
-        scalar_name = "mapcalc_2d"
-        surf.cell_data[scalar_name] = arr2d.ravel(order="F")
-
-        finite = arr2d[np.isfinite(arr2d)]
-
-        if clim is None:
-            if finite.size:
-                vmin = float(np.nanmin(finite))
-                vmax = float(np.nanmax(finite))
-                if vmin >= 0.0:
-                    vmin = 0.0
-                if vmax <= vmin:
-                    vmax = vmin + 1e-6
-                clim = (vmin, vmax)
-            else:
-                clim = (0.0, 1.0)
-
-        plotter.add_mesh(
-            surf,
-            scalars=scalar_name,
-            cmap=cmap or "jet",
-            show_edges=True,
-            edge_color="black",
-            line_width=0.5,
-            nan_color="white",
-            show_scalar_bar=False,
-            clim=clim,
-        )
-
-        plotter.view_xy()
-        plotter.enable_parallel_projection()
-        plotter.enable_image_style()
-        plotter.set_background("white")
-        plotter.add_axes()
-
-        plotter.show_bounds(
-            grid="front",
-            location="outer",
-            ticks="outside",
-            color="gray",
-            minor_ticks=True,
-            n_xlabels=4,
-            n_ylabels=4,
-            font_size=8,
-            fmt="%.0f",
-            xtitle="X",
-            ytitle="Y",
-        )
-
-        plotter.add_scalar_bar(
-            title=title,
-            n_labels=5,
-            fmt="%.3g",
-            title_font_size=14,
-            label_font_size=12,
-        )
-
-        try:
-            plotter.add_text(title, position="upper_left", font_size=10, color="black")
-        except Exception:
-            pass
-
-        plotter.render()
 
 
-    def _render_uncertainty_3d(self, vis_grid, scalar_name, result_map, title, clim):
-        """
-        Renderiza resultado célula a célula em 3D.
-        """
-        from visualize import run
-        import numpy as np
 
-        if vis_grid is None or result_map is None:
-            return
-
-        vis_grid.cell_data[scalar_name] = np.asarray(result_map, dtype=float)
-
-        uncert_state = {
-            "mode": "scalar",
-            "current_scalar_name": scalar_name,
-            "current_scalar_title": title,
-            "current_scalar_clim": clim,
-            "current_scalar_cmap": "jet",
-            "z_exag": float(self.state.get("z_exag", 1.0)),
-            "show_scalar_bar": True,
-        }
-
-        self.uncert_plotter.clear()
-
-        _, final_state = run(
-            mode="scalar",
-            z_exag=uncert_state["z_exag"],
-            show_scalar_bar=True,
-            external_plotter=self.uncert_plotter,
-            external_state=uncert_state,
-            target_grid=vis_grid,
-            target_facies=None,
-        )
-
-        self.uncert_view_state = final_state
-
-        try:
-            if hasattr(self.uncert_plotter, "scalar_bars"):
-                for k in list(self.uncert_plotter.scalar_bars.keys()):
-                    self.uncert_plotter.remove_scalar_bar(k)
-        except Exception:
-            pass
-
-        mapper = final_state.get("main_actor").mapper if final_state.get("main_actor") else None
-
-        if mapper:
-            mapper.SetScalarRange(clim)
-            self.uncert_plotter.add_scalar_bar(
-                title=title,
-                mapper=mapper,
-                fmt="%.3g",
-                title_font_size=14,
-                label_font_size=12,
-            )
-
-        self.uncert_plotter.reset_camera()
 
     def _get_mapcalc_model_grid_facies(self, model_key):
         """
@@ -3381,12 +3263,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_mapcalc_category_ui()
 
 
-    def _refresh_uncert_property_combo(self):
-        """
-        Wrapper para compatibilidade com show_uncertainty_view().
-        Agora a página é Cálculo de Mapas.
-        """
-        self._refresh_mapcalc_property_combo()
 
     def run_map_calculation(self):
         """Executa o cálculo conforme o modo selecionado no Ribbon de Mapas."""
@@ -3834,7 +3710,8 @@ class MainWindow(QtWidgets.QMainWindow):
             vmax = 1.0
             clim = (0.0, 1.0)
 
-        full_title = f"{op_title}: {scalar_name} | {model_name}"
+        label = f"{op_title}: {scalar_name}"
+        full_title = f"{label} | {model_name}"
 
         self._set_uncert_result_mode("column")
         self._draw_uncertainty_2d_map(
@@ -5625,6 +5502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ico2d = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
         icomet = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
         icorank = self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp)
+        icovpc = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
         ico_calc = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
 
         self.act_view_3d = QtWidgets.QAction(ico3d, "3D", self)
@@ -5639,6 +5517,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_view_ranking = QtWidgets.QAction(icorank, "Ranking", self)
         self.act_view_ranking.setCheckable(True)
 
+        self.act_view_vpc = QtWidgets.QAction(icovpc, "VPC", self)
+        self.act_view_vpc.setCheckable(True)
+
         # Mantive o nome interno act_view_uncert para não quebrar o resto do código,
         # mas visualmente agora ele representa "Cálculo de Mapas".
         self.act_view_uncert = QtWidgets.QAction(ico_calc, "Cálculo\nde Mapas", self)
@@ -5650,6 +5531,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grp_views.addAction(self.act_view_2d)
         grp_views.addAction(self.act_view_metrics)
         grp_views.addAction(self.act_view_ranking)
+        grp_views.addAction(self.act_view_vpc)
         grp_views.addAction(self.act_view_uncert)
         self.act_view_3d.setChecked(True)
 
@@ -5657,6 +5539,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_view_2d.triggered.connect(self.show_map2d_view)
         self.act_view_metrics.triggered.connect(self.show_metrics_view)
         self.act_view_ranking.triggered.connect(self.show_ranking_view)
+        self.act_view_vpc.triggered.connect(self.show_vpc_view)
         self.act_view_uncert.triggered.connect(self.show_uncertainty_view)
 
         # =========================================================
@@ -5727,6 +5610,7 @@ class MainWindow(QtWidgets.QMainWindow):
         g_nav_row.addWidget(mk_tbtn(self.act_view_3d))
         g_nav_row.addWidget(mk_tbtn(self.act_view_2d))
         g_nav_row.addWidget(mk_tbtn(self.act_view_metrics))
+        g_nav_row.addWidget(mk_tbtn(self.act_view_vpc))
         # Se quiser mostrar ranking depois, descomente:
         # g_nav_row.addWidget(mk_tbtn(self.act_view_ranking))
 
@@ -5996,6 +5880,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         g_rep_row.addWidget(btn_rep_open)
         g_rep_row.addWidget(btn_rep_selected)
+
+        btn_export_master = make_tool_btn(
+            "Tabela Mestre\ne VPC",
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
+        btn_export_master.setToolTip("Exporta descritores, VPC longa e log de processamento para Excel.")
+        btn_export_master.clicked.connect(self.export_master_table_dialog)
+        g_rep_row.addWidget(btn_export_master)
 
         g_rep_out, g_rep_out_row = make_group("Saída")
         btn_snap_rep = make_tool_btn(
@@ -6867,6 +6759,600 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_ranking_view_content()
         self._sync_context_docks_visibility()
 
+    def _set_vpc_list_check_state(self, list_widget, state):
+        if list_widget is None:
+            return
+        list_widget.blockSignals(True)
+        try:
+            for index in range(list_widget.count()):
+                list_widget.item(index).setCheckState(state)
+        finally:
+            list_widget.blockSignals(False)
+
+    @staticmethod
+    def _checked_vpc_list_values(list_widget):
+        values = []
+        if list_widget is None:
+            return values
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            if item.checkState() == QtCore.Qt.Checked:
+                values.append(item.data(QtCore.Qt.UserRole))
+        return values
+
+    def _available_vpc_models(self):
+        available = []
+        for model_key, model_data in (getattr(self, "models", {}) or {}).items():
+            if not isinstance(model_data, dict) or model_data.get("facies") is None:
+                continue
+            name = model_data.get("name") or str(model_key)
+            available.append((str(model_key), str(name)))
+        available.sort(key=lambda item: (item[0] != "base", item[1].lower()))
+        return available
+
+    def refresh_vpc_controls(self, preserve_selection=True):
+        """Sincroniza as listas VPC com os modelos atualmente carregados."""
+        if not hasattr(self, "lst_vpc_models"):
+            return
+
+        old_models = set(self._checked_vpc_list_values(self.lst_vpc_models)) if preserve_selection else set()
+        old_facies = set(self._checked_vpc_list_values(self.lst_vpc_facies)) if preserve_selection else set()
+        old_reference = self.cmb_vpc_reference.currentData() if preserve_selection else "base"
+        available = self._available_vpc_models()
+
+        if not old_models:
+            active_key = str(self.state.get("active_model_key", "base"))
+            old_models = {"base", active_key}
+
+        self.lst_vpc_models.blockSignals(True)
+        self.lst_vpc_models.clear()
+        for model_key, model_name in available:
+            item = QtWidgets.QListWidgetItem(model_name)
+            item.setData(QtCore.Qt.UserRole, model_key)
+            item.setToolTip(model_key)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Checked if model_key in old_models else QtCore.Qt.Unchecked)
+            self.lst_vpc_models.addItem(item)
+        self.lst_vpc_models.blockSignals(False)
+
+        facies_union = set()
+        for model_key, _ in available:
+            _, facies_values = self._get_model_payload(model_key)
+            if facies_values is None:
+                continue
+            facies_union.update(int(value) for value in np.unique(np.asarray(facies_values, dtype=int)))
+        facies_union.discard(0)
+
+        self.lst_vpc_facies.blockSignals(True)
+        self.lst_vpc_facies.clear()
+        for facies_id in sorted(facies_union):
+            item = QtWidgets.QListWidgetItem(f"Fácies {facies_id}")
+            item.setData(QtCore.Qt.UserRole, int(facies_id))
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            checked = not preserve_selection or not old_facies or facies_id in old_facies
+            item.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+            rgba = (getattr(self, "facies_colors", {}) or {}).get(int(facies_id))
+            if rgba is not None and len(rgba) >= 3:
+                color = QtGui.QColor(
+                    int(float(rgba[0]) * 255),
+                    int(float(rgba[1]) * 255),
+                    int(float(rgba[2]) * 255),
+                )
+                pixmap = QtGui.QPixmap(12, 12)
+                pixmap.fill(color)
+                item.setIcon(QtGui.QIcon(pixmap))
+            self.lst_vpc_facies.addItem(item)
+        self.lst_vpc_facies.blockSignals(False)
+
+        self.cmb_vpc_reference.blockSignals(True)
+        self.cmb_vpc_reference.clear()
+        ref_index = 0
+        for index, (model_key, model_name) in enumerate(available):
+            self.cmb_vpc_reference.addItem(model_name, model_key)
+            if str(model_key) == str(old_reference):
+                ref_index = index
+        if self.cmb_vpc_reference.count():
+            self.cmb_vpc_reference.setCurrentIndex(ref_index)
+        self.cmb_vpc_reference.blockSignals(False)
+
+    def _compute_vpc_for_model(self, model_key):
+        """Calcula e cacheia a VPC de um modelo carregado."""
+        from analysis import compute_vpc
+        from load_data import nx as grid_nx, ny as grid_ny, nz as grid_nz
+
+        model_key = str(model_key)
+        target_grid, facies_source = self._get_model_payload(model_key)
+        if target_grid is None or facies_source is None:
+            raise ValueError(f"Modelo '{model_key}' sem grid ou fácies.")
+
+        facies_values = np.asarray(facies_source, dtype=int).ravel()
+        model_data = self.models.get(model_key, {})
+        grid_shape = model_data.get("grid_shape") or (grid_nx, grid_ny, grid_nz)
+        token = (id(target_grid), id(facies_source), facies_values.size, tuple(grid_shape))
+        cached = self.vpc_cache.get(model_key)
+        if cached and cached.get("token") == token:
+            return cached["data"]
+
+        model_name = model_data.get("name") or model_key
+        vpc = compute_vpc(
+            facies_values,
+            target_grid=target_grid,
+            grid_shape=grid_shape,
+            inactive_facies=(0,),
+            model_id=model_key,
+            model_name=model_name,
+        )
+        self.vpc_cache[model_key] = {"token": token, "data": vpc}
+        return vpc
+
+    def _vpc_color(self, facies_id, fallback_index=0):
+        rgba = (getattr(self, "facies_colors", {}) or {}).get(int(facies_id))
+        if rgba is not None and len(rgba) >= 3:
+            return tuple(float(value) for value in rgba[:3])
+        return f"C{int(fallback_index) % 10}"
+
+    @staticmethod
+    def _vpc_layer_series(vpc_df, facies_id, layer_ids):
+        """Alinha uma fácies às camadas; ausência em camada ativa vira zero."""
+        values = []
+        meta = vpc_df.drop_duplicates("layer_k").set_index("layer_k")
+        subset = vpc_df.loc[vpc_df["facies"].astype(int) == int(facies_id)]
+        series = subset.set_index("layer_k")["area_proportion"] if not subset.empty else pd.Series(dtype=float)
+        for layer_k in layer_ids:
+            if layer_k not in meta.index or float(meta.at[layer_k, "active_area"]) <= 0.0:
+                values.append(np.nan)
+            elif layer_k in series.index:
+                values.append(float(series.at[layer_k]))
+            else:
+                values.append(0.0)
+        return np.asarray(values, dtype=float)
+
+    def refresh_vpc_view(self, *args):
+        """Recalcula o gráfico e a tabela de distâncias da página VPC."""
+        if not hasattr(self, "lst_vpc_models"):
+            return
+        model_keys = [str(value) for value in self._checked_vpc_list_values(self.lst_vpc_models)]
+        facies_ids = [int(value) for value in self._checked_vpc_list_values(self.lst_vpc_facies)]
+
+        if not model_keys or not facies_ids:
+            if hasattr(self, "lbl_vpc_status"):
+                self.lbl_vpc_status.setText("Marque pelo menos um modelo e uma fácies.")
+            if self.vpc_axes is not None:
+                self.vpc_axes.clear()
+                self.vpc_axes.text(0.5, 0.5, "Seleção VPC incompleta", ha="center", va="center")
+                self.vpc_canvas.draw_idle()
+            self.tbl_vpc_distance.setRowCount(0)
+            return
+
+        frames = {}
+        errors = []
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for model_key in model_keys:
+                try:
+                    frames[model_key] = self._compute_vpc_for_model(model_key)
+                except Exception as exc:
+                    errors.append(f"{model_key}: {exc}")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not frames:
+            self.lbl_vpc_status.setText("Não foi possível calcular VPC: " + "; ".join(errors))
+            self.tbl_vpc_distance.setRowCount(0)
+            return
+
+        if self.vpc_axes is not None:
+            ax = self.vpc_axes
+            ax.clear()
+            display_mode = self.cmb_vpc_display.currentData() or "models"
+            layer_ids = sorted({int(value) for frame in frames.values() for value in frame["layer_k"].unique()})
+
+            if display_mode == "envelope":
+                max_layer = max(layer_ids) if layer_ids else 0
+                y_values = np.asarray(
+                    [layer / max_layer if max_layer > 0 else 0.0 for layer in layer_ids],
+                    dtype=float,
+                )
+                for facies_index, facies_id in enumerate(facies_ids):
+                    matrix = np.vstack([
+                        self._vpc_layer_series(frame, facies_id, layer_ids)
+                        for frame in frames.values()
+                    ])
+                    with np.errstate(invalid="ignore"):
+                        p10 = np.nanpercentile(matrix, 10, axis=0)
+                        p50 = np.nanpercentile(matrix, 50, axis=0)
+                        p90 = np.nanpercentile(matrix, 90, axis=0)
+                    color = self._vpc_color(facies_id, facies_index)
+                    ax.fill_betweenx(y_values, p10, p90, color=color, alpha=0.20)
+                    ax.plot(p50, y_values, color=color, linewidth=2.0, label=f"Fácies {facies_id}")
+                title = f"VPC do ensemble — mediana e P10–P90 ({len(frames)} modelos)"
+            else:
+                line_styles = ("-", "--", "-.", ":")
+                for model_index, (model_key, frame) in enumerate(frames.items()):
+                    model_name = self.models.get(model_key, {}).get("name") or model_key
+                    layer_ids_model = sorted(int(value) for value in frame["layer_k"].unique())
+                    meta = frame.drop_duplicates("layer_k").set_index("layer_k")
+                    y_values = np.asarray([
+                        float(meta.at[layer, "stratigraphic_coordinate"])
+                        for layer in layer_ids_model
+                    ])
+                    for facies_index, facies_id in enumerate(facies_ids):
+                        x_values = self._vpc_layer_series(frame, facies_id, layer_ids_model)
+                        label = f"Fácies {facies_id}" if len(frames) == 1 else f"{model_name} — F{facies_id}"
+                        ax.plot(
+                            x_values,
+                            y_values,
+                            color=self._vpc_color(facies_id, facies_index),
+                            linestyle=line_styles[model_index % len(line_styles)],
+                            linewidth=1.8,
+                            alpha=0.90,
+                            label=label,
+                        )
+                title = "VPC por modelo"
+
+            ax.set_xlim(0.0, 1.0)
+            ax.set_xlabel("Proporção areal da fácies")
+            ax.set_ylabel("Coordenada estratigráfica normalizada")
+            ax.set_title(title)
+            ax.grid(True, alpha=0.25)
+            if self.chk_vpc_k_top.isChecked():
+                ax.invert_yaxis()
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc="best", fontsize=8, ncol=2 if len(handles) > 5 else 1)
+            self.vpc_canvas.draw_idle()
+
+        from analysis import compute_vpc_distance
+
+        reference_key = str(self.cmb_vpc_reference.currentData() or "base")
+        reference = frames.get(reference_key)
+        if reference is None:
+            try:
+                reference = self._compute_vpc_for_model(reference_key)
+            except Exception as exc:
+                errors.append(f"referência {reference_key}: {exc}")
+
+        self.tbl_vpc_distance.setRowCount(len(frames))
+        reference_name = self.models.get(reference_key, {}).get("name") or reference_key
+        for row_index, (model_key, frame) in enumerate(frames.items()):
+            model_name = self.models.get(model_key, {}).get("name") or model_key
+            distance = compute_vpc_distance(frame, reference) if reference is not None else np.nan
+            self.tbl_vpc_distance.setItem(row_index, 0, QtWidgets.QTableWidgetItem(str(model_name)))
+            self.tbl_vpc_distance.setItem(row_index, 1, QtWidgets.QTableWidgetItem(str(reference_name)))
+            distance_text = f"{distance:.6f}" if np.isfinite(distance) else "-"
+            self.tbl_vpc_distance.setItem(row_index, 2, QtWidgets.QTableWidgetItem(distance_text))
+        self.tbl_vpc_distance.resizeColumnsToContents()
+
+        status = f"{len(frames)} modelo(s), {len(facies_ids)} fácies."
+        if errors:
+            status += " Avisos: " + "; ".join(errors)
+        self.lbl_vpc_status.setText(status)
+
+    def show_vpc_view(self):
+        """Abre a página VPC na perspectiva de visualização."""
+        if self.central_stack.currentIndex() != 0:
+            self.switch_perspective("visualization")
+        self.viz_container.setCurrentIndex(4)
+        if hasattr(self, "act_view_vpc"):
+            self.act_view_vpc.setChecked(True)
+        self.refresh_vpc_controls(preserve_selection=True)
+        self.refresh_vpc_view()
+        self._sync_context_docks_visibility()
+
+    @staticmethod
+    def _simulation_id_for_model(model_key, model_data):
+        """Recupera IDs como Sim549 a partir dos metadados ou do arquivo."""
+        if str(model_key).lower() == "base":
+            return "base"
+
+        candidates = [
+            model_data.get("simulation_id"),
+            model_data.get("name"),
+            model_data.get("output_path"),
+            model_key,
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = os.path.splitext(os.path.basename(str(candidate).strip()))[0]
+            match = re.search(
+                r"(?i)(?:^|[^a-z0-9])sim(?:ulation)?[\s_-]*(\d+)(?:$|[^0-9])",
+                text,
+            )
+            if match:
+                return f"Sim{int(match.group(1))}"
+        explicit = model_data.get("simulation_id")
+        return str(explicit) if explicit not in (None, "") else str(model_key)
+
+    def _master_table_records_from_models(self, model_keys, reference_key):
+        """Converte modelos carregados em registros aceitos por master_table.py."""
+        from load_data import nx as grid_nx, ny as grid_ny, nz as grid_nz
+
+        records = []
+        for model_key in model_keys:
+            target_grid, facies_values = self._get_model_payload(model_key)
+            if target_grid is None or facies_values is None:
+                continue
+            model_data = self.models.get(model_key, {})
+            records.append({
+                "simulation_id": self._simulation_id_for_model(model_key, model_data),
+                "simulation_name": model_data.get("name") or str(model_key),
+                "study": model_data.get("study"),
+                "is_base": str(model_key) == str(reference_key),
+                "output_path": model_data.get("output_path"),
+                "grid": target_grid,
+                "facies": np.asarray(facies_values, dtype=int).ravel(),
+                "grid_shape": model_data.get("grid_shape") or (grid_nx, grid_ny, grid_nz),
+                "parameters": dict(model_data.get("parameters") or {}),
+                "of_value": model_data.get("of_value", np.nan),
+            })
+        return records
+
+    def export_master_table_dialog(self):
+        """Configura e exporta tabela mestre, VPC longa e log de processamento."""
+        available = self._available_vpc_models()
+        if not available:
+            QtWidgets.QMessageBox.warning(self, "Tabela Mestre", "Não há modelos carregados para exportar.")
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Exportar Tabela Mestre e VPC")
+        dialog.resize(600, 800)
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        info = QtWidgets.QLabel(
+            "Selecione os modelos, a referência VPC e as fácies-alvo usadas nos "
+            "descritores de espessura, conectividade e fragmentação."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        grouping_box = QtWidgets.QGroupBox("Integração com o agrupamento")
+        grouping_layout = QtWidgets.QVBoxLayout(grouping_box)
+        grouping_help = QtWidgets.QLabel(
+            "Selecione o CSV/Excel que contém Simulation_ID e Family. "
+            "As famílias serão adicionadas à tabela mestre e à VPC longa."
+        )
+        grouping_help.setWordWrap(True)
+        grouping_layout.addWidget(grouping_help)
+        grouping_row = QtWidgets.QHBoxLayout()
+        grouping_path_edit = QtWidgets.QLineEdit()
+        grouping_path_edit.setReadOnly(True)
+        grouping_path_edit.setPlaceholderText("Nenhuma tabela de agrupamento selecionada")
+        previous_grouping = getattr(self, "last_grouping_table_path", "") or ""
+        if previous_grouping and os.path.isfile(previous_grouping):
+            grouping_path_edit.setText(previous_grouping)
+
+        btn_grouping_browse = QtWidgets.QPushButton("Selecionar...")
+        btn_grouping_clear = QtWidgets.QPushButton("Limpar")
+
+        def choose_grouping_table():
+            start_dir = (
+                os.path.dirname(grouping_path_edit.text())
+                if grouping_path_edit.text()
+                else getattr(self, "last_master_table_directory", "") or ""
+            )
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dialog,
+                "Selecionar tabela de agrupamento",
+                start_dir,
+                "Tabelas de agrupamento (*.csv *.xlsx *.xls *.xlsm);;"
+                "CSV (*.csv);;Excel (*.xlsx *.xls *.xlsm)",
+            )
+            if path:
+                grouping_path_edit.setText(path)
+                self.last_grouping_table_path = path
+
+        btn_grouping_browse.clicked.connect(choose_grouping_table)
+        btn_grouping_clear.clicked.connect(grouping_path_edit.clear)
+        grouping_row.addWidget(grouping_path_edit, 1)
+        grouping_row.addWidget(btn_grouping_browse)
+        grouping_row.addWidget(btn_grouping_clear)
+        grouping_layout.addLayout(grouping_row)
+        layout.addWidget(grouping_box)
+
+        layout.addWidget(QtWidgets.QLabel("Modelos incluídos:"))
+        model_list = QtWidgets.QListWidget()
+        model_list.setMinimumHeight(130)
+        for model_key, model_name in available:
+            item = QtWidgets.QListWidgetItem(model_name)
+            item.setData(QtCore.Qt.UserRole, model_key)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Checked)
+            model_list.addItem(item)
+        layout.addWidget(model_list)
+
+        model_buttons = QtWidgets.QHBoxLayout()
+        btn_all_models = QtWidgets.QPushButton("Todos")
+        btn_no_models = QtWidgets.QPushButton("Nenhum")
+        btn_all_models.clicked.connect(lambda: self._set_vpc_list_check_state(model_list, QtCore.Qt.Checked))
+        btn_no_models.clicked.connect(lambda: self._set_vpc_list_check_state(model_list, QtCore.Qt.Unchecked))
+        model_buttons.addWidget(btn_all_models)
+        model_buttons.addWidget(btn_no_models)
+        model_buttons.addStretch(1)
+        layout.addLayout(model_buttons)
+
+        reference_combo = QtWidgets.QComboBox()
+        for model_key, model_name in available:
+            reference_combo.addItem(model_name, model_key)
+        layout.addWidget(QtWidgets.QLabel("Modelo de referência para a distância VPC:"))
+        layout.addWidget(reference_combo)
+
+        facies_union = set()
+        for model_key, _ in available:
+            _, facies_values = self._get_model_payload(model_key)
+            if facies_values is not None:
+                facies_union.update(int(value) for value in np.unique(np.asarray(facies_values, dtype=int)))
+        facies_union.discard(0)
+        selected_target = set(self.state.get("reservoir_facies_raw", set()) or self.state.get("reservoir_facies", set()) or set())
+
+        layout.addWidget(QtWidgets.QLabel("Fácies-alvo dos descritores:"))
+        facies_list = QtWidgets.QListWidget()
+        facies_list.setMinimumHeight(130)
+        for facies_id in sorted(facies_union):
+            item = QtWidgets.QListWidgetItem(f"Fácies {facies_id}")
+            item.setData(QtCore.Qt.UserRole, int(facies_id))
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Checked if facies_id in selected_target else QtCore.Qt.Unchecked)
+            facies_list.addItem(item)
+        layout.addWidget(facies_list)
+
+        facies_buttons = QtWidgets.QHBoxLayout()
+        btn_all_facies = QtWidgets.QPushButton("Todas")
+        btn_no_facies = QtWidgets.QPushButton("Nenhuma")
+        btn_all_facies.clicked.connect(lambda: self._set_vpc_list_check_state(facies_list, QtCore.Qt.Checked))
+        btn_no_facies.clicked.connect(lambda: self._set_vpc_list_check_state(facies_list, QtCore.Qt.Unchecked))
+        facies_buttons.addWidget(btn_all_facies)
+        facies_buttons.addWidget(btn_no_facies)
+        facies_buttons.addStretch(1)
+        layout.addLayout(facies_buttons)
+
+        options = QtWidgets.QGroupBox("Opções metodológicas")
+        form = QtWidgets.QFormLayout(options)
+        connectivity_combo = QtWidgets.QComboBox()
+        connectivity_combo.addItem("6 vizinhos — faces", 1)
+        connectivity_combo.addItem("18 vizinhos — faces e arestas", 2)
+        connectivity_combo.addItem("26 vizinhos — faces, arestas e vértices", 3)
+        form.addRow("Conectividade:", connectivity_combo)
+
+        min_volume_spin = QtWidgets.QDoubleSpinBox()
+        min_volume_spin.setRange(0.0, 1.0e18)
+        min_volume_spin.setDecimals(3)
+        min_volume_spin.setValue(0.0)
+        min_volume_spin.setSuffix(" m³")
+        form.addRow("Volume mínimo do corpo:", min_volume_spin)
+
+        optional_maps_check = QtWidgets.QCheckBox("Incluir mapas verticais opcionais")
+        form.addRow(optional_maps_check)
+        filtered_check = QtWidgets.QCheckBox("Aplicar filtro de laminações finas")
+        form.addRow(filtered_check)
+        thin_spin = QtWidgets.QDoubleSpinBox()
+        thin_spin.setRange(0.0, 100.0)
+        thin_spin.setDecimals(2)
+        thin_spin.setValue(0.30)
+        thin_spin.setSuffix(" m")
+        thin_spin.setEnabled(False)
+        filtered_check.toggled.connect(thin_spin.setEnabled)
+        form.addRow("Limiar de laminação:", thin_spin)
+        layout.addWidget(options)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.button(QtWidgets.QDialogButtonBox.Save).setText("Escolher arquivo...")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        selected_models = [str(value) for value in self._checked_vpc_list_values(model_list)]
+        target_facies = {int(value) for value in self._checked_vpc_list_values(facies_list)}
+        reference_key = str(reference_combo.currentData())
+        grouping_table_path = grouping_path_edit.text().strip() or None
+        if not selected_models:
+            QtWidgets.QMessageBox.warning(self, "Tabela Mestre", "Selecione pelo menos um modelo.")
+            return
+        if not target_facies:
+            QtWidgets.QMessageBox.warning(self, "Tabela Mestre", "Selecione pelo menos uma fácies-alvo.")
+            return
+        if reference_key not in selected_models:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Tabela Mestre",
+                "O modelo de referência também precisa estar marcado para exportação.",
+            )
+            return
+
+        initial_dir = getattr(self, "last_master_table_directory", "") or ""
+        output_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Salvar Tabela Mestre e VPC",
+            os.path.join(initial_dir, "tabela_mestre_descritores.xlsx") if initial_dir else "tabela_mestre_descritores.xlsx",
+            "Excel (*.xlsx)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".xlsx"):
+            output_path += ".xlsx"
+        self.last_master_table_directory = os.path.dirname(output_path)
+
+        records = self._master_table_records_from_models(selected_models, reference_key)
+        reference_simulation_id = next(
+            (
+                record["simulation_id"]
+                for record in records
+                if bool(record.get("is_base"))
+            ),
+            None,
+        )
+        progress = QtWidgets.QProgressDialog("Preparando extração...", "Cancelar", 0, len(records), self)
+        progress.setWindowTitle("Tabela Mestre e VPC")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        def on_progress(done, total, simulation_id, status):
+            progress.setMaximum(total)
+            progress.setValue(done)
+            action = "Processando" if status == "processing" else "Concluído"
+            progress.setLabelText(f"{action}: {simulation_id} ({done}/{total})")
+            QtWidgets.QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        from master_table import export_master_tables, MasterTableExtractionCancelled
+        try:
+            saved_path, master_df, vpc_df, log_df = export_master_tables(
+                output_path,
+                records,
+                target_facies,
+                base_model_id=reference_simulation_id,
+                inactive_facies=(0,),
+                min_body_volume=float(min_volume_spin.value()),
+                connectivity=int(connectivity_combo.currentData()),
+                include_optional_maps=optional_maps_check.isChecked(),
+                use_filtered_vertical=filtered_check.isChecked(),
+                thin_lamination_threshold=float(thin_spin.value()),
+                grouping_table=grouping_table_path,
+                progress_callback=on_progress,
+            )
+        except MasterTableExtractionCancelled:
+            progress.close()
+            self.statusBar().showMessage("Exportação da tabela mestre cancelada.", 5000)
+            return
+        except Exception as exc:
+            progress.close()
+            QtWidgets.QMessageBox.critical(self, "Erro na exportação", str(exc))
+            return
+
+        progress.setValue(len(records))
+        progress.close()
+        n_errors = int((log_df["status"] == "error").sum()) if not log_df.empty else 0
+        message = (
+            f"Arquivo salvo em:\n{saved_path}\n\n"
+            f"Modelos: {len(master_df)}\nLinhas VPC: {len(vpc_df)}"
+        )
+        grouping_summary = master_df.attrs.get("grouping_summary", {})
+        if grouping_table_path:
+            matched = int(grouping_summary.get("matched_models", 0))
+            unmatched = int(grouping_summary.get("unmatched_master_models", len(master_df)))
+            unmatched_nonbase = int(
+                grouping_summary.get("unmatched_nonbase_models", unmatched)
+            )
+            message += (
+                f"\nModelos associados ao agrupamento: {matched}"
+                f"\nModelos sem associação: {unmatched}"
+            )
+            if unmatched_nonbase:
+                n_errors += unmatched_nonbase
+        if n_errors:
+            message += f"\nModelos com erro: {n_errors}. Consulte a aba Processing_Log."
+            QtWidgets.QMessageBox.warning(self, "Exportação concluída com avisos", message)
+        else:
+            QtWidgets.QMessageBox.information(self, "Exportação concluída", message)
+        self.statusBar().showMessage(f"Tabela mestre salva: {saved_path}", 8000)
+
     def _wrap_expanding(self, widget):
             """Helper: força o widget a ocupar toda a área do dock."""
             container = QtWidgets.QWidget()
@@ -7293,6 +7779,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.update_2d_map()
                 elif idx == 2 and hasattr(self, "update_metrics_view_content"):
                     self.update_metrics_view_content(model_key_norm)
+                elif idx == 4 and hasattr(self, "refresh_vpc_view"):
+                    self.refresh_vpc_controls(preserve_selection=True)
+                    self.refresh_vpc_view()
         except Exception:
             pass
 
@@ -7326,6 +7815,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 if idx == 2:
                     self.update_metrics_view_content(model_key)
+                elif idx == 4:
+                    self.refresh_vpc_controls(preserve_selection=True)
+                    self.refresh_vpc_view()
                 else:
                     self.switch_main_view_to_model(model_key)
                     if idx == 1:
@@ -7374,12 +7866,12 @@ class MainWindow(QtWidgets.QMainWindow):
         
         lines = [
             f"=== {self.models[model_key]['name']} ===",
-            f"NTG: {m['ntg']:.3f}",
-            f"Células Res.: {m['res_cells']}",
-            f"Conectividade: {m['connected_fraction']:.3f}",
-            f"Clusters: {m['n_clusters']}",
-            f"Vol. Grid: {m.get('grid_volume',0):.2e}",
-            f"Vol. Res.: {m.get('reservoir_volume',0):.2e}"
+            f"Proporção volumétrica: {m['target_volume_fraction']:.3f}",
+            f"Células-alvo: {m['target_cells']}",
+            f"Fração conectada (volume): {m['connected_volume_fraction']:.3f}",
+            f"Corpos conectados: {m['n_bodies']}",
+            f"Volume ativo: {m.get('active_grid_volume',0):.2e}",
+            f"Volume-alvo: {m.get('target_volume',0):.2e}"
         ]
         
         if p:
@@ -7408,14 +7900,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if metrics:
                 lines = [
                     f"=== {self.models[model_key]['name']} ===",
-                    f"Fácies Selecionadas (Reservatório): {res_str}", # <--- ADICIONADO
-                    f"NTG Global: {metrics['ntg']:.3f}",
-                    f"Células Reservatório: {metrics['res_cells']}",
-                    f"Fração Conectada: {metrics['connected_fraction']:.3f}",
-                    f"Número de Clusters: {metrics['n_clusters']}",
-                    f"Maior Cluster: {metrics['largest_size']}",
-                    f"Volume Grid: {metrics.get('grid_volume',0):.2e} m3",
-                    f"Volume Reservatório: {metrics.get('reservoir_volume',0):.2e} m3",
+                    f"Fácies-alvo selecionadas: {res_str}",
+                    f"Proporção volumétrica global: {metrics['target_volume_fraction']:.3f}",
+                    f"Células-alvo: {metrics['target_cells']}",
+                    f"Fração conectada (volume): {metrics['connected_volume_fraction']:.3f}",
+                    f"Número de corpos conectados: {metrics['n_bodies']}",
+                    f"Maior corpo: {metrics['largest_body_cells']} células",
+                    f"Volume ativo: {metrics.get('active_grid_volume',0):.2e} m3",
+                    f"Volume-alvo: {metrics.get('target_volume',0):.2e} m3",
                     "",
                     "--- Análise de Percolação ---"
                 ]
@@ -7461,24 +7953,39 @@ class MainWindow(QtWidgets.QMainWindow):
             self.facies_table.setRowCount(0)
             return
 
+        # Os aliases abaixo permanecem no DataFrame para compatibilidade com
+        # código antigo, mas não devem duplicar informação na interface.
+        display_df = df.drop(
+            columns=["fraction", "connected_fraction", "thickness_largest_cluster"],
+            errors="ignore",
+        )
+
         pretty = {
-            "facies": "Fácies", "cells": "Células", "fraction": "Fração",
-            "n_clusters": "Nº Clusters", "largest_label": "Maior Cluster ID",
-            "largest_size": "Tam. Maior Cluster", "connected_fraction": "Fração Conect.",
-            "volume_total": "Vol Total", "volume_largest_cluster": "Vol Maior Cluster",
-            "thickness_largest_cluster": "Espessura Maior",
+            "facies": "Fácies", "cells": "Células",
+            "cell_fraction": "Fração de Células", "volume_fraction": "Fração Volumétrica",
+            "n_clusters": "Nº de Corpos", "largest_label": "Maior Corpo ID",
+            "largest_size": "Células no Maior Corpo",
+            "connected_cell_fraction": "Fração Conect. (células)",
+            "connected_volume_fraction": "Fração Conect. (volume)",
+            "effective_body_count": "Nº Efetivo de Corpos",
+            "volume_total": "Vol Total", "volume_largest_cluster": "Vol Maior Corpo",
+            "largest_body_vertical_extent": "Extensão Vertical Maior Corpo",
             "Perc_X": "Perc X", "Perc_Y": "Perc Y", "Perc_Z": "Perc Z"
         }
 
-        self.facies_table.setRowCount(len(df))
-        self.facies_table.setColumnCount(len(df.columns))
-        self.facies_table.setHorizontalHeaderLabels([pretty.get(c, c) for c in df.columns])
+        self.facies_table.setRowCount(len(display_df))
+        self.facies_table.setColumnCount(len(display_df.columns))
+        self.facies_table.setHorizontalHeaderLabels([pretty.get(c, c) for c in display_df.columns])
 
-        for i in range(len(df)):
-            for j, col in enumerate(df.columns):
-                val = df.iloc[i][col]
+        for i in range(len(display_df)):
+            for j, col in enumerate(display_df.columns):
+                val = display_df.iloc[i][col]
                 if isinstance(val, (float, np.floating)):
-                    if col in ["fraction", "connected_fraction", "Perc_X", "Perc_Y", "Perc_Z"]:
+                    if col in [
+                        "fraction", "cell_fraction", "volume_fraction",
+                        "connected_fraction", "connected_cell_fraction",
+                        "connected_volume_fraction", "Perc_X", "Perc_Y", "Perc_Z"
+                    ]:
                         txt = f"{val:.3f}"
                     elif "volume" in col:
                         txt = f"{val:.2e}"
@@ -7666,8 +8173,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # Guarda modelo
         self.models[model_id] = {
             "name": model_name,
+            "simulation_id": self._simulation_id_for_model(
+                model_id,
+                {"name": model_name, "output_path": grdecl_path},
+            ),
             "facies": fac_compare,
             "grid": grid_compare,
+            "grid_shape": (nx, ny, nz),
+            "output_path": os.path.abspath(grdecl_path),
             "reservoir_facies": set(rf),
             "view_mode": self.state.get("mode", "facies"),
             "study": study_name # Guarda metadado do study
@@ -7678,7 +8191,7 @@ class MainWindow(QtWidgets.QMainWindow):
             from analysis import facies_distribution_array, compute_global_metrics_for_array, reservoir_facies_distribution_array
             stats, _ = facies_distribution_array(fac_compare, target_grid=grid_compare)
             cm, cp = compute_global_metrics_for_array(fac_compare, rf, target_grid=grid_compare)
-            df_detail = self.generate_detailed_metrics_df(fac_compare, target_grid=grid_compare)
+            df_detail = generate_detailed_metrics_df(fac_compare, target_grid=grid_compare)
 
             self.cached_metrics[model_id] = {"metrics": cm, "perc": cp, "df": df_detail}
 
@@ -7693,6 +8206,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Atualiza UI
         if hasattr(self, "update_comparison_tables"): self.update_comparison_tables()
+        if hasattr(self, "refresh_vpc_controls"):
+            self.refresh_vpc_controls(preserve_selection=True)
         if hasattr(self, "refresh_comparison_active_view"): self.refresh_comparison_active_view()
 
     # --- FUNÇÕES VISUAIS (MAPS, 3D, ETC) ---
@@ -8006,7 +8521,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.compare_tab, "Comparação")
 
         self.res_table_base_cmp.itemChanged.connect(self.update_base_reservoir_compare)
-        self.res_table_comp_cmp.itemChanged.connect(self.update_comp_reservoir_compare)
+        self.res_table_comp_cmp.itemChanged.connect(self.update_compare_reservoir_compare)
 
 
     def update_comparison_tables(self):
@@ -8044,12 +8559,12 @@ class MainWindow(QtWidgets.QMainWindow):
         def get(m, k):
             return m.get(k) if m else None
 
-        rows.append(("NTG", get(m0, "ntg"), get(m1, "ntg")))
-        rows.append(("Total Cel", get(m0, "total_cells"), get(m1, "total_cells")))
-        rows.append(("Res Cel", get(m0, "res_cells"), get(m1, "res_cells")))
-        rows.append(("Conectividade", get(m0, "connected_fraction"), get(m1, "connected_fraction")))
-        rows.append(("Clusters", get(m0, "n_clusters"), get(m1, "n_clusters")))
-        rows.append(("Maior Cluster", get(m0, "largest_size"), get(m1, "largest_size")))
+        rows.append(("Proporção volumétrica alvo", get(m0, "target_volume_fraction"), get(m1, "target_volume_fraction")))
+        rows.append(("Células ativas", get(m0, "active_cells"), get(m1, "active_cells")))
+        rows.append(("Células-alvo", get(m0, "target_cells"), get(m1, "target_cells")))
+        rows.append(("Conectividade volumétrica", get(m0, "connected_volume_fraction"), get(m1, "connected_volume_fraction")))
+        rows.append(("Nº de corpos", get(m0, "n_bodies"), get(m1, "n_bodies")))
+        rows.append(("Células no maior corpo", get(m0, "largest_body_cells"), get(m1, "largest_body_cells")))
 
         self.global_compare_table.setRowCount(len(rows))
         for i, (label, a, b) in enumerate(rows):
@@ -9254,13 +9769,13 @@ class MainWindow(QtWidgets.QMainWindow):
         t_glob.setHorizontalHeaderLabels(headers_glob)
 
         metrics_list = [
-            ("NTG", "ntg", "{:.3f}"),
-            ("Células Totais", "total_cells", "{:d}"),
-            ("Células Res.", "res_cells", "{:d}"),
-            ("Conectividade", "connected_fraction", "{:.3f}"),
-            ("Clusters", "n_clusters", "{:d}"),
-            ("Maior Cluster", "largest_size", "{:d}"),
-            ("Vol. Res (m3)", "reservoir_volume", "{:.2e}"),
+            ("Proporção volumétrica alvo", "target_volume_fraction", "{:.3f}"),
+            ("Células ativas", "active_cells", "{:d}"),
+            ("Células-alvo", "target_cells", "{:d}"),
+            ("Conectividade volumétrica", "connected_volume_fraction", "{:.3f}"),
+            ("Nº de corpos", "n_bodies", "{:d}"),
+            ("Células no maior corpo", "largest_body_cells", "{:d}"),
+            ("Volume-alvo (m³)", "target_volume", "{:.2e}"),
         ]
 
         t_glob.setRowCount(len(metrics_list))
@@ -9584,7 +10099,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 1. Recalcula Métricas (Silent)
         if model_data.get("facies") is not None:
-            m, p = compute_global_metrics_for_array(model_data["facies"], target_set)
+            m, p = compute_global_metrics_for_array(
+                model_data["facies"],
+                target_set,
+                target_grid=model_data.get("grid"),
+            )
             cache = self.cached_metrics.setdefault(model_key, {"metrics": None, "perc": None, "df": None})
             cache["metrics"] = m; cache["perc"] = p
 
@@ -9761,12 +10280,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.global_compare_table.setHorizontalHeaderLabels(headers)
 
         metrics_rows = [
-            ("Proporção", "ntg", "{:.3f}"),
+            ("Proporção volumétrica", "target_volume_fraction", "{:.3f}"),
             ("Total Células", "total_cells", "{:d}"),
-            ("Células Selecionadas", "res_cells", "{:d}"),
-            ("Conectividade", "connected_fraction", "{:.3f}"),
-            ("Nº Clusters", "n_clusters", "{:d}"),
-            ("Maior Cluster", "largest_size", "{:d}"),
+            ("Células-alvo", "target_cells", "{:d}"),
+            ("Fração conectada (volume)", "connected_volume_fraction", "{:.3f}"),
+            ("Nº corpos conectados", "n_bodies", "{:d}"),
+            ("Maior corpo (células)", "largest_body_cells", "{:d}"),
         ]
 
         self.global_compare_table.setRowCount(len(metrics_rows))
@@ -10091,73 +10610,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Ajusta o tamanho se abrir (70% 3D, 30% 2D)
         if show:
             self.main_split_compare.setSizes([700, 300])
-
-    def generate_detailed_metrics_df(self, facies_array):
-        """Gera o DataFrame detalhado para a tabela de métricas."""
-        # Garante array numpy
-        arr = np.asarray(facies_array, dtype=int)
-        total_cells = arr.size
-        
-        # Reutiliza volumes e Z do grid base (assumindo mesma geometria)
-        # Se os grids tiverem geometrias diferentes, isso precisaria ser ajustado.
-        vols = _get_cell_volumes() 
-        z_vals = _get_cell_z_coords()
-        
-        unique_f = np.unique(arr)
-        data_list = []
-        
-        for f in unique_f:
-            mask = (arr == f)
-            count = int(mask.sum())
-            if count == 0: continue
-            
-            # Estatísticas Básicas
-            frac = count / total_cells
-            vol_tot = float(vols[mask].sum())
-            
-            # Análise de Clusters (Labeling)
-            mask_3d = mask.reshape((nx, ny, nz), order="F")
-            struct = generate_binary_structure(3, 1)
-            # Transpose para ordem (z,y,x) do scipy
-            lbl_3d, n_clus = label(mask_3d.transpose(2,1,0), structure=struct)
-            
-            largest_size = 0
-            vol_largest = 0.0
-            thick = 0.0
-            
-            if n_clus > 0:
-                # Flatten de volta para contar
-                lbl_flat = lbl_3d.transpose(2,1,0).reshape(-1, order="F")
-                counts = np.bincount(lbl_flat)
-                counts[0] = 0 # ignora fundo
-                
-                largest_idx = counts.argmax()
-                largest_size = counts[largest_idx]
-                
-                # Propriedades do Maior Cluster
-                mask_largest = (lbl_flat == largest_idx)
-                vol_largest = float(vols[mask_largest].sum())
-                
-                zs = z_vals[mask_largest]
-                if zs.size > 0:
-                    thick = float(zs.max() - zs.min())
-            
-            conn = largest_size / count if count > 0 else 0
-            
-            data_list.append({
-                "facies": int(f),
-                "cells": count,
-                "fraction": frac,
-                "n_clusters": n_clus,
-                "largest_size": largest_size,
-                "connected_fraction": conn,
-                "volume_total": vol_tot,
-                "volume_largest_cluster": vol_largest,
-                "thickness_largest_cluster": thick
-                # Adicione percolaçao aqui se desejar (requer mais calculo)
-            })
-            
-        return pd.DataFrame(data_list)
 
     def recalc_vertical_metrics(self, target_grid, facies_array, reservoir_set):
         """Wrapper centralizado: métricas verticais passam a ser calculadas em analysis.py."""
@@ -15173,4 +15625,3 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             super().closeEvent(event)
     
-

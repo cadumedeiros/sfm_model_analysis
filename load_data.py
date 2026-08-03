@@ -12,6 +12,7 @@ IMPORTANTE:
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Tuple
 
@@ -223,18 +224,30 @@ def load_grid_from_grdecl(
     *,
     facies_keyword: str = "Facies",
     thickness_keyword: str = "StratigraphicThickness",
+    load_all_properties: bool = True,
     flip_k: bool = FLIP_K_DEFAULT,
     apply_reflection: bool = APPLY_REFLECTION,
     anchor_y: float | None = ANCHOR_Y,
     verbose: bool = VERBOSE_DEFAULT,
 ):
     """
-    Carrega geometria + Facies + Propriedades Petrofísicas (PORO, PERM...).
+    Carrega geometria, fácies e espessura estratigráfica.
+
+    Quando ``load_all_properties`` é verdadeiro, também procura outras
+    propriedades numéricas com uma amostra por célula. O extrator em lote usa
+    ``False`` porque os descritores da tabela mestre não dependem dessas
+    propriedades e a varredura de todas as keywords encarece a leitura.
     """
     if verbose:
         print(f"\nLendo Grid: {grdecl_path}...")
 
     g = pv.read_grdecl(grdecl_path)
+    if not load_all_properties:
+        # O leitor pode trazer propriedades adicionais automaticamente.
+        # Elas não entram nos descritores e não devem permanecer na memória
+        # durante o lote.
+        for name in list(g.cell_data.keys()):
+            del g.cell_data[name]
 
     raw_bounds = g.bounds
     if verbose:
@@ -277,24 +290,35 @@ def load_grid_from_grdecl(
     except Exception as e:
         if verbose: print(f"[WARN] Falha ao ler '{thickness_keyword}': {e}")
 
-    # 4. --- Auto: Leitura de propriedades numéricas (qualquer keyword com nx*ny*nz) ---
-    auto_exclude = {
-        "SPECGRID", "COORD", "ZCORN", "MAPAXES", "MAPUNITS", "GRIDUNIT",
-        facies_keyword, thickness_keyword, "Facies", "StratigraphicThickness", "cell_thickness",
-    }
+    # 4. --- Auto: propriedades numéricas opcionais ---
+    if load_all_properties:
+        auto_exclude = {
+            "SPECGRID", "COORD", "ZCORN", "MAPAXES", "MAPUNITS", "GRIDUNIT",
+            facies_keyword, thickness_keyword, "Facies",
+            "StratigraphicThickness", "cell_thickness",
+        }
 
-    auto_arrays = discover_numeric_keyword_arrays(
-        grdecl_path, nx_, ny_, nz_, exclude=auto_exclude
-    )
+        auto_arrays = discover_numeric_keyword_arrays(
+            grdecl_path, nx_, ny_, nz_, exclude=auto_exclude
+        )
 
-    for key, arr_raw in auto_arrays.items():
-        try:
-            # Reshape e Flip K (importante para alinhar com a geometria)
-            arr_1d = _reshape_flat(arr_raw, nx_, ny_, nz_, flip_k=flip_k, dtype=float)
-            g.cell_data[key] = arr_1d
-            if verbose: print(f"[INFO] Propriedade carregada: {key}")
-        except Exception as e:
-            if verbose: print(f"[WARN] Erro ao ler propriedade '{key}': {e}")
+        for key, arr_raw in auto_arrays.items():
+            try:
+                # Reshape e Flip K (importante para alinhar com a geometria)
+                arr_1d = _reshape_flat(
+                    arr_raw,
+                    nx_,
+                    ny_,
+                    nz_,
+                    flip_k=flip_k,
+                    dtype=float,
+                )
+                g.cell_data[key] = arr_1d
+                if verbose:
+                    print(f"[INFO] Propriedade carregada: {key}")
+            except Exception as e:
+                if verbose:
+                    print(f"[WARN] Erro ao ler propriedade '{key}': {e}")
 
     # 5. Normaliza aliases de espessura
     try:
@@ -336,6 +360,13 @@ def load_facies_from_grdecl(
 # =========================
 
 def _init_default_globals():
+    skip_default = os.environ.get(
+        "GRID_VIEW_ANALYSIS_SKIP_DEFAULT_GRID",
+        "",
+    ).strip().lower()
+    if skip_default in {"1", "true", "yes", "sim"}:
+        return None, None, None, None, None
+
     g, f = load_grid_from_grdecl(DEFAULT_GRDECL_PATH, flip_k=FLIP_K_DEFAULT, verbose=VERBOSE_DEFAULT)
     nx_, ny_, nz_ = read_specgrid(DEFAULT_GRDECL_PATH)
     return g, f, nx_, ny_, nz_

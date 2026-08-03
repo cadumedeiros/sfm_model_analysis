@@ -9,7 +9,6 @@ from scipy.ndimage import label as nd_label, generate_binary_structure
 from load_data import grid as global_grid, nx, ny, nz
 from config import load_facies_colors
 from analysis import (
-    make_thickness_2d_from_grid,
     compute_vertical_metrics_for_grid,
     get_vertical_metric_presets,
     is_vertical_metric_normalized_name,

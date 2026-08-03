@@ -1,0 +1,2 @@
+simulation_id,status,message,processing_seconds,output_path,started_at_utc,finished_at_utc
+base,ok,,0.9240818000398576,C:\Users\08595850933\Documents\Projetos\sfm_model_analysis\grids\_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl,2026-07-30T16:28:36+00:00,2026-07-30T16:28:37+00:00
