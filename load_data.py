@@ -25,7 +25,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/_BENCHMARK_MCHAVES_Inferior_2025-1-Tck123_SIM_BaseModel_.grdecl"
+DEFAULT_GRDECL_PATH = "grids/GPM_GR_convertido.grdecl"
 
 
 FLIP_K_DEFAULT = True

@@ -32,7 +32,7 @@ def load_facies_reference(path=None):
     `facie_id` é `int` quando possível, senão `str`.
     """
     if path is None:
-        path = os.path.join(os.path.dirname(__file__), "assets/color_reference_facies.txt")
+        path = os.path.join(os.path.dirname(__file__), "assets/GR_color_facies.txt")
 
     ref = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
