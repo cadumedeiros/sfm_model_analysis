@@ -369,49 +369,121 @@ def _extract_parameters(record, parameter_columns=None):
 
 
 def complete_vpc_facies(vpc_df, facies_ids=None):
-    """Inclui proporções zero para fácies ausentes em um modelo do ensemble."""
+    """Inclui proporções zero para fácies ausentes em uma camada ativa."""
     if vpc_df is None or vpc_df.empty:
         return pd.DataFrame() if vpc_df is None else vpc_df
 
     if facies_ids is None:
         facies_ids = sorted(
-            int(v) for v in vpc_df["facies"].dropna().unique()
+            int(value)
+            for value in vpc_df["facies"].dropna().unique()
         )
     else:
-        facies_ids = sorted({int(v) for v in facies_ids})
+        facies_ids = sorted({int(value) for value in facies_ids})
+
     layer_meta_columns = [
         "model_id",
         "model_name",
         "layer_k",
         "stratigraphic_coordinate",
         "layer_mean_z",
-        "active_area",
         "active_cells",
+        "active_volume",
+        "candidate_cells",
+        "excluded_cells",
     ]
-    layer_meta = vpc_df[layer_meta_columns].drop_duplicates(["model_id", "layer_k"])
+
+    layer_meta = (
+        vpc_df[layer_meta_columns]
+        .drop_duplicates(["model_id", "layer_k"])
+    )
+
+    value_columns = [
+        "model_id",
+        "layer_k",
+        "facies",
+        "vpc_proportion",
+        "facies_cells",
+        "volume_proportion",
+        "facies_volume",
+    ]
+
     completed = []
-    for model_id, meta in layer_meta.groupby("model_id", sort=False, dropna=False):
+
+    for model_id, meta in layer_meta.groupby(
+        "model_id",
+        sort=False,
+        dropna=False,
+    ):
         product = pd.MultiIndex.from_product(
-            [meta["layer_k"].astype(int).tolist(), facies_ids],
+            [
+                meta["layer_k"].astype(int).tolist(),
+                facies_ids,
+            ],
             names=["layer_k", "facies"],
         ).to_frame(index=False)
+
         product["model_id"] = model_id
-        product = product.merge(meta, on=["model_id", "layer_k"], how="left")
-        values = vpc_df.loc[vpc_df["model_id"].astype(str) == str(model_id), [
-            "model_id", "layer_k", "facies", "area_proportion", "facies_area"
-        ]]
-        product = product.merge(values, on=["model_id", "layer_k", "facies"], how="left")
-        has_area = product["active_area"].fillna(0.0) > 0.0
-        product.loc[has_area, "area_proportion"] = product.loc[has_area, "area_proportion"].fillna(0.0)
-        product["facies_area"] = product["facies_area"].fillna(0.0)
+
+        product = product.merge(
+            meta,
+            on=["model_id", "layer_k"],
+            how="left",
+        )
+
+        values = vpc_df.loc[
+            vpc_df["model_id"].astype(str) == str(model_id),
+            value_columns,
+        ]
+
+        product = product.merge(
+            values,
+            on=["model_id", "layer_k", "facies"],
+            how="left",
+        )
+
+        has_cells = product["active_cells"].fillna(0) > 0
+        has_volume = product["active_volume"].fillna(0.0) > 0.0
+
+        product.loc[has_cells, "vpc_proportion"] = (
+            product.loc[has_cells, "vpc_proportion"].fillna(0.0)
+        )
+
+        product.loc[has_volume, "volume_proportion"] = (
+            product.loc[has_volume, "volume_proportion"].fillna(0.0)
+        )
+
+        product["facies_cells"] = (
+            product["facies_cells"].fillna(0).astype(int)
+        )
+
+        product["facies_volume"] = (
+            product["facies_volume"].fillna(0.0)
+        )
+
         completed.append(product)
 
     columns = [
-        "model_id", "model_name", "layer_k", "stratigraphic_coordinate",
-        "layer_mean_z", "facies", "area_proportion", "facies_area",
-        "active_area", "active_cells",
+        "model_id",
+        "model_name",
+        "layer_k",
+        "stratigraphic_coordinate",
+        "layer_mean_z",
+        "facies",
+        "vpc_proportion",
+        "facies_cells",
+        "active_cells",
+        "volume_proportion",
+        "facies_volume",
+        "active_volume",
+        "candidate_cells",
+        "excluded_cells",
     ]
-    return pd.concat(completed, ignore_index=True).reindex(columns=columns)
+
+    return (
+        pd.concat(completed, ignore_index=True)
+        .reindex(columns=columns)
+    )
 
 
 def complete_master_facies_fractions(master_df, facies_ids=None):

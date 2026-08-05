@@ -1038,60 +1038,151 @@ def compute_vpc(
     facies_ids=None,
     model_id=None,
     model_name=None,
+    min_thickness=0.0,
 ):
-    """Calcula a Vertical Proportion Curve por proporção areal de camada.
+    """
+    Calcula a Vertical Proportion Curve pela frequência lateral das fácies.
 
-    A área horizontal é estimada por ``volume / espessura estratigráfica``.
-    O resultado longo contém todas as fácies em todas as camadas, inclusive
-    proporções zero, o que simplifica comparações entre modelos.
+    Como todas as células possuem o mesmo suporte X-Y, a proporção por
+    contagem equivale à proporção areal.
+
+    A função também calcula, separadamente, a proporção volumétrica de cada
+    fácies por camada.
+
+    min_thickness:
+        Limite usado apenas para remover células colapsadas. Não é usado
+        como peso da VPC.
     """
     arr = np.asarray(facies_array, dtype=int).ravel()
     shape = _resolve_grid_shape(arr, grid_shape)
     nx_m, ny_m, nz_m = shape
-    volumes = _get_cell_volumes(target_grid, strict=True)
-    thickness = _get_cell_thickness(target_grid, strict=True)
-    active = get_active_cell_mask(
+
+    volumes = np.asarray(
+        _get_cell_volumes(target_grid, strict=True),
+        dtype=float,
+    ).ravel()
+
+    thickness = np.asarray(
+        _get_cell_thickness(target_grid, strict=True),
+        dtype=float,
+    ).ravel()
+
+    z_coords = np.asarray(
+        _get_cell_z_coords(target_grid),
+        dtype=float,
+    ).ravel()
+
+    if volumes.size != arr.size:
+        raise ValueError(
+            f"Volumes ({volumes.size}) e fácies ({arr.size}) "
+            "possuem tamanhos diferentes."
+        )
+
+    if thickness.size != arr.size:
+        raise ValueError(
+            f"Espessuras ({thickness.size}) e fácies ({arr.size}) "
+            "possuem tamanhos diferentes."
+        )
+
+    if z_coords.size != arr.size:
+        raise ValueError(
+            f"Coordenadas Z ({z_coords.size}) e fácies ({arr.size}) "
+            "possuem tamanhos diferentes."
+        )
+
+    # Máscara categórica e volumétrica básica.
+    candidate = get_active_cell_mask(
         arr,
         target_grid,
         inactive_facies=inactive_facies,
         active_mask=active_mask,
-        require_positive_thickness=True,
+        require_positive_thickness=False,
     )
 
-    area = np.zeros(arr.size, dtype=float)
-    valid_area = active & np.isfinite(volumes) & np.isfinite(thickness) & (thickness > 0.0)
-    area[valid_area] = volumes[valid_area] / thickness[valid_area]
-    area[~np.isfinite(area) | (area <= 0.0)] = 0.0
+    min_thickness = max(0.0, float(min_thickness))
+
+    # A espessura é usada somente para identificar células inválidas ou
+    # colapsadas. Ela não participa do peso da VPC.
+    valid = (
+        candidate
+        & np.isfinite(volumes)
+        & (volumes > 0.0)
+        & np.isfinite(thickness)
+        & (thickness > min_thickness)
+    )
 
     arr_3d = arr.reshape(shape, order="F")
-    area_3d = area.reshape(shape, order="F")
-    active_3d = active.reshape(shape, order="F")
-    z_3d = np.asarray(_get_cell_z_coords(target_grid), dtype=float).reshape(shape, order="F")
+    volumes_3d = volumes.reshape(shape, order="F")
+    candidate_3d = candidate.reshape(shape, order="F")
+    valid_3d = valid.reshape(shape, order="F")
+    z_3d = z_coords.reshape(shape, order="F")
 
     if facies_ids is None:
-        ids = sorted(int(v) for v in np.unique(arr[active]))
+        ids = (
+            sorted(int(value) for value in np.unique(arr[valid]))
+            if np.any(valid)
+            else []
+        )
     else:
         ids = sorted(_normalize_facies_set(facies_ids))
 
     records = []
+
     for layer_k in range(nz_m):
-        layer_active = active_3d[:, :, layer_k]
-        layer_area = area_3d[:, :, layer_k]
-        weights = np.where(layer_active, layer_area, 0.0)
-        active_area = float(np.sum(weights))
-        active_cells = int(np.sum(layer_active))
+        facies_layer = arr_3d[:, :, layer_k]
+        volume_layer = volumes_3d[:, :, layer_k]
+        candidate_layer = candidate_3d[:, :, layer_k]
+        valid_layer = valid_3d[:, :, layer_k]
         z_layer = z_3d[:, :, layer_k]
-        z_valid = layer_active & np.isfinite(z_layer) & (weights > 0.0)
-        z_weight = float(np.sum(weights[z_valid]))
-        if z_weight > 0.0:
-            mean_z = float(np.sum(z_layer[z_valid] * weights[z_valid]) / z_weight)
-        else:
-            mean_z = np.nan
-        coordinate = float(layer_k / (nz_m - 1)) if nz_m > 1 else 0.0
+
+        candidate_cells = int(np.sum(candidate_layer))
+        active_cells = int(np.sum(valid_layer))
+        excluded_cells = candidate_cells - active_cells
+
+        active_volume = (
+            float(np.sum(volume_layer[valid_layer]))
+            if active_cells > 0
+            else 0.0
+        )
+
+        # Posição média da camada sem ponderação por V/h.
+        z_valid = valid_layer & np.isfinite(z_layer)
+        mean_z = (
+            float(np.mean(z_layer[z_valid]))
+            if np.any(z_valid)
+            else np.nan
+        )
+
+        coordinate = (
+            float(layer_k / (nz_m - 1))
+            if nz_m > 1
+            else 0.0
+        )
 
         for facies_id in ids:
-            facies_area = float(np.sum(weights[arr_3d[:, :, layer_k] == int(facies_id)]))
-            proportion = (facies_area / active_area) if active_area > 0.0 else np.nan
+            facies_mask = valid_layer & (facies_layer == int(facies_id))
+
+            facies_cells = int(np.sum(facies_mask))
+            facies_volume = (
+                float(np.sum(volume_layer[facies_mask]))
+                if facies_cells > 0
+                else 0.0
+            )
+
+            # VPC padrão: frequência entre as posições laterais válidas.
+            vpc_proportion = (
+                facies_cells / active_cells
+                if active_cells > 0
+                else np.nan
+            )
+
+            # Estatística complementar: fração do volume de rocha.
+            volume_proportion = (
+                facies_volume / active_volume
+                if active_volume > 0.0
+                else np.nan
+            )
+
             records.append({
                 "model_id": model_id,
                 "model_name": model_name,
@@ -1099,31 +1190,115 @@ def compute_vpc(
                 "stratigraphic_coordinate": coordinate,
                 "layer_mean_z": mean_z,
                 "facies": int(facies_id),
-                "area_proportion": float(proportion) if np.isfinite(proportion) else np.nan,
-                "facies_area": facies_area,
-                "active_area": active_area,
+
+                "vpc_proportion": float(vpc_proportion)
+                if np.isfinite(vpc_proportion)
+                else np.nan,
+
+                "facies_cells": facies_cells,
                 "active_cells": active_cells,
+
+                "volume_proportion": float(volume_proportion)
+                if np.isfinite(volume_proportion)
+                else np.nan,
+
+                "facies_volume": facies_volume,
+                "active_volume": active_volume,
+
+                "candidate_cells": candidate_cells,
+                "excluded_cells": excluded_cells,
             })
 
-    return pd.DataFrame.from_records(records)
+    columns = [
+        "model_id",
+        "model_name",
+        "layer_k",
+        "stratigraphic_coordinate",
+        "layer_mean_z",
+        "facies",
+        "vpc_proportion",
+        "facies_cells",
+        "active_cells",
+        "volume_proportion",
+        "facies_volume",
+        "active_volume",
+        "candidate_cells",
+        "excluded_cells",
+    ]
+
+    return pd.DataFrame.from_records(records, columns=columns)
 
 
 def compute_vpc_distance(vpc_df, reference_vpc_df):
-    """Calcula a distância RMSE entre duas VPCs no espaço camada-fácies."""
-    required = {"layer_k", "facies", "area_proportion"}
+    """Calcula o RMSE entre duas VPCs no espaço camada-fácies."""
     if vpc_df is None or reference_vpc_df is None:
         return np.nan
-    if not required.issubset(vpc_df.columns) or not required.issubset(reference_vpc_df.columns):
-        raise ValueError("As tabelas VPC não possuem as colunas obrigatórias.")
 
-    left = vpc_df.groupby(["layer_k", "facies"], as_index=False)["area_proportion"].mean()
-    right = reference_vpc_df.groupby(["layer_k", "facies"], as_index=False)["area_proportion"].mean()
-    merged = left.merge(right, on=["layer_k", "facies"], how="outer", suffixes=("_model", "_reference"))
-    a = merged["area_proportion_model"].fillna(0.0).to_numpy(dtype=float)
-    b = merged["area_proportion_reference"].fillna(0.0).to_numpy(dtype=float)
-    if a.size == 0:
+    required = {"layer_k", "facies"}
+
+    if not required.issubset(vpc_df.columns):
+        raise ValueError("A tabela VPC do modelo não possui as colunas obrigatórias.")
+
+    if not required.issubset(reference_vpc_df.columns):
+        raise ValueError("A tabela VPC de referência não possui as colunas obrigatórias.")
+
+    # Compatibilidade com tabelas antigas já exportadas.
+    model_column = (
+        "vpc_proportion"
+        if "vpc_proportion" in vpc_df.columns
+        else "area_proportion"
+    )
+
+    reference_column = (
+        "vpc_proportion"
+        if "vpc_proportion" in reference_vpc_df.columns
+        else "area_proportion"
+    )
+
+    if model_column not in vpc_df.columns:
+        raise ValueError("A tabela VPC do modelo não possui uma coluna de proporção.")
+
+    if reference_column not in reference_vpc_df.columns:
+        raise ValueError("A tabela VPC de referência não possui uma coluna de proporção.")
+
+    left = (
+        vpc_df
+        .groupby(["layer_k", "facies"], as_index=False)[model_column]
+        .mean()
+        .rename(columns={model_column: "proportion_model"})
+    )
+
+    right = (
+        reference_vpc_df
+        .groupby(["layer_k", "facies"], as_index=False)[reference_column]
+        .mean()
+        .rename(columns={reference_column: "proportion_reference"})
+    )
+
+    merged = left.merge(
+        right,
+        on=["layer_k", "facies"],
+        how="outer",
+    )
+
+    model_values = (
+        merged["proportion_model"]
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+
+    reference_values = (
+        merged["proportion_reference"]
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+
+    if model_values.size == 0:
         return np.nan
-    return float(np.sqrt(np.mean((a - b) ** 2)))
+
+    return float(
+        np.sqrt(np.mean((model_values - reference_values) ** 2))
+    )
 
 # =============================================================================
 # ANÁLISE DE POÇOS

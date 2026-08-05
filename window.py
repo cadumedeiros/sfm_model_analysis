@@ -6893,18 +6893,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _vpc_layer_series(vpc_df, facies_id, layer_ids):
-        """Alinha uma fácies às camadas; ausência em camada ativa vira zero."""
+        """Alinha a VPC de uma fácies às camadas do modelo."""
         values = []
-        meta = vpc_df.drop_duplicates("layer_k").set_index("layer_k")
-        subset = vpc_df.loc[vpc_df["facies"].astype(int) == int(facies_id)]
-        series = subset.set_index("layer_k")["area_proportion"] if not subset.empty else pd.Series(dtype=float)
+
+        meta = (
+            vpc_df
+            .drop_duplicates("layer_k")
+            .set_index("layer_k")
+        )
+
+        subset = vpc_df.loc[
+            vpc_df["facies"].astype(int) == int(facies_id)
+        ]
+
+        series = (
+            subset.set_index("layer_k")["vpc_proportion"]
+            if not subset.empty
+            else pd.Series(dtype=float)
+        )
+
         for layer_k in layer_ids:
-            if layer_k not in meta.index or float(meta.at[layer_k, "active_area"]) <= 0.0:
+            if (
+                layer_k not in meta.index
+                or int(meta.at[layer_k, "active_cells"]) <= 0
+            ):
                 values.append(np.nan)
             elif layer_k in series.index:
                 values.append(float(series.at[layer_k]))
             else:
                 values.append(0.0)
+
         return np.asarray(values, dtype=float)
 
     def refresh_vpc_view(self, *args):
@@ -6991,7 +7009,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 title = "VPC por modelo"
 
             ax.set_xlim(0.0, 1.0)
-            ax.set_xlabel("Proporção areal da fácies")
+            ax.set_xlabel("Proporção de ocorrência da fácies")
             ax.set_ylabel("Coordenada estratigráfica normalizada")
             ax.set_title(title)
             ax.grid(True, alpha=0.25)

@@ -25,7 +25,7 @@ from config import ANCHOR_Y, APPLY_REFLECTION
 # =========================
 # Defaults do projeto
 # =========================
-DEFAULT_GRDECL_PATH = "grids/GPM_GR_convertido.grdecl"
+DEFAULT_GRDECL_PATH = "grids/Dionisos_GR.grdecl"
 
 
 FLIP_K_DEFAULT = True
