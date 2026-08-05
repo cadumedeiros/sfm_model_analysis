@@ -44,9 +44,60 @@ def _get_cell_volumes(target_grid=None, *, strict=False):
     return vol_arr
 
 def _get_cell_z_coords(target_grid=None):
+    """
+    Retorna uma coordenada Z para cada célula do grid, preservando
+    os índices originais mesmo quando existem células vazias.
+    """
     g = target_grid if target_grid is not None else grid
-    centers = g.cell_centers() if callable(getattr(g, "cell_centers", None)) else g.cell_centers
-    return centers.points[:, 2]
+    n_cells = int(g.n_cells)
+
+    z_coords = np.full(n_cells, np.nan, dtype=float)
+
+    if n_cells == 0:
+        return z_coords
+
+    id_key = "__cell_id_for_z_coords__"
+    had_key = id_key in g.cell_data
+
+    previous_values = (
+        np.asarray(g.cell_data[id_key]).copy()
+        if had_key
+        else None
+    )
+
+    try:
+        # Permite recuperar o índice original das células não vazias.
+        g.cell_data[id_key] = np.arange(n_cells, dtype=np.int64)
+
+        centers = g.cell_centers(pass_cell_data=True)
+
+        cell_ids = np.asarray(
+            centers.point_data[id_key],
+            dtype=np.int64,
+        ).ravel()
+
+        points = np.asarray(centers.points, dtype=float)
+
+        if points.shape[0] != cell_ids.size:
+            raise ValueError(
+                "Quantidade de centros incompatível com os IDs das células."
+            )
+
+        valid = (
+            (cell_ids >= 0)
+            & (cell_ids < n_cells)
+            & np.isfinite(points[:, 2])
+        )
+
+        z_coords[cell_ids[valid]] = points[valid, 2]
+
+    finally:
+        if had_key:
+            g.cell_data[id_key] = previous_values
+        elif id_key in g.cell_data:
+            del g.cell_data[id_key]
+
+    return z_coords
 
 def _get_cell_thickness(target_grid=None, *, strict=False):
     """
@@ -195,8 +246,14 @@ def _calc_stats_for_subset(subset_mask, volumes, z_coords):
     vol_total = float(volumes[subset_mask].sum())
     
     # Espessura bruta: Amplitude Z (Top - Base) onde a fácies ocorre
-    z_vals = z_coords[subset_mask]
-    thickness_gross = float(z_vals.max() - z_vals.min()) if count > 0 else 0.0
+    z_vals = np.asarray(z_coords[subset_mask], dtype=float)
+    z_vals = z_vals[np.isfinite(z_vals)]
+
+    thickness_gross = (
+        float(z_vals.max() - z_vals.min())
+        if z_vals.size > 0
+        else 0.0
+    )
     
     return {
         "cells": count,
