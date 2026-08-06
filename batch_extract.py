@@ -615,12 +615,21 @@ def _add_vpc_distance_to_base(
 
     values = vpc.copy()
     values["_batch_id"] = values["model_id"].map(normalize_simulation_id)
+
+    # Permite consolidar tanto resultados novos quanto tabelas antigas.
+    proportion_column = (
+        "vpc_proportion"
+        if "vpc_proportion" in values.columns
+        else "area_proportion"
+    )
+
     matrix = values.pivot_table(
         index="_batch_id",
         columns=["layer_k", "facies"],
-        values="area_proportion",
+        values=proportion_column,
         aggfunc="mean",
     ).fillna(0.0)
+
     if "base" not in matrix.index:
         return frame
     differences = matrix.subtract(matrix.loc["base"], axis="columns")
