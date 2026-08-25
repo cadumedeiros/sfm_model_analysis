@@ -264,7 +264,7 @@ class Well:
             if arr.notna().any():
                 poly.point_data[str(col)] = arr.to_numpy(dtype=float)
 
-        return poly.tube(radius=50)
+        return poly.tube(radius=30)
 
     def get_markers_mesh(self, markers_list, z_exag=1.0):
         if self.data is None or not markers_list: return None, None
